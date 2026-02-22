@@ -71,9 +71,10 @@ echo "Flannel started with PID $FLANNEL_PID"
 if [ "$HPK_ROLE" = "controller" ]; then
     echo "Starting K3s Server..."
     k3s server \
-      --bind-address ${HOST_IP} \
+      --bind-address 0.0.0.0 \
       --advertise-address ${HOST_IP} \
       --tls-san ${HOST_IP} \
+      --tls-san 0.0.0.0 \
       --disable-agent \
       --disable servicelb \
       --disable traefik \
@@ -81,6 +82,9 @@ if [ "$HPK_ROLE" = "controller" ]; then
       --disable metrics-server \
       --disable-cloud-controller \
       --write-kubeconfig-mode 777 \
+      --egress-selector-mode=disabled \
+      --kube-apiserver-arg=kubelet-certificate-authority=/var/lib/rancher/k3s/server/tls/server-ca.crt \
+      --kube-apiserver-arg=kubelet-preferred-address-types=InternalIP,ExternalIP,Hostname \
       >> /var/log/k3s.log 2>&1 &
     
     # Wait for K3s to create kubeconfig and node-token
@@ -95,11 +99,35 @@ if [ "$HPK_ROLE" = "controller" ]; then
     # Copy kubeconfig and node-token to shared directory
     echo "Copying kubeconfig and node-token to /var/lib/hpk..."
     cp /etc/rancher/k3s/k3s.yaml /var/lib/hpk/kubeconfig
+    # Replace 0.0.0.0 or 127.0.0.1 in kubeconfig server URL with actual HOST_IP
+    sed -i "s|https://0.0.0.0:6443|https://${HOST_IP}:6443|g" /var/lib/hpk/kubeconfig
+    sed -i "s|https://127.0.0.1:6443|https://${HOST_IP}:6443|g" /var/lib/hpk/kubeconfig
     cp /var/lib/rancher/k3s/server/node-token /var/lib/hpk/node-token
     chmod 644 /var/lib/hpk/kubeconfig /var/lib/hpk/node-token
     
     # Generate webhook certificate for hpk-kubelet
     echo "Generating webhook certificate..."
+    
+    # Build alt_names section with all node IPs
+    ALT_NAMES="IP.1 = 127.0.0.1
+IP.2 = ${HOST_IP}"
+    
+    # Auto-generate node IPs based on NUM_NODES
+    NUM_NODES=${NUM_NODES:-1}
+    if [ "$NUM_NODES" -gt 1 ]; then
+        # Extract the base IP and last octet from HOST_IP
+        BASE_IP=$(echo $HOST_IP | sed 's/\.[0-9]*$/\./')
+        LAST_OCTET=$(echo $HOST_IP | awk -F'.' '{print $NF}')
+        
+        counter=3
+        for ((i=1; i<NUM_NODES; i++)); do
+            NODE_IP="${BASE_IP}$((LAST_OCTET + i))"
+            ALT_NAMES="${ALT_NAMES}
+IP.${counter} = ${NODE_IP}"
+            ((counter++))
+        done
+    fi
+    
     cat >kubelet.cnf <<EOF
 [req]
 req_extensions = v3_req
@@ -114,8 +142,7 @@ extendedKeyUsage = serverAuth, clientAuth
 subjectAltName = @alt_names
 
 [alt_names]
-IP.1 = 127.0.0.1
-IP.2 = ${HOST_IP}
+${ALT_NAMES}
 EOF
     TLS_PATH=/var/lib/rancher/k3s/server/tls
     if [ ! -f kubelet.key ]; then openssl genrsa -out kubelet.key 2048; fi
@@ -171,6 +198,7 @@ hpk-kubelet \
   --run-slurm=false \
   --apptainer=hpktainer \
   --nodename=$(hostname) \
+  --disable-taint=true \
   ${PAUSE_IMAGE:+--pause-image=$PAUSE_IMAGE} \
   >> /var/log/hpk-kubelet.log 2>&1 &
 
