@@ -70,15 +70,15 @@ func TotalResources() corev1.ResourceList {
 		totalCPU.Add(*cpuQuantity)
 
 		mem := getTotalMemory()
-		memQuantity := resource.NewQuantity(int64(mem), resource.DecimalSI)
+		memQuantity := resource.NewScaledQuantity(int64(mem), resource.Mega)
 		totalMem.Add(*memQuantity)
 
 		storage := getTotalStorage("/")
-		storageQuantity := resource.NewQuantity(int64(storage), resource.DecimalSI)
+		storageQuantity := resource.NewScaledQuantity(int64(storage), resource.Mega)
 		totalStorage.Add(*storageQuantity)
 
 		ephemeral := getTotalStorage("/")
-		ephemeralQuantity := resource.NewQuantity(int64(ephemeral), resource.DecimalSI)
+		ephemeralQuantity := resource.NewScaledQuantity(int64(ephemeral), resource.Mega)
 		totalEphemeral.Add(*ephemeralQuantity)
 
 		podsQuantity := resource.MustParse("110")

@@ -202,6 +202,16 @@ hpk-kubelet \
   ${PAUSE_IMAGE:+--pause-image=$PAUSE_IMAGE} \
   >> /var/log/hpk-kubelet.log 2>&1 &
 
+echo "Starting kube-proxy..."
+kube-proxy \
+  --kubeconfig /var/lib/hpk/kubeconfig \
+  --proxy-mode iptables \
+  --hostname-override $(hostname) \
+  --conntrack-max-per-core=0 \
+  --conntrack-tcp-timeout-established=0 \
+  --conntrack-tcp-timeout-close-wait=0 \
+  >> /var/log/kube-proxy.log 2>&1 &
+
 # Keep the container running
 if [ "$#" -eq 0 ]; then
     # Default to bash

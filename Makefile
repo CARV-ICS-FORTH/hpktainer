@@ -80,7 +80,7 @@ develop:
 	@echo "Building images..."
 	docker build -t $(REGISTRY)/hpk-builder:latest -f images/hpk-builder/Dockerfile images/hpk-builder
 	docker build -t $(REGISTRY)/hpktainer-base:latest -f images/hpktainer-base/Dockerfile .
-	docker build -t $(REGISTRY)/hpk-bubble:latest -f images/hpk-bubble-dev/Dockerfile .
+	docker build -t $(REGISTRY)/hpk-bubble:latest -f images/hpk-bubble/Dockerfile .
 	docker build -t $(REGISTRY)/hpk-pause:latest -f images/hpk-pause/Dockerfile .
 
 	@echo "Exporting..."

@@ -33,6 +33,10 @@ echo "Configuring network..."
 # HPK_IP is expected to be CIDR (e.g. 10.244.0.2/24)
 ip addr add "$HPK_IP" dev tap0
 ip link set tap0 up
+
+# Add routes for Flannel pod network and Kubernetes service CIDR
+ip route add 10.244.0.0/16 via "$HPK_GATEWAY_IP"
+ip route add 10.43.0.0/16 via "$HPK_GATEWAY_IP"
 ip route add default via "$HPK_GATEWAY_IP"
 
 echo "Network ready. Executing command: $@"
