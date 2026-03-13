@@ -73,9 +73,9 @@ images:
 		-f images/hpk-pause/Dockerfile .
 
 develop:
-	@echo "Pre-build cleanup..."
+	#@echo "Pre-build cleanup..."
 	# Only clean containerd once at the start if you suspect ghost layers
-	-sudo systemctl stop containerd && sudo rm -rf /var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/* && sudo systemctl start containerd
+	# -sudo systemctl stop containerd && sudo rm -rf /var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/* && sudo systemctl start containerd
 
 	@echo "Building images..."
 	docker build -t $(REGISTRY)/hpk-builder:latest -f images/hpk-builder/Dockerfile images/hpk-builder
@@ -89,12 +89,12 @@ develop:
 	docker save -o /tmp/hpk-images/hpk-bubble.tar $(REGISTRY)/hpk-bubble:latest
 	docker save -o /tmp/hpk-images/hpk-pause.tar $(REGISTRY)/hpk-pause:latest
 
-	@echo "Moving to local storage..."
-	mkdir -p ~/.hpk/images
-	rm -f ~/.hpk/images/*.sif ~/.hpk/images/*.tar
-	mv /tmp/hpk-images/*.tar ~/.hpk/images/
+#	@echo "Moving to local storage..."
+# 	mkdir -p ~/.hpk/images
+# 	rm -f ~/.hpk/images/*.sif ~/.hpk/images/*.tar
+# 	mv /tmp/hpk-images/*.tar ~/.hpk/images/
 
-	@echo "The Big Cleanup..."
+#	@echo "The Big Cleanup..."
 # 	docker builder prune -af
 # 	docker image prune -af
 # 	apptainer cache clean --type=blob -f

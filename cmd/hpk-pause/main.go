@@ -240,12 +240,16 @@ func cleanEnvironment() error {
 		"SINGULARITY_ENVIRONMENT",
 		"SINGULARITY_NAME",
 		"SINGULARITY_BIND",
+		"SINGULARITY_BINDPATH",
+		"SINGULARITY_MOUNT",
 		"APPTAINER_APPNAME",
 		"APPTAINER_COMMAND",
 		"APPTAINER_CONTAINER",
 		"APPTAINER_ENVIRONMENT",
 		"APPTAINER_NAME",
 		"APPTAINER_BIND",
+		"APPTAINER_BINDPATH",
+		"APPTAINER_MOUNT",
 	}
 
 	for _, name := range envVars {
@@ -386,7 +390,7 @@ func handleInitContainers(pod *v1.Pod, hpkEnv bool) error {
 			apptainerVerbosity = "--debug"
 		}
 		apptainerArgs := []string{
-			apptainerVerbosity, executionMode, "--nv", "--cleanenv", "--writable-tmpfs", "--no-mount", "home", "--unsquash",
+			apptainerVerbosity, executionMode, "--nv", "--cleanenv", "--writable-tmpfs", "--no-mount", "home,bind-paths", "--unsquash",
 		}
 		if hpkEnv {
 			apptainerArgs = append(apptainerArgs, "--bind", "/scratch/etc/resolv.conf:/etc/resolv.conf,/scratch/etc/hosts:/etc/hosts")
@@ -513,7 +517,7 @@ func handleContainers(pod *v1.Pod, wg *sync.WaitGroup, hpkEnv bool) error {
 			apptainerVerbosity = "--debug"
 		}
 		apptainerArgs := []string{
-			apptainerVerbosity, executionMode, "--nv", "--cleanenv", "--writable-tmpfs", "--no-mount", "home", "--unsquash",
+			apptainerVerbosity, executionMode, "--nv", "--cleanenv", "--writable-tmpfs", "--no-mount", "home,bind-paths", "--unsquash",
 		}
 		if hpkEnv {
 			apptainerArgs = append(apptainerArgs, "--bind", "/scratch/etc/resolv.conf:/etc/resolv.conf,/scratch/etc/hosts:/etc/hosts")
