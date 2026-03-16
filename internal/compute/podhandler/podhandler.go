@@ -94,6 +94,55 @@ func SavePodToFile(_ context.Context, pod *corev1.Pod) error {
 	return nil
 }
 
+func parseProcessPID(raw string) (string, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return "", fmt.Errorf("empty process id")
+	}
+
+	if strings.HasPrefix(value, string(slurm.JobIDTypeProcess)) {
+		value = strings.TrimPrefix(value, string(slurm.JobIDTypeProcess))
+	}
+
+	if !slurm.IsProcessJobID(value) {
+		return "", fmt.Errorf("invalid process id '%s'", raw)
+	}
+
+	return value, nil
+}
+
+func resolveProcessPIDFromControlFiles(pod *corev1.Pod, podDir endpoint.PodPath, logger logr.Logger) (string, error) {
+	for _, container := range pod.Spec.InitContainers {
+		jobIDPath := podDir.Container(container.Name).IDPath()
+		if raw, ok := readStringFromFile(jobIDPath); ok {
+			pid, err := parseProcessPID(raw)
+			if err != nil {
+				logger.Info(" * Invalid process id in control file", "path", jobIDPath, "value", raw, "err", err)
+
+				continue
+			}
+
+			return pid, nil
+		}
+	}
+
+	for _, container := range pod.Spec.Containers {
+		jobIDPath := podDir.Container(container.Name).IDPath()
+		if raw, ok := readStringFromFile(jobIDPath); ok {
+			pid, err := parseProcessPID(raw)
+			if err != nil {
+				logger.Info(" * Invalid process id in control file", "path", jobIDPath, "value", raw, "err", err)
+
+				continue
+			}
+
+			return pid, nil
+		}
+	}
+
+	return "", fmt.Errorf("no process id found in control files")
+}
+
 /*
 DeletePod takes a Pod Reference and deletes the Pod from the provider.
 DeletePod may be called multiple times for the same pod.
@@ -117,67 +166,60 @@ func DeletePod(podKey client.ObjectKey, watcher filenotify.FileWatcher) bool {
 		compute.SystemPanic(err, "failed to load pod")
 	}
 
+	podDir := compute.HPK.Pod(podKey)
+
 	/*---------------------------------------------------
 	 * Cancel Slurm Job or Kill Direct Process
 	 *---------------------------------------------------*/
-	if slurm.HasJobID(localPod) {
-		jobID := slurm.GetJobID(localPod)
+	if !compute.Environment.RunSlurm {
+		// Non-SLURM mode: read PID exclusively from controlfiles.
+		pid, err := resolveProcessPIDFromControlFiles(localPod, podDir, logger)
+		if err != nil {
+			compute.SystemPanic(err, "failed to resolve process id for pod '%s' from control files", podKey)
+		}
 
-		// Check if this is a SLURM job or a direct process PID file path
-		if strings.HasPrefix(jobID, "/tmp/") {
-			// This is a non-SLURM mode: jobID contains the path to the .pid file
-			pidFilePath := jobID
-			pid, err := slurm.GetPIDFromFile(pidFilePath)
-			if err != nil {
-				logger.Info(" * Failed to read PID from file", "path", pidFilePath, "err", err)
-				// If we can't read the PID file, just proceed with cleanup
-				// (the process may have already terminated)
+		logger.Info(" * Resolved process id from control files", "pid", pid)
+
+		out, err := slurm.KillProcessByPID(pid)
+		if err != nil {
+			if errors.Is(err, slurm.ErrInvalidJob) {
+				logger.Info(" * No such process", "pid", pid, "pod", podKey)
+				// the process does not exist, so it can be considered as deleted.
 				goto remove_pod
 			}
 
-			// Now kill the process using the PID we read from the file
-			out, err := slurm.KillProcessByPID(pid)
-			if err != nil {
-				if errors.Is(err, slurm.ErrInvalidJob) {
-					logger.Info(" * No such process", "pid", pid, "pod", podKey)
-					// the process does not exist, so it can be considered as deleted.
-					goto remove_pod
-				}
-
-				compute.SystemPanic(err, "failed to kill process '%s' (%s). out: '%s'", pid, podKey, out)
-			}
-
-			logger.Info(" * Process is terminated", "pid", pid, "pod", podKey, "out", out)
-		} else {
-			// This is a SLURM job ID
-			out, err := slurm.CancelJob(jobID)
-			if err != nil {
-				if errors.Is(err, slurm.ErrInvalidJob) {
-					logger.Info(" * No such Slurm job", "job", jobID, "pod", podKey)
-
-					// the job does not exist, so it can be considered as deleted.
-					goto remove_pod
-				}
-
-				if errors.Is(err, slurm.ErrRety) {
-					logger.Info(" * Slurm job cannot be deleted. Retry later", "job", jobID, "pod", podKey, "out", out)
-
-					return false
-				}
-
-				compute.SystemPanic(err, "failed to cancel job '%s' (%s). out: '%s'", jobID, podKey, out)
-			}
-
-			logger.Info(" * Slurm job is cancelled", "job", jobID, "pod", podKey, "out", out)
+			compute.SystemPanic(err, "failed to kill process '%s' (%s). out: '%s'", pid, podKey, out)
 		}
+
+		logger.Info(" * Process is terminated", "pid", pid, "pod", podKey, "out", out)
+	} else if slurm.HasJobID(localPod) {
+		jobID := slurm.GetJobID(localPod)
+
+		out, err := slurm.CancelJob(jobID)
+		if err != nil {
+			if errors.Is(err, slurm.ErrInvalidJob) {
+				logger.Info(" * No such Slurm job", "job", jobID, "pod", podKey)
+
+				// the job does not exist, so it can be considered as deleted.
+				goto remove_pod
+			}
+
+			if errors.Is(err, slurm.ErrRety) {
+				logger.Info(" * Slurm job cannot be deleted. Retry later", "job", jobID, "pod", podKey, "out", out)
+
+				return false
+			}
+
+			compute.SystemPanic(err, "failed to cancel job '%s' (%s). out: '%s'", jobID, podKey, out)
+		}
+
+		logger.Info(" * Slurm job is cancelled", "job", jobID, "pod", podKey, "out", out)
 	}
 
 	/*---------------------------------------------------
 	 * Remove watcher for Pod Directory
 	 *---------------------------------------------------*/
 remove_pod:
-	podDir := compute.HPK.Pod(podKey)
-
 	// because fswatch does not work recursively, we cannot have the container directories nested within the pod.
 	// instead, we use a flat directory in the format "podir/containername.{jid,stdout,stdour,...}"
 	if err := watcher.Remove(podDir.String()); err != nil {
@@ -468,18 +510,11 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, watcher filenotify.FileWatc
 
 	logger.Info(" * Slurm job has been submitted", "jobID", jobID)
 
-	// update pod with the job id (use JobIDTypeProcess for non-SLURM mode, JobIDTypeSlurm for SLURM mode)
+	// update pod with the job id
 	if compute.Environment.RunSlurm {
 		slurm.SetPodID(h.Pod, slurm.JobIDTypeSlurm, jobID)
-	} else {
-		// In non-SLURM mode, we need to store a reference to the .pid file location
-		// The actual PID will be read from the file when needed
-		pidFilePath := fmt.Sprintf("/tmp/%s_%s/.pid", h.Pod.Namespace, h.Pod.Name)
-		slurm.SetPodID(h.Pod, slurm.JobIDTypeProcess, pidFilePath)
 	}
-	if err != nil {
-		compute.SystemPanic(err, "failed to set job id for pod")
-	}
+	// In non-SLURM mode no annotation is needed; PID is resolved from controlfiles at delete time.
 
 	// needed for subsequent GetPod()
 	if err := SavePodToFile(ctx, h.Pod); err != nil {

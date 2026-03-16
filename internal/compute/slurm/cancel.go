@@ -72,7 +72,7 @@ func KillProcessByPID(pid string) (string, error) {
 	 Send SIGTERM using kill to the main process
 	 and wait for it to close gracefully.
 	*/
-	out, err := process.Execute("kill", "-9", pid)
+	out, err := process.Execute("pkill", "-P", pid)
 	if err != nil {
 		outStr := string(out)
 

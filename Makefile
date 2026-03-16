@@ -89,6 +89,13 @@ develop:
 	docker save -o /tmp/hpk-images/hpk-bubble.tar $(REGISTRY)/hpk-bubble:latest
 	docker save -o /tmp/hpk-images/hpk-pause.tar $(REGISTRY)/hpk-pause:latest
 
+	@echo "Refreshing local development image store..."
+	mkdir -p ~/.hpk/images
+	rm -f ~/.hpk/images/hpk-bubble.sif ~/.hpk/images/hpk-pause.sif
+	rm -f ~/.hpk/images/hpk-bubble.tar ~/.hpk/images/hpk-pause.tar
+	cp /tmp/hpk-images/hpk-bubble.tar ~/.hpk/images/
+	cp /tmp/hpk-images/hpk-pause.tar ~/.hpk/images/
+
 #	@echo "Moving to local storage..."
 # 	mkdir -p ~/.hpk/images
 # 	rm -f ~/.hpk/images/*.sif ~/.hpk/images/*.tar
@@ -111,6 +118,7 @@ develop:
 	
 	@echo "Development images deployed successfully!"
 	@echo "Set HPK_DEV=1 in hpk.slurm to use local images."
+	@echo "Local images staged in ~/.hpk/images and stale SIFs removed."
 
 make bubble:
 	# Build hpk-bubble (dev)
