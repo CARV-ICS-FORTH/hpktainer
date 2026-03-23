@@ -1,5 +1,7 @@
 #!/bin/bash
 
+export KUBECONFIG=~/.hpk/kubeconfig
+
 ####### Preamble ###############
 # Ensure Testing Namespace
 if [[ -z "${TEST_NAMESPACE}" ]]; then

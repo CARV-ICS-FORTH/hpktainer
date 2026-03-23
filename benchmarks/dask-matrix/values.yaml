@@ -2,15 +2,15 @@ scheduler:
   replicas: 1
   resources:
     requests:
-      cpu: 2
-      memory: 500M
+      cpu: 500m
+      memory: 256Mi
 
 worker:
   replicas: 2
   resources:
     requests:
-      cpu: 2
-      memory: 1G
+      cpu: 500m
+      memory: 512Mi
 
 jupyter:
   enabled: false
