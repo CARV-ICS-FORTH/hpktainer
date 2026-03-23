@@ -250,7 +250,7 @@ function handle_init_containers() {
 	echo "[Virtual] Spawning InitContainer: {{$container.InstanceName}}"
 	 
 	{{- if $container.EnvFilePath}}
-	sh -c {{$container.EnvFilePath}} > /scratch/{{$container.InstanceName}}.env
+	cat {{$container.EnvFilePath}} > /scratch/{{$container.InstanceName}}.env
 	{{- end}}
 
 	# Mark the beginning of an init job (all get the shell's pid).  
@@ -292,7 +292,7 @@ function handle_containers() {
 	####################
 
 	{{- if $container.EnvFilePath}}
-	sh -c {{$container.EnvFilePath}} > /scratch/{{$container.InstanceName}}.env
+	cat {{$container.EnvFilePath}} > /scratch/{{$container.InstanceName}}.env
 	{{- end}}
 
 	$(apptainer {{ $container.ExecutionMode }} \

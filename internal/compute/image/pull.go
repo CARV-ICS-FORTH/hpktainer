@@ -17,6 +17,7 @@ package image
 import (
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 
 	"hpk/internal/compute"
@@ -55,7 +56,13 @@ func Pull(imageDir string, transport Transport, imageName string) (*Image, error
 
 	// otherwise, download a fresh copy
 	compute.DefaultLogger.Info(" * Downloading image...", "image", imageName, "dir", imageDir)
-	if _, err := process.Execute(compute.Environment.ApptainerBin, "pull", "--dir", imageDir, transport.Wrap(imageName)); err != nil {
+	if _, err := process.Execute(
+		compute.Environment.ApptainerBin,
+		"pull",
+		"--arch", runtime.GOARCH,
+		"--dir", imageDir,
+		transport.Wrap(imageName),
+	); err != nil {
 		return nil, fmt.Errorf("downloading has failed: %w", err)
 	}
 

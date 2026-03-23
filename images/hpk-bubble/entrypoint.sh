@@ -75,6 +75,8 @@ if [ "$HPK_ROLE" = "controller" ]; then
       --advertise-address ${HOST_IP} \
       --tls-san ${HOST_IP} \
       --tls-san 0.0.0.0 \
+      --tls-san 127.0.0.1 \
+      --tls-san localhost \
       --disable-agent \
       --disable servicelb \
       --disable traefik \

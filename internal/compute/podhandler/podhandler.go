@@ -334,6 +334,12 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, watcher filenotify.FileWatc
 		compute.SystemPanic(err, "cannot create control file directory '%s'", h.podDirectory.ControlFileDir())
 	}
 
+	// Persist pod metadata early so in-progress pods are not considered corrupted
+	// by startup reconciliation while volume setup is still running.
+	if err := SavePodToFile(ctx, h.Pod); err != nil {
+		compute.SystemPanic(err, "failed to persist pod metadata early")
+	}
+
 	// watch for control files on the root directory of the pod.
 	// because fswatch does not work recursively, we cannot have the container directories nested within the pod.
 	// instead, we use a flat directory in the format "podir/containername.{jid,stdout,stdour,...}"

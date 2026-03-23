@@ -13,9 +13,15 @@ NS_ADDR=$CIDR_PREFIX.100
 HOST_IP_DETECTED=$(ip route get 1 | awk '{print $7; exit}')
 # Use provided CONTROLLER_IP or default to detected host IP
 CONTROLLER_IP=${CONTROLLER_IP:-$HOST_IP_DETECTED}
+API_RELAY_PID=""
 
 cleanup() {
 	echo "Cleaning up..."
+    if [[ -n $API_RELAY_PID ]]; then
+        kill $API_RELAY_PID 2>/dev/null
+        wait $API_RELAY_PID 2>/dev/null
+    fi
+    pkill -f "HPK_API_RELAY_${NAME}" 2>/dev/null || true
 	if [[ -n $SLIRP_PID ]]; then
 		kill $SLIRP_PID 2>/dev/null
 		wait $SLIRP_PID 2>/dev/null
@@ -79,6 +85,12 @@ apptainer instance run \
 	--network=none \
 	--bind $RESOLV_CONF:/etc/resolv.conf \
 	--bind $HOME/.hpk:/var/lib/hpk \
+    --bind $HOME/.hpk:/root/.hpk \
+    --env APPTAINER_CACHEDIR=/root/.hpk/.apptainer/cache \
+    --env APPTAINER_TMPDIR=/root/.hpk/.apptainer/tmp \
+    --env SINGULARITY_CACHEDIR=/root/.hpk/.apptainer/cache \
+    --env SINGULARITY_TMPDIR=/root/.hpk/.apptainer/tmp \
+    --env TMPDIR=/root/.hpk/.apptainer/tmp \
 	--env HOST_IP=$HOST_IP_DETECTED \
 	--env CONTROLLER_IP=$CONTROLLER_IP \
 	--env HPK_DEV=${HPK_DEV:-0} \
@@ -88,7 +100,7 @@ apptainer instance run \
 PID=$(apptainer instance list -j $NAME | jq -r '.instances[] | .pid')
 
 # Userlevel networking
-slirp4netns --configure --cidr=$CIDR/24 --mtu=65520 --api-socket $NAME-slirp4netns.sock $PID tap0 &
+slirp4netns --configure --cidr=$CIDR/24 --mtu=1500 --api-socket $NAME-slirp4netns.sock $PID tap0 &
 SLIRP_PID=$!
 
 # Forward ports based on Role
@@ -99,19 +111,19 @@ SLIRP_PID=$!
 
 # Construct JSON for hostfwd
 # Always forward 8472 UDP
-FWD_JSON_FLANNEL='{"execute": "add_hostfwd", "arguments": {"proto": "udp", "host_addr": "0.0.0.0", "host_port": 8472, "guest_addr": "'$NS_ADDR'", "guest_port": 8472}}'
+FWD_JSON_FLANNEL='{"execute": "add_hostfwd", "arguments": {"proto": "udp", "host_addr": "'$HOST_IP_DETECTED'", "host_port": 8472, "guest_addr": "'$NS_ADDR'", "guest_port": 8472}}'
 
 # Always forward 10250 TCP (kubelet)
-FWD_JSON_KUBELET='{"execute": "add_hostfwd", "arguments": {"proto": "tcp", "host_addr": "0.0.0.0", "host_port": 10250, "guest_addr": "'$NS_ADDR'", "guest_port": 10250}}'
+FWD_JSON_KUBELET='{"execute": "add_hostfwd", "arguments": {"proto": "tcp", "host_addr": "'$HOST_IP_DETECTED'", "host_port": 10250, "guest_addr": "'$NS_ADDR'", "guest_port": 10250}}'
 
 HPK_ROLE=${HPK_ROLE:-controller}
 
 if [ "$HPK_ROLE" = "controller" ]; then
-    # Add K3s 6443
-    FWD_JSON_K3S='{"execute": "add_hostfwd", "arguments": {"proto": "tcp", "host_addr": "0.0.0.0", "host_port": 6443, "guest_addr": "'$NS_ADDR'", "guest_port": 6443}}'
+    # Forward K3s API to localhost first; then relay HOST_IP:6443 -> 127.0.0.1:16443.
+    FWD_JSON_K3S='{"execute": "add_hostfwd", "arguments": {"proto": "tcp", "host_addr": "127.0.0.1", "host_port": 16443, "guest_addr": "'$NS_ADDR'", "guest_port": 6443}}'
     
     # Add Etcd 2379
-    FWD_JSON_ETCD='{"execute": "add_hostfwd", "arguments": {"proto": "tcp", "host_addr": "0.0.0.0", "host_port": 2379, "guest_addr": "'$NS_ADDR'", "guest_port": 2379}}'
+    FWD_JSON_ETCD='{"execute": "add_hostfwd", "arguments": {"proto": "tcp", "host_addr": "'$HOST_IP_DETECTED'", "host_port": 2379, "guest_addr": "'$NS_ADDR'", "guest_port": 2379}}'
 fi
 
 while [ ! -e $NAME-slirp4netns.sock ]; do
@@ -126,6 +138,72 @@ if [ "$HPK_ROLE" = "controller" ]; then
     echo -n "$FWD_JSON_K3S" | nc -U $NAME-slirp4netns.sock
     sleep 0.1
     echo -n "$FWD_JSON_ETCD" | nc -U $NAME-slirp4netns.sock
+
+    # Ensure no stale relay remains from previous runs.
+    pkill -f "HPK_API_RELAY_${NAME}" 2>/dev/null || true
+
+    # Rootless TCP relay so HOST_IP:6443 works from this host and other nodes.
+    python3 - "HPK_API_RELAY_${NAME}" <<PY &
+import socket
+import threading
+
+LISTEN_HOST = "${HOST_IP_DETECTED}"
+LISTEN_PORT = 6443
+TARGET_HOST = "127.0.0.1"
+TARGET_PORT = 16443
+
+def pump(src, dst):
+    try:
+        while True:
+            data = src.recv(65536)
+            if not data:
+                break
+            dst.sendall(data)
+    except Exception:
+        pass
+    finally:
+        try:
+            dst.shutdown(socket.SHUT_WR)
+        except Exception:
+            pass
+
+def handle(client):
+    try:
+        upstream = socket.create_connection((TARGET_HOST, TARGET_PORT), timeout=30)
+    except Exception:
+        try:
+            client.close()
+        except Exception:
+            pass
+        return
+
+    t1 = threading.Thread(target=pump, args=(client, upstream), daemon=True)
+    t2 = threading.Thread(target=pump, args=(upstream, client), daemon=True)
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+
+    try:
+        upstream.close()
+    except Exception:
+        pass
+    try:
+        client.close()
+    except Exception:
+        pass
+
+server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+server.bind((LISTEN_HOST, LISTEN_PORT))
+server.listen(128)
+
+while True:
+    client, _ = server.accept()
+    threading.Thread(target=handle, args=(client,), daemon=True).start()
+PY
+    API_RELAY_PID=$!
+    echo "Started API relay ${HOST_IP_DETECTED}:6443 -> 127.0.0.1:16443 (pid ${API_RELAY_PID})"
 fi
 
 echo "Bubble started. Press Ctrl+C to stop."
