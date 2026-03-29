@@ -135,7 +135,14 @@ func (h *PodHandler) buildContainer(container *corev1.Container, containerStatus
 	/*---------------------------------------------------
 	 * Prepare Container Image
 	 *---------------------------------------------------*/
-	img, err := image.Pull(compute.HPK.ImageDir(), image.Docker, container.Image)
+	var img *image.Image
+
+	if container.ImagePullPolicy == corev1.PullNever {
+		img, err = image.ResolveLocal(compute.HPK.ImageDir(), container.Image)
+	} else {
+		img, err = image.Pull(compute.HPK.ImageDir(), image.Docker, container.Image)
+	}
+
 	if err != nil {
 		compute.SystemPanic(err, "ImagePull error. Image:%s ", container.Image)
 		return Container{}, err
