@@ -14,9 +14,51 @@ HOST_IP_DETECTED=$(ip route get 1 | awk '{print $7; exit}')
 # Use provided CONTROLLER_IP or default to detected host IP
 CONTROLLER_IP=${CONTROLLER_IP:-$HOST_IP_DETECTED}
 API_RELAY_PID=""
+SOCAT_PID_6443=""
+SOCAT_PID_10250=""
+SOCAT_PID_2379=""
+
+start_socat_relays() {
+    local socat_bin="$HOME/.hpk/binaries/socat"
+
+    if [ ! -x "$socat_bin" ]; then
+        echo "socat binary not found at $socat_bin; skipping host-ip relay setup"
+        return 0
+    fi
+
+    "$socat_bin" TCP4-LISTEN:6443,bind=${HOST_IP_DETECTED},reuseaddr,fork TCP4:127.0.0.1:6443 &
+    SOCAT_PID_6443=$!
+
+    "$socat_bin" TCP4-LISTEN:10250,bind=${HOST_IP_DETECTED},reuseaddr,fork TCP4:127.0.0.1:10250 &
+    SOCAT_PID_10250=$!
+
+    # Expose controller etcd to other bubbles (used by flanneld on worker bubbles)
+    if [ "${HPK_ROLE:-controller}" = "controller" ]; then
+        "$socat_bin" TCP4-LISTEN:2379,bind=${HOST_IP_DETECTED},reuseaddr,fork TCP4:127.0.0.1:2379 &
+        SOCAT_PID_2379=$!
+    fi
+
+    if [ "${HPK_ROLE:-controller}" = "controller" ]; then
+        echo "Started socat relays on ${HOST_IP_DETECTED} (6443/tcp, 10250/tcp, 2379/tcp)"
+    else
+        echo "Started socat relays on ${HOST_IP_DETECTED} (6443/tcp, 10250/tcp)"
+    fi
+}
 
 cleanup() {
 	echo "Cleaning up..."
+    if [[ -n $SOCAT_PID_6443 ]]; then
+        kill $SOCAT_PID_6443 2>/dev/null || true
+        wait $SOCAT_PID_6443 2>/dev/null || true
+    fi
+    if [[ -n $SOCAT_PID_10250 ]]; then
+        kill $SOCAT_PID_10250 2>/dev/null || true
+        wait $SOCAT_PID_10250 2>/dev/null || true
+    fi
+    if [[ -n $SOCAT_PID_2379 ]]; then
+        kill $SOCAT_PID_2379 2>/dev/null || true
+        wait $SOCAT_PID_2379 2>/dev/null || true
+    fi
     if [[ -n $API_RELAY_PID ]]; then
         kill $API_RELAY_PID 2>/dev/null
         wait $API_RELAY_PID 2>/dev/null
@@ -38,6 +80,8 @@ RESOLV_CONF=resolv.conf.$NAME
 echo "nameserver $DNS_ADDR" > $RESOLV_CONF
 
 mkdir -p $HOME/.hpk
+mkdir -p $HOME/.hpk/.apptainer/tmp
+mkdir -p $HOME/.hpk/.apptainer/cache
 echo "Starting Bubble $NAME..."
 echo "  CIDR: $CIDR"
 echo "  Host IP: $HOST_IP_DETECTED"
@@ -111,19 +155,19 @@ SLIRP_PID=$!
 
 # Construct JSON for hostfwd
 # Always forward 8472 UDP
-FWD_JSON_FLANNEL='{"execute": "add_hostfwd", "arguments": {"proto": "udp", "host_addr": "'$HOST_IP_DETECTED'", "host_port": 8472, "guest_addr": "'$NS_ADDR'", "guest_port": 8472}}'
+FWD_JSON_FLANNEL='{"execute": "add_hostfwd", "arguments": {"proto": "udp", "host_addr": "0.0.0.0", "host_port": 8472, "guest_addr": "'$NS_ADDR'", "guest_port": 8472}}'
 
 # Always forward 10250 TCP (kubelet)
-FWD_JSON_KUBELET='{"execute": "add_hostfwd", "arguments": {"proto": "tcp", "host_addr": "'$HOST_IP_DETECTED'", "host_port": 10250, "guest_addr": "'$NS_ADDR'", "guest_port": 10250}}'
+FWD_JSON_KUBELET='{"execute": "add_hostfwd", "arguments": {"proto": "tcp", "host_addr": "127.0.0.1", "host_port": 10250, "guest_addr": "'$NS_ADDR'", "guest_port": 10250}}'
 
 HPK_ROLE=${HPK_ROLE:-controller}
 
 if [ "$HPK_ROLE" = "controller" ]; then
-    # Forward K3s API to localhost first; then relay HOST_IP:6443 -> 127.0.0.1:16443.
-    FWD_JSON_K3S='{"execute": "add_hostfwd", "arguments": {"proto": "tcp", "host_addr": "127.0.0.1", "host_port": 16443, "guest_addr": "'$NS_ADDR'", "guest_port": 6443}}'
+    # Add K3s 6443
+    FWD_JSON_K3S='{"execute": "add_hostfwd", "arguments": {"proto": "tcp", "host_addr": "127.0.0.1", "host_port": 6443, "guest_addr": "'$NS_ADDR'", "guest_port": 6443}}'
     
     # Add Etcd 2379
-    FWD_JSON_ETCD='{"execute": "add_hostfwd", "arguments": {"proto": "tcp", "host_addr": "'$HOST_IP_DETECTED'", "host_port": 2379, "guest_addr": "'$NS_ADDR'", "guest_port": 2379}}'
+    FWD_JSON_ETCD='{"execute": "add_hostfwd", "arguments": {"proto": "tcp", "host_addr": "127.0.0.1", "host_port": 2379, "guest_addr": "'$NS_ADDR'", "guest_port": 2379}}'
 fi
 
 while [ ! -e $NAME-slirp4netns.sock ]; do
@@ -138,73 +182,9 @@ if [ "$HPK_ROLE" = "controller" ]; then
     echo -n "$FWD_JSON_K3S" | nc -U $NAME-slirp4netns.sock
     sleep 0.1
     echo -n "$FWD_JSON_ETCD" | nc -U $NAME-slirp4netns.sock
-
-    # Ensure no stale relay remains from previous runs.
-    pkill -f "HPK_API_RELAY_${NAME}" 2>/dev/null || true
-
-    # Rootless TCP relay so HOST_IP:6443 works from this host and other nodes.
-    python3 - "HPK_API_RELAY_${NAME}" <<PY &
-import socket
-import threading
-
-LISTEN_HOST = "${HOST_IP_DETECTED}"
-LISTEN_PORT = 6443
-TARGET_HOST = "127.0.0.1"
-TARGET_PORT = 16443
-
-def pump(src, dst):
-    try:
-        while True:
-            data = src.recv(65536)
-            if not data:
-                break
-            dst.sendall(data)
-    except Exception:
-        pass
-    finally:
-        try:
-            dst.shutdown(socket.SHUT_WR)
-        except Exception:
-            pass
-
-def handle(client):
-    try:
-        upstream = socket.create_connection((TARGET_HOST, TARGET_PORT), timeout=30)
-    except Exception:
-        try:
-            client.close()
-        except Exception:
-            pass
-        return
-
-    t1 = threading.Thread(target=pump, args=(client, upstream), daemon=True)
-    t2 = threading.Thread(target=pump, args=(upstream, client), daemon=True)
-    t1.start()
-    t2.start()
-    t1.join()
-    t2.join()
-
-    try:
-        upstream.close()
-    except Exception:
-        pass
-    try:
-        client.close()
-    except Exception:
-        pass
-
-server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-server.bind((LISTEN_HOST, LISTEN_PORT))
-server.listen(128)
-
-while True:
-    client, _ = server.accept()
-    threading.Thread(target=handle, args=(client,), daemon=True).start()
-PY
-    API_RELAY_PID=$!
-    echo "Started API relay ${HOST_IP_DETECTED}:6443 -> 127.0.0.1:16443 (pid ${API_RELAY_PID})"
 fi
+
+start_socat_relays
 
 echo "Bubble started. Press Ctrl+C to stop."
 wait $SLIRP_PID

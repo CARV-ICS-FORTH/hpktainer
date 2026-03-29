@@ -10,26 +10,24 @@ import (
 )
 
 // CopyFromTapToSocket reads packets from the TAP interface and writes them to the socket
-// with a 4-byte length prefix.
+// with a 4-byte length prefix in a SINGLE system call to prevent queue overflow.
 func CopyFromTapToSocket(tap *water.Interface, conn net.Conn) error {
-	buf := make([]byte, 65536) // Max Ethernet frame size is usually 1500, but can be higher. 64k is safe.
-	lenBuf := make([]byte, 4)
+	// Allocate a 64k buffer. We reserve the first 4 bytes for the length header.
+	buf := make([]byte, 65536)
 
 	for {
-		n, err := tap.Read(buf)
+		// Read from TAP directly into the buffer, offset by exactly 4 bytes
+		n, err := tap.Read(buf[4:])
 		if err != nil {
 			return fmt.Errorf("read from tap error: %w", err)
 		}
 
-		// Write length prefix
-		binary.BigEndian.PutUint32(lenBuf, uint32(n))
-		if _, err := conn.Write(lenBuf); err != nil {
-			return fmt.Errorf("write length to socket error: %w", err)
-		}
+		// Write the 4-byte length prefix at the very beginning of the buffer
+		binary.BigEndian.PutUint32(buf[:4], uint32(n))
 
-		// Write payload
-		if _, err := conn.Write(buf[:n]); err != nil {
-			return fmt.Errorf("write payload to socket error: %w", err)
+		// Write the header AND the payload to the UNIX socket in ONE shot
+		if _, err := conn.Write(buf[:4+n]); err != nil {
+			return fmt.Errorf("write to socket error: %w", err)
 		}
 	}
 }
@@ -40,16 +38,13 @@ func CopyFromSocketToTap(conn net.Conn, tap *water.Interface) error {
 	buf := make([]byte, 65536)
 
 	for {
-		// Read length prefix
+		// Read exactly 4 bytes for the length header
 		if _, err := io.ReadFull(conn, lenBuf); err != nil {
 			return fmt.Errorf("read length from socket error: %w", err)
 		}
 		length := binary.BigEndian.Uint32(lenBuf)
 
 		if length > uint32(len(buf)) {
-			// This should theoretically not happen if both sides are well behaved,
-			// but we should handle it to avoid panic or buffer overflow.
-			// Ideally we might resize buffer, but for now error out.
 			return fmt.Errorf("packet too large: %d", length)
 		}
 
@@ -58,7 +53,7 @@ func CopyFromSocketToTap(conn net.Conn, tap *water.Interface) error {
 			return fmt.Errorf("read payload from socket error: %w", err)
 		}
 
-		// Write to TAP
+		// Write the raw Ethernet frame to the TAP interface
 		if _, err := tap.Write(buf[:length]); err != nil {
 			return fmt.Errorf("write to tap error: %w", err)
 		}
