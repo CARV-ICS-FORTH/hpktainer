@@ -43,6 +43,8 @@ const (
 	CustomSlurmFlags = "slurm.hpk.io/flags"
 )
 
+var ErrNoProcessIDInControlFiles = errors.New("no process id found in control files")
+
 // LoadPodFromKey waits LoadPodFromFile with filePath discovery.
 func LoadPodFromKey(podRef client.ObjectKey) (*corev1.Pod, error) {
 	filePath := compute.HPK.Pod(podRef).EncodedJSONPath()
@@ -102,6 +104,10 @@ func parseProcessPID(raw string) (string, error) {
 
 	if strings.HasPrefix(value, string(slurm.JobIDTypeProcess)) {
 		value = strings.TrimPrefix(value, string(slurm.JobIDTypeProcess))
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return "", fmt.Errorf("empty process id")
+		}
 	}
 
 	if !slurm.IsProcessJobID(value) {
@@ -140,7 +146,7 @@ func resolveProcessPIDFromControlFiles(pod *corev1.Pod, podDir endpoint.PodPath,
 		}
 	}
 
-	return "", fmt.Errorf("no process id found in control files")
+	return "", ErrNoProcessIDInControlFiles
 }
 
 /*
@@ -175,10 +181,21 @@ func DeletePod(podKey client.ObjectKey, watcher filenotify.FileWatcher) bool {
 		// Non-SLURM mode: read PID exclusively from controlfiles.
 		pid, err := resolveProcessPIDFromControlFiles(localPod, podDir, logger)
 		if err != nil {
+			if errors.Is(err, ErrNoProcessIDInControlFiles) {
+				logger.Info(" * No process id found in control files; assuming process already exited", "pod", podKey)
+
+				goto remove_pod
+			}
+
 			compute.SystemPanic(err, "failed to resolve process id for pod '%s' from control files", podKey)
 		}
 
 		logger.Info(" * Resolved process id from control files", "pid", pid)
+		if strings.TrimSpace(pid) == "" {
+			logger.Info(" * Empty process id resolved from control files; assuming process already exited", "pod", podKey)
+
+			goto remove_pod
+		}
 
 		out, err := slurm.KillProcessByPID(pid)
 		if err != nil {

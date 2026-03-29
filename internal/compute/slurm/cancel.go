@@ -66,6 +66,11 @@ func CancelJob(args string) (string, error) {
 // KillProcessByPID terminates a process by its PID using kill command.
 // Returns an error if the process cannot be terminated.
 func KillProcessByPID(pid string) (string, error) {
+	pid = strings.TrimSpace(pid)
+	if pid == "" {
+		return "", ErrInvalidJob
+	}
+
 	/*
 	 Install trap for the signals INT and TERM to
 	 terminate the process and its children.
