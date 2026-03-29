@@ -41,6 +41,17 @@ Optionally, build and push to your registry:
 docker build -t <your-username>/dask-matrix-client .
 docker push <your-username>/dask-matrix-client
 ```
+
+For local ARM64-only deployments with HPK, rebuild from scratch and purge old caches:
+```
+chmod +x rebuild-images-arm64.sh
+./rebuild-images-arm64.sh
+```
+
+This script removes old cached SIFs and images, rebuilds `dask-matrix-client` for `linux/arm64`,
+and refreshes local/remote HPK image caches with:
+- `dask-matrix-client:2024.1.0-arm64-r1`
+- `ghcr.io/dask/dask:2024.1.0`
 ---------------------------------------------------------------------------------------------------
 ## Kubernetes Job
 Run the benchmark as a Kubernetes job:

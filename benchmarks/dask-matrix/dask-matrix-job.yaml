@@ -7,14 +7,14 @@ spec:
     spec:
       containers:
       - name: client
-        image: lefterisv/dask-matrix-client
-        imagePullPolicy: Always
+        image: dask-matrix-client:2024.1.0-arm64-r1
+        imagePullPolicy: Never
         command: ["python", "/app/benchmark.py"]
         env:
         - name: MATRIX_SIZE
           value: "4000"
         - name: CHUNK_SIZE
-          value: "400"
+          value: "500"
         volumeMounts:
         - name: report
           mountPath: /report

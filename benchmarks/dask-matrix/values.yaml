@@ -1,16 +1,32 @@
 scheduler:
+  image:
+    repository: "dask-matrix-dask"
+    tag: "2024.1.0-arm64-r1"
+    pullPolicy: Never
   replicas: 1
-  resources:
-    requests:
-      cpu: 500m
-      memory: 256Mi
+  resources: {}
 
 worker:
+  image:
+    repository: "dask-matrix-dask"
+    tag: "2024.1.0-arm64-r1"
+    pullPolicy: Never
   replicas: 2
-  resources:
-    requests:
-      cpu: 500m
-      memory: 512Mi
+  extraArgs:
+    - --no-nanny
+    - --memory-limit
+    - "0"
+    - --no-dashboard
+  env:
+    - name: DASK_DISTRIBUTED__WORKER__MEMORY__TARGET
+      value: "False"
+    - name: DASK_DISTRIBUTED__WORKER__MEMORY__SPILL
+      value: "False"
+    - name: DASK_DISTRIBUTED__WORKER__MEMORY__PAUSE
+      value: "False"
+    - name: DASK_DISTRIBUTED__WORKER__MEMORY__TERMINATE
+      value: "False"
+  resources: {}
 
 jupyter:
   enabled: false
