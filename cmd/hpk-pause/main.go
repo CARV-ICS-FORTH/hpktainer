@@ -204,6 +204,42 @@ func prepareContainers(pod *v1.Pod) error {
 	if err := cleanEnvironment(); err != nil {
 		return fmt.Errorf("could not clear the environment : %v", err)
 	}
+	if err := prepareApptainerRuntimeDirs(); err != nil {
+		return fmt.Errorf("could not prepare apptainer runtime dirs : %v", err)
+	}
+	return nil
+}
+
+func prepareApptainerRuntimeDirs() error {
+	const baseDir = "/tmp/.hpk-apptainer"
+	tmpDir := filepath.Join(baseDir, "tmp")
+	cacheDir := filepath.Join(baseDir, "cache")
+
+	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
+		return fmt.Errorf("could not create tmp dir '%s': %v", tmpDir, err)
+	}
+
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		return fmt.Errorf("could not create cache dir '%s': %v", cacheDir, err)
+	}
+
+	if err := os.Setenv("APPTAINER_TMPDIR", tmpDir); err != nil {
+		return fmt.Errorf("could not set APPTAINER_TMPDIR: %v", err)
+	}
+	if err := os.Setenv("SINGULARITY_TMPDIR", tmpDir); err != nil {
+		return fmt.Errorf("could not set SINGULARITY_TMPDIR: %v", err)
+	}
+	if err := os.Setenv("TMPDIR", tmpDir); err != nil {
+		return fmt.Errorf("could not set TMPDIR: %v", err)
+	}
+
+	if err := os.Setenv("APPTAINER_CACHEDIR", cacheDir); err != nil {
+		return fmt.Errorf("could not set APPTAINER_CACHEDIR: %v", err)
+	}
+	if err := os.Setenv("SINGULARITY_CACHEDIR", cacheDir); err != nil {
+		return fmt.Errorf("could not set SINGULARITY_CACHEDIR: %v", err)
+	}
+
 	return nil
 }
 

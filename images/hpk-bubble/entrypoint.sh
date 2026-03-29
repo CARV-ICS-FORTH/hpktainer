@@ -10,6 +10,10 @@ echo "  Public IP:     ${HOST_IP}"
 echo "  Interface:     tap0"
 echo "  Role:          ${HPK_ROLE}"
 
+mkdir -p ~/.hpk/binaries
+apt-get install -y socat
+cp /usr/bin/socat ~/.hpk/binaries/socat
+
 # Enable IP forwarding
 sysctl -w net.ipv4.ip_forward=1
 
@@ -110,9 +114,13 @@ if [ "$HPK_ROLE" = "controller" ]; then
     # Generate webhook certificate for hpk-kubelet
     echo "Generating webhook certificate..."
     
-    # Build alt_names section with all node IPs
+    # Build alt_names section with all node IPs.
+    # Keep explicit VM IPs to avoid SAN mismatch when host-ip inference differs.
     ALT_NAMES="IP.1 = 127.0.0.1
-IP.2 = ${HOST_IP}"
+  IP.2 = ${HOST_IP}
+  // PLACEHOLDERS, NOT FINAL (TODO)
+  IP.3 = 192.168.64.9
+  IP.4 = 192.168.64.15"
     
     # Auto-generate node IPs based on NUM_NODES
     NUM_NODES=${NUM_NODES:-1}
@@ -121,7 +129,7 @@ IP.2 = ${HOST_IP}"
         BASE_IP=$(echo $HOST_IP | sed 's/\.[0-9]*$/\./')
         LAST_OCTET=$(echo $HOST_IP | awk -F'.' '{print $NF}')
         
-        counter=3
+        counter=5
         for ((i=1; i<NUM_NODES; i++)); do
             NODE_IP="${BASE_IP}$((LAST_OCTET + i))"
             ALT_NAMES="${ALT_NAMES}

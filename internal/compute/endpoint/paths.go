@@ -91,6 +91,10 @@ func (p HPKPath) CorruptedDir() string {
 	return filepath.Join(string(p), ".corrupted")
 }
 
+func (p HPKPath) ApptainerDir() string {
+	return filepath.Join(string(p), ".apptainer")
+}
+
 type WalkPodFunc func(path PodPath) error
 
 func (p HPKPath) WalkPodDirectories(f WalkPodFunc) error {
@@ -108,7 +112,7 @@ func (p HPKPath) WalkPodDirectories(f WalkPodFunc) error {
 		}
 
 		// skip the systems paths.
-		if path == p.CorruptedDir() || path == p.ImageDir() {
+		if path == p.CorruptedDir() || path == p.ImageDir() || path == p.ApptainerDir() {
 			return filepath.SkipDir
 		}
 
