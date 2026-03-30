@@ -116,9 +116,9 @@ if [ "$HPK_ROLE" = "controller" ]; then
     
     # Build alt_names section with all node IPs.
     # Keep explicit VM IPs to avoid SAN mismatch when host-ip inference differs.
+    # PLACEHOLDERS, NOT FINAL (TODO)
     ALT_NAMES="IP.1 = 127.0.0.1
   IP.2 = ${HOST_IP}
-  // PLACEHOLDERS, NOT FINAL (TODO)
   IP.3 = 192.168.64.9
   IP.4 = 192.168.64.15"
     
