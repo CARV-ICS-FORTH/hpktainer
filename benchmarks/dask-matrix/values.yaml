@@ -14,9 +14,6 @@ worker:
   replicas: 2
   extraArgs:
     - --no-nanny
-    - --memory-limit
-    - "0"
-    - --no-dashboard
   env:
     - name: DASK_DISTRIBUTED__WORKER__MEMORY__TARGET
       value: "False"
@@ -26,7 +23,11 @@ worker:
       value: "False"
     - name: DASK_DISTRIBUTED__WORKER__MEMORY__TERMINATE
       value: "False"
-  resources: {}
+  resources:
+    limits:
+      memory: "3000Mi"
+    requests:
+      memory: "3000Mi"
 
 jupyter:
   enabled: false
