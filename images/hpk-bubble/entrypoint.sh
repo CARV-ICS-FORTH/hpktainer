@@ -43,29 +43,81 @@ if [ "$HPK_ROLE" = "controller" ]; then
     # Wait for etcd
     sleep 5
     
-    # Initialize Flannel config
-    echo "Initializing Flannel config in Etcd..."
-    etcdctl --endpoints=http://127.0.0.1:2379 put /coreos.com/network/config '{"Network": "10.244.0.0/16", "SubnetLen": 24, "Backend": {"Type": "vxlan"}}'
+    # Initialize Calico config in Etcd
+    echo "Initializing Calico config in Etcd..."
+    export DATASTORE_TYPE=etcdv3
+    export ETCD_ENDPOINTS=http://127.0.0.1:2379
+    calicoctl apply -f - <<EOF
+apiVersion: projectcalico.org/v3
+kind: IPPool
+metadata:
+  name: default-ipv4-ippool
+spec:
+  cidr: 10.244.0.0/16
+  ipipMode: Never
+  vxlanMode: Always
+  natOutgoing: true
+  nodeSelector: all()
+---
+apiVersion: projectcalico.org/v3
+kind: BGPConfiguration
+metadata:
+  name: default
+spec:
+  logSeverityScreen: Info
+  listenPort: 17900
+EOF
 fi
 
-# Start flanneld
-# Connecting to CONTROLLER_IP (which is host IP of controller, or localhost if controller)
-# Simplest: If Controller, use localhost for Flannel. If Node, use CONTROLLER_IP.
+# Generate static subnet config for compatibility with hpktainer CNI
+mkdir -p /run/flannel
+BUBBLE_ID_VAL=${BUBBLE_ID:-1}
+POD_SUBNET="10.244.$((BUBBLE_ID_VAL + 1)).0/24"
+echo "FLANNEL_SUBNET=${POD_SUBNET}" > /run/flannel/subnet.env
+echo "FLANNEL_MTU=1500" >> /run/flannel/subnet.env
+echo "FLANNEL_IPMASQ=true" >> /run/flannel/subnet.env
 
-FLANNEL_ETCD="http://${CONTROLLER_IP}:2379"
+# Start Calico Node
+echo "Starting Calico Node..."
+mkdir -p /var/run/calico /var/lib/calico /var/log/calico
+
+CALICO_ETCD="http://${CONTROLLER_IP}:2379"
 if [ "$HPK_ROLE" = "controller" ]; then
-    FLANNEL_ETCD="http://127.0.0.1:2379"
+    CALICO_ETCD="http://127.0.0.1:2379"
 fi
 
-flanneld \
-  --etcd-endpoints=$FLANNEL_ETCD \
-  -ip-masq \
-  -iface tap0 \
-  --public-ip=${HOST_IP} \
-  >> /var/log/flannel.log 2>&1 &
+export DATASTORE_TYPE=etcdv3
+export ETCD_ENDPOINTS=$CALICO_ETCD
 
-FLANNEL_PID=$!
-echo "Flannel started with PID $FLANNEL_PID"
+CALICO_IMAGE="/var/lib/hpk/images/calico-node.sif"
+if [ ! -f "$CALICO_IMAGE" ]; then
+    echo "Local SIF image $CALICO_IMAGE not found, falling back to docker://"
+    CALICO_IMAGE="docker://docker.io/calico/node:v3.28.0"
+else
+    echo "Using local SIF image: $CALICO_IMAGE"
+fi
+
+apptainer instance run \
+  --no-mount home \
+  --no-mount cwd \
+  --no-mount hostfs \
+  --writable-tmpfs \
+  --bind /var/run/calico:/var/run/calico \
+  --bind /var/lib/calico:/var/lib/calico \
+  --bind /var/log/calico:/var/log/calico \
+  --env DATASTORE_TYPE=etcdv3 \
+  --env ETCD_ENDPOINTS=$CALICO_ETCD \
+  --env BGP_PORT=17900 \
+  --env FELIX_DEFAULTENDPOINTTOHOSTACTION=ACCEPT \
+  --env FELIX_INTERFACEPREFIX=hpk-tap \
+  --env FELIX_VXLANPORT=4789 \
+  --env CALICO_NETWORKING_BACKEND=bird \
+  --env NO_DEFAULT_POOLS=true \
+  --env NODENAME="bubble${BUBBLE_ID_VAL}" \
+  --env FELIX_FELIXHOSTNAME="bubble${BUBBLE_ID_VAL}" \
+  --env IP=${HOST_IP} \
+  $CALICO_IMAGE \
+  calico-node
 
 # Start K3s if Controller
 if [ "$HPK_ROLE" = "controller" ]; then

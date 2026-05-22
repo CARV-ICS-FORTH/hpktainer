@@ -81,36 +81,6 @@ func EnsureBridge(subnetCIDR string) (string, error) {
 	// Enable forwarding? (Should be global usually, but good to check)
 	// We'll leave global sysctl checks to main CLI for now or assume it's set.
 
-	// Find and bridge the Flannel interface (or whatever interface owns this subnet)
-	// We want to find an interface that has an address in this subnet, but is NOT the bridge itself.
-	if links, err := netlink.LinkList(); err == nil {
-		for _, link := range links {
-			if link.Attrs().Name == BridgeName || link.Attrs().Name == "lo" {
-				continue
-			}
-			// Check addresses
-			addrs, err := netlink.AddrList(link, netlink.FAMILY_V4)
-			if err != nil {
-				continue
-			}
-			for _, addr := range addrs {
-				// Check if this address belongs to the subnet
-				if ipNet.Contains(addr.IP) {
-					// Found it!
-					// Add to bridge
-					if err := netlink.LinkSetMaster(link, l.(*netlink.Bridge)); err != nil {
-						// Don't fail hard? Or warn?
-						// If we fail to bridge the upstream interface, external connectivity might fail.
-						return "", fmt.Errorf("failed to add interface %s to bridge: %w", link.Attrs().Name, err)
-					}
-					// Ensure it is UP
-					netlink.LinkSetUp(link)
-					break
-				}
-			}
-		}
-	}
-
 	return gwIP.String(), nil
 }
 

@@ -172,20 +172,32 @@ func main() {
 	// If it closes on daemon exit, we don't need manual delete.
 	// But let's verify bridging requirements.)
 
-	// Add to Bridge
-	bridgeLink, err := netlink.LinkByName(network.BridgeName)
+	// Enable Proxy ARP on host tap interface
+	proxyArpPath := fmt.Sprintf("/proc/sys/net/ipv4/conf/%s/proxy_arp", hostTapName)
+	if err := os.WriteFile(proxyArpPath, []byte("1"), 0644); err != nil {
+		log.Printf("Warning: failed to enable proxy_arp on %s: %v", hostTapName, err)
+	}
+
+	// Add point-to-point route to pod container IP
+	podIP, _, err := net.ParseCIDR(containerIP)
 	if err != nil {
 		daemonCmd.Process.Kill()
-		log.Fatalf("Failed to find bridge %s: %v", network.BridgeName, err)
+		log.Fatalf("Failed to parse container IP %s: %v", containerIP, err)
 	}
-	if err := netlink.LinkSetMaster(tapLink, bridgeLink.(*netlink.Bridge)); err != nil {
+	route := &netlink.Route{
+		LinkIndex: tapLink.Attrs().Index,
+		Dst:       &net.IPNet{IP: podIP, Mask: net.CIDRMask(32, 32)},
+		Scope:     netlink.SCOPE_LINK,
+	}
+	if err := netlink.RouteAdd(route); err != nil {
 		daemonCmd.Process.Kill()
-		log.Fatalf("Failed to add tap to bridge: %v", err)
+		log.Fatalf("Failed to add route to pod %s via %s: %v", podIP, hostTapName, err)
 	}
+
 	if err := netlink.LinkSetUp(tapLink); err != nil {
-		log.Printf("Warning: failed to set tap up from host (daemon should have done it): %v", err)
+		log.Printf("Warning: failed to set tap up from host: %v", err)
 	}
-	log.Printf("Added %s to bridge %s", hostTapName, network.BridgeName)
+	log.Printf("Point-to-point route to pod %s configured via %s", podIP, hostTapName)
 
 	// 7. Run Apptainer
 	// Args: everything passed to this cli.

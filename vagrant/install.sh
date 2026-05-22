@@ -4,6 +4,12 @@ export DEBIAN_FRONTEND=noninteractive
 ROLE=$(cat /etc/vagrant_role)
 echo "Provisioning as $ROLE..."
 
+# 0. Enlarge LVM volume to use all available partition space
+if [ -b /dev/mapper/ubuntu--vg-ubuntu--lv ]; then
+    echo "Enlarging LVM root partition to use 100% of free Volume Group space..."
+    lvextend -r -l +100%FREE /dev/mapper/ubuntu--vg-ubuntu--lv || true
+fi
+
 # 1. Disable Security
 echo "Disabling security features..."
 systemctl stop ufw

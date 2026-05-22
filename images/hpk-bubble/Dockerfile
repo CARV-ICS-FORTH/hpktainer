@@ -33,6 +33,11 @@ RUN apt-get install -y iptables nscd etcd-server etcd-client && \
     curl -L -o /usr/local/bin/flanneld https://github.com/flannel-io/flannel/releases/download/${FLANNEL_VERSION}/flanneld-${TARGETARCH} && \
     chmod +x /usr/local/bin/flanneld
 
+# Calicoctl
+ARG CALICO_VERSION=v3.28.0
+RUN curl -L -o /usr/local/bin/calicoctl https://github.com/projectcalico/calico/releases/download/${CALICO_VERSION}/calicoctl-linux-${TARGETARCH} && \
+    chmod +x /usr/local/bin/calicoctl
+
 # K3s
 ARG K3S_VERSION=v1.35.0+k3s1
 RUN if [ "${TARGETARCH}" = "amd64" ]; then K3S_ARCH=""; else K3S_ARCH="-${TARGETARCH}"; fi; \
