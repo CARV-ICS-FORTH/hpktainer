@@ -95,14 +95,10 @@ develop:
 		-t $(REGISTRY)/hpk-pause:latest \
 		-f images/hpk-pause/Dockerfile .
 	
-	# Pull and prepare Calico image for nested execution
-	docker pull calico/node:v3.28.0
-	
 	@echo "Exporting images to tar files..."
 	@mkdir -p /tmp/hpk-images
 	docker save -o /tmp/hpk-images/hpk-bubble.tar $(REGISTRY)/hpk-bubble:latest
 	docker save -o /tmp/hpk-images/hpk-pause.tar $(REGISTRY)/hpk-pause:latest
-	docker save -o /tmp/hpk-images/calico-node.tar calico/node:v3.28.0
 	
 	@echo "Copying images to VMs..."
 	# Using sshpass if available to automate password entry
@@ -110,9 +106,7 @@ develop:
 	@command -v sshpass >/dev/null 2>&1 || { echo "Error: sshpass is required for automated password entry. Install it or run commands manually."; exit 1; }
 	
 	$(SSHPASS) ssh -o StrictHostKeyChecking=no vagrant@controller.local "mkdir -p ~/.hpk/images && rm -f ~/.hpk/images/*.sif"
-	$(SSHPASS) ssh -o StrictHostKeyChecking=no vagrant@node.local "mkdir -p ~/.hpk/images && rm -f ~/.hpk/images/*.sif"
 	$(SSHPASS) scp -o StrictHostKeyChecking=no /tmp/hpk-images/*.tar vagrant@controller.local:~/.hpk/images/
-	$(SSHPASS) scp -o StrictHostKeyChecking=no /tmp/hpk-images/*.tar vagrant@node.local:~/.hpk/images/
 	
 	@echo "Copying scripts to controller..."
 	$(SSHPASS) ssh -o StrictHostKeyChecking=no vagrant@controller.local "mkdir -p ~/hpk"

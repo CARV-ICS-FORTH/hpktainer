@@ -83,13 +83,7 @@ fi
 export DATASTORE_TYPE=etcdv3
 export ETCD_ENDPOINTS=$CALICO_ETCD
 
-CALICO_IMAGE="/var/lib/hpk/images/calico-node.sif"
-if [ ! -f "$CALICO_IMAGE" ]; then
-    echo "Local SIF image $CALICO_IMAGE not found, falling back to docker://"
-    CALICO_IMAGE="docker://docker.io/calico/node:v3.28.0"
-else
-    echo "Using local SIF image: $CALICO_IMAGE"
-fi
+CALICO_IMAGE="docker://docker.io/calico/node:v3.28.0"
 
 apptainer instance run \
   --no-mount home \

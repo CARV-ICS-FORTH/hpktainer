@@ -28,6 +28,37 @@ echo "  Nodes: ${NODES[@]}"
 echo "Cleaning up stale configuration in ~/.hpk..."
 rm -f $HOME/.hpk/kubeconfig $HOME/.hpk/node-token $HOME/.hpk/kubelet.crt $HOME/.hpk/kubelet.key
 
+# Pre-process images
+echo "Pre-processing images..."
+IMAGE_DIR="$HOME/.hpk/images"
+mkdir -p "$IMAGE_DIR"
+
+if [ "${HPK_DEV:-0}" = "1" ]; then
+    echo "Development mode: ensuring local .tar images are converted to .sif..."
+    for img in hpk-bubble hpk-pause; do
+        IMAGE_TAR="$IMAGE_DIR/${img}.tar"
+        IMAGE_SIF="$IMAGE_DIR/${img}.sif"
+        if [ -f "$IMAGE_TAR" ]; then
+            if [ ! -f "$IMAGE_SIF" ] || [ "$IMAGE_TAR" -nt "$IMAGE_SIF" ]; then
+                echo "Converting $IMAGE_TAR to $IMAGE_SIF..."
+                apptainer build --force "$IMAGE_SIF" "docker-archive://$IMAGE_TAR"
+            fi
+        else
+            echo "Warning: $IMAGE_TAR not found!"
+        fi
+    done
+    
+    echo "Development mode: pre-warming third-party images (calico-node)..."
+    # Using 'exec /bin/true' forces Apptainer to fully build and cache the SIF file. 
+    # 'inspect' sometimes skips the full SIF generation in the cache.
+    apptainer exec docker://docker.io/calico/node:v3.28.0 /bin/true 2>/dev/null || true
+else
+    echo "Production mode: pre-warming Apptainer cache..."
+    apptainer exec docker://docker.io/chazapis/hpk-bubble:latest /bin/true 2>/dev/null || true
+    apptainer exec docker://docker.io/chazapis/hpk-pause:latest /bin/true 2>/dev/null || true
+    apptainer exec docker://docker.io/calico/node:v3.28.0 /bin/true 2>/dev/null || true
+fi
+
 # Start Controller Bubble
 echo "Starting Controller on $CONTROLLER_NODE..."
 export HPK_ROLE="controller"

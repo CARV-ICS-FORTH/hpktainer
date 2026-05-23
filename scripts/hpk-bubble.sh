@@ -41,14 +41,7 @@ echo "  Controller IP: $CONTROLLER_IP"
 if [ "${HPK_DEV:-0}" = "1" ]; then
     echo "  Development mode: using local images"
     IMAGE_DIR="$HOME/.hpk/images"
-    IMAGE_TAR="$IMAGE_DIR/hpk-bubble.tar"
     IMAGE_SIF="$IMAGE_DIR/hpk-bubble.sif"
-    
-    # Convert tar to sif if not already done
-    if [ ! -f "$IMAGE_SIF" ] && [ -f "$IMAGE_TAR" ]; then
-        echo "  Converting $IMAGE_TAR to $IMAGE_SIF..."
-        apptainer build "$IMAGE_SIF" "docker-archive://$IMAGE_TAR"
-    fi
     
     if [ ! -f "$IMAGE_SIF" ]; then
         echo "Error: $IMAGE_SIF not found. Run 'make develop' first."
@@ -56,24 +49,6 @@ if [ "${HPK_DEV:-0}" = "1" ]; then
     fi
     
     BUBBLE_IMAGE="$IMAGE_SIF"
-
-    # Also handle hpk-pause image
-    PAUSE_IMAGE_TAR="$IMAGE_DIR/hpk-pause.tar"
-    PAUSE_IMAGE_SIF="$IMAGE_DIR/hpk-pause.sif"
-
-    if [ ! -f "$PAUSE_IMAGE_SIF" ] && [ -f "$PAUSE_IMAGE_TAR" ]; then
-        echo "  Converting $PAUSE_IMAGE_TAR to $PAUSE_IMAGE_SIF..."
-        apptainer build "$PAUSE_IMAGE_SIF" "docker-archive://$PAUSE_IMAGE_TAR"
-    fi
-
-    # Also handle calico-node image
-    CALICO_IMAGE_TAR="$IMAGE_DIR/calico-node.tar"
-    CALICO_IMAGE_SIF="$IMAGE_DIR/calico-node.sif"
-
-    if [ ! -f "$CALICO_IMAGE_SIF" ] && [ -f "$CALICO_IMAGE_TAR" ]; then
-        echo "  Converting $CALICO_IMAGE_TAR to $CALICO_IMAGE_SIF..."
-        apptainer build "$CALICO_IMAGE_SIF" "docker-archive://$CALICO_IMAGE_TAR"
-    fi
 else
     BUBBLE_IMAGE="docker://docker.io/chazapis/hpk-bubble:latest"
 fi
@@ -88,6 +63,7 @@ apptainer instance run \
 	--network=none \
 	--bind $RESOLV_CONF:/etc/resolv.conf \
 	--bind $HOME/.hpk:/var/lib/hpk \
+	--bind $HOME/.apptainer/cache:/root/.apptainer/cache \
 	--env HOST_IP=$HOST_IP_DETECTED \
 	--env CONTROLLER_IP=$CONTROLLER_IP \
 	--env HPK_DEV=${HPK_DEV:-0} \
