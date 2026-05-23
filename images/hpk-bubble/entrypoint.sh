@@ -69,18 +69,7 @@ spec:
 EOF
 fi
 
-# Generate static subnet config for CNI IPAM
-mkdir -p /run/calico
 BUBBLE_ID_VAL=${BUBBLE_ID:-1}
-POD_SUBNET="10.244.$((BUBBLE_ID_VAL + 1)).0/24"
-echo "CALICO_SUBNET=${POD_SUBNET}" > /run/calico/subnet.env
-echo "CALICO_MTU=1500" >> /run/calico/subnet.env
-
-# Configure iptables rules for the nested container subnet
-echo "Configuring iptables NAT and FORWARD rules..."
-iptables -t nat -C POSTROUTING -s ${POD_SUBNET} -o tap0 -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s ${POD_SUBNET} -o tap0 -j MASQUERADE
-iptables -C FORWARD -s ${POD_SUBNET} -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -s ${POD_SUBNET} -j ACCEPT
-iptables -C FORWARD -d ${POD_SUBNET} -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -d ${POD_SUBNET} -j ACCEPT
 
 # Start Calico Node
 echo "Starting Calico Node..."
@@ -124,6 +113,34 @@ apptainer instance run \
   --env IP=${HOST_IP} \
   $CALICO_IMAGE \
   calico-node
+
+# Wait for Calico Node to allocate a block affinity for this node dynamically (indicated by a blackhole route in the kernel)
+echo "Waiting for Calico to allocate an IPAM block for bubble${BUBBLE_ID_VAL}..."
+POD_SUBNET=""
+for i in {1..30}; do
+    POD_SUBNET=$(ip route | awk '/blackhole/ {print $2; exit}')
+    if [ -n "$POD_SUBNET" ]; then
+        break
+    fi
+    sleep 1
+done
+
+if [ -z "$POD_SUBNET" ]; then
+    echo "Error: Calico did not allocate an IPAM block in time."
+    exit 1
+fi
+echo "Calico dynamically allocated subnet: ${POD_SUBNET}"
+
+# Generate dynamic subnet config for CNI IPAM using the Calico-leased block
+mkdir -p /run/calico
+echo "CALICO_SUBNET=${POD_SUBNET}" > /run/calico/subnet.env
+echo "CALICO_MTU=1500" >> /run/calico/subnet.env
+
+# Configure iptables rules dynamically for the Calico-allocated subnet
+echo "Configuring iptables NAT and FORWARD rules for ${POD_SUBNET}..."
+iptables -t nat -C POSTROUTING -s ${POD_SUBNET} -o tap0 -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s ${POD_SUBNET} -o tap0 -j MASQUERADE
+iptables -C FORWARD -s ${POD_SUBNET} -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -s ${POD_SUBNET} -j ACCEPT
+iptables -C FORWARD -d ${POD_SUBNET} -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -d ${POD_SUBNET} -j ACCEPT
 
 # Start K3s if Controller
 if [ "$HPK_ROLE" = "controller" ]; then

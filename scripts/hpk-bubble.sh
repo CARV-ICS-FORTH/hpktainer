@@ -107,18 +107,18 @@ SLIRP_PID=$!
 # 2379: Etcd (TCP) - Controller
 
 # Construct JSON for hostfwd
-# Always forward 17900 TCP and 4789 UDP
-FWD_JSON_BGP='{"execute": "add_hostfwd", "arguments": {"proto": "tcp", "host_addr": "0.0.0.0", "host_port": 17900, "guest_addr": "'$NS_ADDR'", "guest_port": 17900}}'
-FWD_JSON_VXLAN='{"execute": "add_hostfwd", "arguments": {"proto": "udp", "host_addr": "0.0.0.0", "host_port": 4789, "guest_addr": "'$NS_ADDR'", "guest_port": 4789}}'
+# Always forward 17900 TCP and 4789 UDP to the container's Host IP address (which Calico listens on)
+FWD_JSON_BGP='{"execute": "add_hostfwd", "arguments": {"proto": "tcp", "host_addr": "0.0.0.0", "host_port": 17900, "guest_addr": "'$HOST_IP_DETECTED'", "guest_port": 17900}}'
+FWD_JSON_VXLAN='{"execute": "add_hostfwd", "arguments": {"proto": "udp", "host_addr": "0.0.0.0", "host_port": 4789, "guest_addr": "'$HOST_IP_DETECTED'", "guest_port": 4789}}'
 
 HPK_ROLE=${HPK_ROLE:-controller}
 
 if [ "$HPK_ROLE" = "controller" ]; then
     # Add K3s 6443
-    FWD_JSON_K3S='{"execute": "add_hostfwd", "arguments": {"proto": "tcp", "host_addr": "0.0.0.0", "host_port": 6443, "guest_addr": "'$NS_ADDR'", "guest_port": 6443}}'
+    FWD_JSON_K3S='{"execute": "add_hostfwd", "arguments": {"proto": "tcp", "host_addr": "0.0.0.0", "host_port": 6443, "guest_addr": "'$HOST_IP_DETECTED'", "guest_port": 6443}}'
     
     # Add Etcd 2379
-    FWD_JSON_ETCD='{"execute": "add_hostfwd", "arguments": {"proto": "tcp", "host_addr": "0.0.0.0", "host_port": 2379, "guest_addr": "'$NS_ADDR'", "guest_port": 2379}}'
+    FWD_JSON_ETCD='{"execute": "add_hostfwd", "arguments": {"proto": "tcp", "host_addr": "0.0.0.0", "host_port": 2379, "guest_addr": "'$HOST_IP_DETECTED'", "guest_port": 2379}}'
 fi
 
 while [ ! -e $NAME-slirp4netns.sock ]; do
