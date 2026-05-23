@@ -22,13 +22,13 @@ kubectl get nodes
 
 Users run a Slurm command to deploy one rootless container per cluster node, which we call **bubble** (using the `hpk-bubble` image). One bubble acts as the Kubernetes control plane, while the others act as worker nodes; together they form the Kubernetes cluster. Each bubble runs an instance of [K3s](https://k3s.io/), alongside the HPK-specific kubelet (`hpk-kubelet`), implemented using the [Virtual Kubelet](https://github.com/virtual-kubelet/virtual-kubelet) framework.
 
-For external networking, bubbles use [slirp4netns](https://github.com/rootless-containers/slirp4netns), while for internal, overlay networking they run [Flannel](https://github.com/flannel-io/flannel) and communicate over VXLAN tunnels (each host forwards UDP port 8472 to the bubble).
+For external networking, bubbles use [slirp4netns](https://github.com/rootless-containers/slirp4netns), while for internal, overlay networking they run [Calico](https://github.com/projectcalico/calico) and communicate via BGP-routed paths (each host forwards TCP port 17900 to the bubble to enable peer-to-peer BGP mesh communication).
 
-Inside the bubble, an [Apptainer](https://apptainer.org/) wrapper (`hpktainer`) is used to spawn "pods" (using the `hpk-pause` image, derived from `hpktainer-base`); these are containers that are given  unique network addresses in the corresponding Flannel subnet and host user application containers.
+Inside the bubble, an [Apptainer](https://apptainer.org/) wrapper (`hpktainer`) is used to spawn "pods" (using the `hpk-pause` image, derived from `hpktainer-base`); these are containers that are given unique network addresses in the corresponding Calico subnet and host user application containers.
 
-All pod containers are placed in a bridge (`hpk-bridge`) at the bubble level to talk to each other directly. With the proper routing rules, they can route traffic to pods running in other bubbles (via the Flannel interface) and the outside world.
+All pod containers are configured in a bridge-free, point-to-point L3 routing layout at the bubble level. With the proper routing rules, they route traffic directly to pods running in other bubbles (via Calico-routed interfaces over BGP) and the outside world.
 
-The pod network stack is again implemented in userspace using a pair of TAP interfaces; one in the nested container and one in the bubble (the interface connected to the `hpk-bridge`). The pair is connected via two instances of the `hpk-net-daemon` that forward traffic over a UNIX socket created in a shared folder.
+The pod network stack is implemented in userspace using a pair of TAP interfaces; one in the nested container and one in the bubble. The pair is connected via two instances of the `hpk-net-daemon` that forward traffic over a UNIX socket created in a shared folder.
 
 ### Architecture
 
@@ -41,14 +41,14 @@ HPK implements a **4-level distributed architecture**.
 2. **Level 2: Bubble (Node Overlay)**
     * Implemented in the `hpk-bubble` container.
     * An Apptainer instance acting as a virtual node.
-    * Runs K3s (the base Kubernetes distribution) and Flannel (overlay networking). The first bubble, which acts as the Kubernetes control plane, also runs [etcd](https://etcd.io/) for supporting Flannel.
+    * Runs K3s (the base Kubernetes distribution) and Calico (L3 routing and BGP peering). The first bubble, which acts as the Kubernetes control plane, also runs [etcd](https://etcd.io/) for supporting Calico.
     * Runs the local `hpk-kubelet`, which registers itself as a node in the K3s cluster.
-    * Connects to other bubbles via a VXLAN overlay network (Flannel).
+    * Connects to other bubbles via a BGP mesh network (Calico, BGP port 17900).
 
 3. **Level 3: Pod**
     * Implemented in the `hpk-pause` container.
     * Spawned by `hpk-kubelet` via `hpktainer`.
-    * Each Pod is an Apptainer container with its own network namespace connected to the Bubble's bridge (`hpk-bridge`).
+    * Each Pod is an Apptainer container with its own network namespace connected to the Bubble's point-to-point routing interface.
     * The Pod's entrypoint is the `hpk-pause` binary, which acts as a "pause container" to hold the network namespace and capture application container signals.
 
 4. **Level 4: Application Container**
@@ -146,6 +146,6 @@ hpktainer run docker://docker.io/chazapis/hpktainer-base:latest /bin/sh
 
 And verify connectivity:
 ```bash
-ip addr show tap0    # Should show Flannel IP
+ip addr show tap0    # Should show Calico IP
 ping 8.8.8.8         # External access
 ```

@@ -35,5 +35,13 @@ ip addr add "$HPK_IP" dev tap0
 ip link set tap0 up
 ip route add default via "$HPK_GATEWAY_IP"
 
+# Set up trap to clean up the client-side hpk-net-daemon when we exit
+cleanup() {
+    echo "Stopping hpk-net-daemon..."
+    kill "$DAEMON_PID" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
 echo "Network ready. Executing command: $@"
-exec "$@"
+"$@"
+

@@ -22,9 +22,9 @@ import (
 )
 
 const (
-	SocketDir     = "/var/run/hpktainer"
-	CNIDataDir    = "/var/lib/cni/networks/hpktainer"
-	FlannelConfig = "/run/flannel/subnet.env"
+	SocketDir    = "/var/run/hpktainer"
+	CNIDataDir   = "/var/lib/cni/networks/hpktainer"
+	CalicoConfig = "/run/calico/subnet.env"
 )
 
 func main() {
@@ -45,38 +45,42 @@ func main() {
 		log.Fatal("hpktainer must be run as root to configure networking.")
 	}
 
-	// 2. Parse Flannel Config
-	flannelConf, err := network.ParseFlannelConfig(FlannelConfig)
+	// 2. Parse Calico Config
+	calicoConf, err := network.ParseCalicoConfig(CalicoConfig)
 	if err != nil {
-		log.Fatalf("Failed to parse flannel config at %s: %v. Is flannel running?", FlannelConfig, err)
+		log.Fatalf("Failed to parse calico config at %s: %v. Is Calico running?", CalicoConfig, err)
 	}
-	log.Printf("Using Subnet: %s", flannelConf.Subnet)
+	log.Printf("Using Subnet: %s", calicoConf.Subnet)
 
 	// 3. Ensure Bridge and IPTables
-	gwIP, err := network.EnsureBridge(flannelConf.Subnet)
+	gwIP, err := network.EnsureBridge(calicoConf.Subnet)
 	if err != nil {
 		log.Fatalf("Failed to setup bridge: %v", err)
 	}
 	log.Printf("Bridge %s ready with IP %s", network.BridgeName, gwIP)
 
-	defaultIface, err := network.GetDefaultInterface()
-	if err != nil {
-		log.Fatalf("Failed to get default interface: %v", err)
-	}
-	log.Printf("Default interface: %s", defaultIface)
 
-	if err := network.EnsureIPTablesMasquerade(flannelConf.Subnet, defaultIface); err != nil {
-		log.Fatalf("Failed to setup iptables: %v", err)
-	}
 
 	// 4. Allocate IP via CNI
+	var tapLink netlink.Link
+	var hostTapName string
+
 	containerID := uuid.New().String()
-	containerIP, err := network.AllocateIP(containerID, flannelConf.Subnet, CNIDataDir)
+	containerIP, err := network.AllocateIP(containerID, calicoConf.Subnet, CNIDataDir)
 	if err != nil {
 		log.Fatalf("Failed to allocate IP: %v", err)
 	}
 	defer func() {
-		if err := network.ReleaseIP(containerID, flannelConf.Subnet, CNIDataDir); err != nil {
+		if tapLink != nil {
+			if _, err := netlink.LinkByName(hostTapName); err == nil {
+				if err := netlink.LinkDel(tapLink); err != nil {
+					log.Printf("Warning: failed to delete TAP %s on defer exit: %v", hostTapName, err)
+				} else {
+					log.Printf("Deleted TAP interface %s on defer exit", hostTapName)
+				}
+			}
+		}
+		if err := network.ReleaseIP(containerID, calicoConf.Subnet, CNIDataDir); err != nil {
 			log.Printf("Failed to release IP: %v", err)
 		}
 	}()
@@ -97,7 +101,7 @@ func main() {
 		log.Fatal("Non-IPv4 address not supported yet")
 	}
 	lastOctet := ipv4[3]
-	hostTapName := fmt.Sprintf("hpk-tap-%d", lastOctet)
+	hostTapName = fmt.Sprintf("hpk-tap-%d", lastOctet)
 
 	// We delegate TAP creation to the daemon to ensure correct flags/ownership.
 	// Logic moved to after daemon start.
@@ -154,7 +158,6 @@ func main() {
 
 	// Post-Validation: Wait for TAP creation by daemon and attach to bridge
 	log.Printf("Waiting for TAP %s...", hostTapName)
-	var tapLink netlink.Link
 	for i := 0; i < 50; i++ { // 5 seconds
 		l, err := netlink.LinkByName(hostTapName)
 		if err == nil {
@@ -172,10 +175,26 @@ func main() {
 	// If it closes on daemon exit, we don't need manual delete.
 	// But let's verify bridging requirements.)
 
-	// Enable Proxy ARP on host tap interface
+	// Enable Proxy ARP and PVLAN Proxy ARP on host tap interface
 	proxyArpPath := fmt.Sprintf("/proc/sys/net/ipv4/conf/%s/proxy_arp", hostTapName)
 	if err := os.WriteFile(proxyArpPath, []byte("1"), 0644); err != nil {
 		log.Printf("Warning: failed to enable proxy_arp on %s: %v", hostTapName, err)
+	}
+	proxyArpPvlanPath := fmt.Sprintf("/proc/sys/net/ipv4/conf/%s/proxy_arp_pvlan", hostTapName)
+	if err := os.WriteFile(proxyArpPvlanPath, []byte("1"), 0644); err != nil {
+		log.Printf("Warning: failed to enable proxy_arp_pvlan on %s: %v", hostTapName, err)
+	}
+
+	// Assign gateway IP directly to host TAP to satisfy arp_ignore
+	gwAddr, err := netlink.ParseAddr(fmt.Sprintf("%s/32", gwIP))
+	if err == nil {
+		if err := netlink.AddrAdd(tapLink, gwAddr); err != nil {
+			log.Printf("Warning: failed to add gateway IP to tap %s: %v", hostTapName, err)
+		} else {
+			log.Printf("Assigned gateway IP %s to %s", gwIP, hostTapName)
+		}
+	} else {
+		log.Printf("Warning: failed to parse gateway IP %s/32: %v", gwIP, err)
 	}
 
 	// Add point-to-point route to pod container IP
@@ -322,6 +341,22 @@ func main() {
 		<-done
 	case err := <-done:
 		if err != nil {
+			// Explicitly trigger cleanup before exiting because os.Exit/log.Fatalf bypasses defers
+			if daemonCmd != nil && daemonCmd.Process != nil {
+				daemonCmd.Process.Kill()
+				daemonCmd.Wait()
+			}
+			if tapLink != nil {
+				if _, err := netlink.LinkByName(hostTapName); err == nil {
+					if err := netlink.LinkDel(tapLink); err != nil {
+						log.Printf("Warning: failed to delete TAP %s on error exit: %v", hostTapName, err)
+					} else {
+						log.Printf("Deleted TAP interface %s on error exit", hostTapName)
+					}
+				}
+			}
+			network.ReleaseIP(containerID, calicoConf.Subnet, CNIDataDir)
+
 			// Extract exit code
 			if exitErr, ok := err.(*exec.ExitError); ok {
 				os.Exit(exitErr.ExitCode())

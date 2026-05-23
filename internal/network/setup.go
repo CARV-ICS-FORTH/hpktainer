@@ -3,8 +3,6 @@ package network
 import (
 	"fmt"
 	"net"
-	"os/exec"
-	"strings"
 
 	"github.com/vishvananda/netlink"
 )
@@ -84,41 +82,7 @@ func EnsureBridge(subnetCIDR string) (string, error) {
 	return gwIP.String(), nil
 }
 
-// GetDefaultInterface returns the interface name of the default route.
-func GetDefaultInterface() (string, error) {
-	// Use ip route get 8.8.8.8
-	cmd := exec.Command("ip", "route", "get", "8.8.8.8")
-	out, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("failed to get default route: %w", err)
-	}
-	// Output format: "8.8.8.8 via 192.168.1.1 dev eth0 src 192.168.1.10 uid 1000"
-	fields := strings.Fields(string(out))
-	for i, field := range fields {
-		if field == "dev" && i+1 < len(fields) {
-			return fields[i+1], nil
-		}
-	}
-	return "", fmt.Errorf("could not parse default interface from ip route output")
-}
 
-// EnsureIPTablesMasquerade ensures the masquerade rule exists.
-// iptables -t nat -A POSTROUTING -s <subnet> -o <outInterface> -j MASQUERADE
-func EnsureIPTablesMasquerade(subnet string, outInterface string) error {
-	// Check if rule exists
-	checkCmd := exec.Command("iptables", "-t", "nat", "-C", "POSTROUTING", "-s", subnet, "-o", outInterface, "-j", "MASQUERADE")
-	if err := checkCmd.Run(); err == nil {
-		// Rule exists
-		return nil
-	}
-
-	// Add rule
-	cmd := exec.Command("iptables", "-t", "nat", "-A", "POSTROUTING", "-s", subnet, "-o", outInterface, "-j", "MASQUERADE")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to add iptables rule: %s: %w", out, err)
-	}
-	return nil
-}
 
 // Helper to increment IP
 func inc(ip net.IP) {

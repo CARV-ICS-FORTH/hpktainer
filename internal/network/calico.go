@@ -7,21 +7,20 @@ import (
 	"strings"
 )
 
-type FlannelConfig struct {
+type CalicoConfig struct {
 	Subnet string
 	MTU    string
-	IPMasq bool
 }
 
-// ParseFlannelConfig reads /run/flannel/subnet.env and extracts FLANNEL_SUBNET.
-func ParseFlannelConfig(path string) (*FlannelConfig, error) {
+// ParseCalicoConfig reads the Calico subnet environment file and extracts subnet and MTU configurations.
+func ParseCalicoConfig(path string) (*CalicoConfig, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open flannel config: %w", err)
+		return nil, fmt.Errorf("failed to open calico config: %w", err)
 	}
 	defer file.Close()
 
-	config := &FlannelConfig{}
+	config := &CalicoConfig{}
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -33,21 +32,19 @@ func ParseFlannelConfig(path string) (*FlannelConfig, error) {
 		value := parts[1]
 
 		switch key {
-		case "FLANNEL_SUBNET":
+		case "CALICO_SUBNET":
 			config.Subnet = value
-		case "FLANNEL_MTU":
+		case "CALICO_MTU":
 			config.MTU = value
-		case "FLANNEL_IPMASQ":
-			config.IPMasq = (value == "true")
 		}
 	}
 
 	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("error reading flannel config: %w", err)
+		return nil, fmt.Errorf("error reading calico config: %w", err)
 	}
 
 	if config.Subnet == "" {
-		return nil, fmt.Errorf("FLANNEL_SUBNET not found in config")
+		return nil, fmt.Errorf("CALICO_SUBNET not found in config")
 	}
 
 	return config, nil

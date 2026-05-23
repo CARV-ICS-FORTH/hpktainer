@@ -27,11 +27,8 @@ RUN curl -LO https://github.com/containernetworking/plugins/releases/download/v1
     (cd /opt/cni/bin && tar -zxvf /cni-plugins-linux-${TARGETARCH}-v1.9.0.tgz) && \
     rm /cni-plugins-linux-${TARGETARCH}-v1.9.0.tgz
 
-# Flannel and Etcd
-ARG FLANNEL_VERSION=v0.28.0
-RUN apt-get install -y iptables nscd etcd-server etcd-client && \
-    curl -L -o /usr/local/bin/flanneld https://github.com/flannel-io/flannel/releases/download/${FLANNEL_VERSION}/flanneld-${TARGETARCH} && \
-    chmod +x /usr/local/bin/flanneld
+# Etcd and iptables dependencies
+RUN apt-get install -y iptables nscd etcd-server etcd-client
 
 # Calicoctl
 ARG CALICO_VERSION=v3.28.0

@@ -272,7 +272,7 @@ trap env_abort SIGTERM SIGKILL SIGQUIT INT
 
 echo "[Host] Starting the constructor the Virtual Environment ..."
 
-${apptainer} exec --net --network=flannel --fakeroot \
+${apptainer} exec --net --network=calico --fakeroot \
 --env PARENT=${PPID}								 \
 --bind /bin,/etc/apptainer,/var/lib/apptainer,/lib,/lib64,/usr,/etc/passwd,$HOME,/run/shm \
 docker://alpine {{.VirtualEnv.ConstructorFilePath}} &

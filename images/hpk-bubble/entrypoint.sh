@@ -4,7 +4,7 @@
 HOST_IP=${HOST_IP:-$(ip route get 1 | awk '{print $7; exit}')}
 CONTROLLER_IP=${CONTROLLER_IP:-$HOST_IP}
 
-echo "Starting Flannel..."
+echo "Starting Calico..."
 echo "  Etcd Endpoint: http://${CONTROLLER_IP}:2379"
 echo "  Public IP:     ${HOST_IP}"
 echo "  Interface:     tap0"
@@ -22,7 +22,7 @@ done
 ip link set tap0 up
 
 # Add Host IP as secondary address to tap0
-# This is required for Flannel VXLAN to use it as a source IP
+# This is required for Calico VXLAN to use it as a source IP
 ip addr add ${HOST_IP}/32 dev tap0
 
 # Start Etcd if Controller
@@ -69,13 +69,18 @@ spec:
 EOF
 fi
 
-# Generate static subnet config for compatibility with hpktainer CNI
-mkdir -p /run/flannel
+# Generate static subnet config for CNI IPAM
+mkdir -p /run/calico
 BUBBLE_ID_VAL=${BUBBLE_ID:-1}
 POD_SUBNET="10.244.$((BUBBLE_ID_VAL + 1)).0/24"
-echo "FLANNEL_SUBNET=${POD_SUBNET}" > /run/flannel/subnet.env
-echo "FLANNEL_MTU=1500" >> /run/flannel/subnet.env
-echo "FLANNEL_IPMASQ=true" >> /run/flannel/subnet.env
+echo "CALICO_SUBNET=${POD_SUBNET}" > /run/calico/subnet.env
+echo "CALICO_MTU=1500" >> /run/calico/subnet.env
+
+# Configure iptables rules for the nested container subnet
+echo "Configuring iptables NAT and FORWARD rules..."
+iptables -t nat -C POSTROUTING -s ${POD_SUBNET} -o tap0 -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s ${POD_SUBNET} -o tap0 -j MASQUERADE
+iptables -C FORWARD -s ${POD_SUBNET} -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -s ${POD_SUBNET} -j ACCEPT
+iptables -C FORWARD -d ${POD_SUBNET} -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -d ${POD_SUBNET} -j ACCEPT
 
 # Start Calico Node
 echo "Starting Calico Node..."
@@ -109,7 +114,8 @@ apptainer instance run \
   --env ETCD_ENDPOINTS=$CALICO_ETCD \
   --env BGP_PORT=17900 \
   --env FELIX_DEFAULTENDPOINTTOHOSTACTION=ACCEPT \
-  --env FELIX_INTERFACEPREFIX=hpk-tap \
+  --env FELIX_INTERFACEPREFIX=cali \
+  --env FELIX_IPTABLESBACKEND=NFT \
   --env FELIX_VXLANPORT=4789 \
   --env CALICO_NETWORKING_BACKEND=bird \
   --env NO_DEFAULT_POOLS=true \

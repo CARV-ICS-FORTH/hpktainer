@@ -31,10 +31,6 @@ sed -i '/127.0.2.1/d' /etc/hosts
 sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT="/GRUB_CMDLINE_LINUX_DEFAULT="apparmor=0 /' /etc/default/grub
 update-grub
 
-# Enable br_netfilter for Flannel
-echo "br_netfilter" > /etc/modules-load.d/br_netfilter.conf
-modprobe br_netfilter
-
 # Fix Routes: Persistent Fix to remove default route on 10.0.2.x (NAT)
 # so that 192.168.64.x is preferred.
 cat <<EOF > /usr/local/bin/fix-routes.sh
