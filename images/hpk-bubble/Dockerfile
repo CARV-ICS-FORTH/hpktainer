@@ -13,7 +13,7 @@ FROM ubuntu:24.04
 
 # Basic utilities
 RUN apt-get update && \
-    apt-get install -y vim-tiny curl iproute2 net-tools bridge-utils iputils-ping
+    apt-get install -y vim-tiny curl iproute2 net-tools bridge-utils iputils-ping nano
 
 # Apptainer
 RUN apt-get install -y software-properties-common && \
@@ -39,6 +39,11 @@ RUN if [ "${TARGETARCH}" = "amd64" ]; then K3S_ARCH=""; else K3S_ARCH="-${TARGET
     curl -sfL "https://github.com/k3s-io/k3s/releases/download/${K3S_VERSION}/k3s${K3S_ARCH}" -o /usr/local/bin/k3s && \
     chmod +x /usr/local/bin/k3s
 RUN mkdir -p /var/lib/rancher/k3s /etc/rancher/k3s
+
+# kube-proxy
+ARG KUBE_VERSION=v1.35.0
+RUN curl -L "https://dl.k8s.io/release/${KUBE_VERSION}/bin/linux/${TARGETARCH}/kube-proxy" -o /usr/local/bin/kube-proxy && \
+    chmod +x /usr/local/bin/kube-proxy
 
 COPY --from=builder /bin/hpk-net-daemon /usr/bin/hpk-net-daemon
 COPY --from=builder /bin/hpktainer /usr/bin/hpktainer

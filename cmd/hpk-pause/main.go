@@ -89,7 +89,7 @@ func main() {
 		log.Fatal().Msg("Please provide both the pod and namespace.")
 	}
 
-	config, err := clientcmd.BuildConfigFromFlags("", filepath.Join("/k8s-data", "admin.conf"))
+	config, err := clientcmd.BuildConfigFromFlags("", filepath.Join("/k8s-data", "kubeconfig"))
 	if err != nil {
 		log.Fatal().Err(err).Msg("Error building kubeconfig")
 	}
@@ -204,6 +204,42 @@ func prepareContainers(pod *v1.Pod) error {
 	if err := cleanEnvironment(); err != nil {
 		return fmt.Errorf("could not clear the environment : %v", err)
 	}
+	if err := prepareApptainerRuntimeDirs(); err != nil {
+		return fmt.Errorf("could not prepare apptainer runtime dirs : %v", err)
+	}
+	return nil
+}
+
+func prepareApptainerRuntimeDirs() error {
+	const baseDir = "/tmp/.hpk-apptainer"
+	tmpDir := filepath.Join(baseDir, "tmp")
+	cacheDir := filepath.Join(baseDir, "cache")
+
+	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
+		return fmt.Errorf("could not create tmp dir '%s': %v", tmpDir, err)
+	}
+
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		return fmt.Errorf("could not create cache dir '%s': %v", cacheDir, err)
+	}
+
+	if err := os.Setenv("APPTAINER_TMPDIR", tmpDir); err != nil {
+		return fmt.Errorf("could not set APPTAINER_TMPDIR: %v", err)
+	}
+	if err := os.Setenv("SINGULARITY_TMPDIR", tmpDir); err != nil {
+		return fmt.Errorf("could not set SINGULARITY_TMPDIR: %v", err)
+	}
+	if err := os.Setenv("TMPDIR", tmpDir); err != nil {
+		return fmt.Errorf("could not set TMPDIR: %v", err)
+	}
+
+	if err := os.Setenv("APPTAINER_CACHEDIR", cacheDir); err != nil {
+		return fmt.Errorf("could not set APPTAINER_CACHEDIR: %v", err)
+	}
+	if err := os.Setenv("SINGULARITY_CACHEDIR", cacheDir); err != nil {
+		return fmt.Errorf("could not set SINGULARITY_CACHEDIR: %v", err)
+	}
+
 	return nil
 }
 
@@ -240,12 +276,16 @@ func cleanEnvironment() error {
 		"SINGULARITY_ENVIRONMENT",
 		"SINGULARITY_NAME",
 		"SINGULARITY_BIND",
+		"SINGULARITY_BINDPATH",
+		"SINGULARITY_MOUNT",
 		"APPTAINER_APPNAME",
 		"APPTAINER_COMMAND",
 		"APPTAINER_CONTAINER",
 		"APPTAINER_ENVIRONMENT",
 		"APPTAINER_NAME",
 		"APPTAINER_BIND",
+		"APPTAINER_BINDPATH",
+		"APPTAINER_MOUNT",
 	}
 
 	for _, name := range envVars {
@@ -386,7 +426,7 @@ func handleInitContainers(pod *v1.Pod, hpkEnv bool) error {
 			apptainerVerbosity = "--debug"
 		}
 		apptainerArgs := []string{
-			apptainerVerbosity, executionMode, "--nv", "--cleanenv", "--writable-tmpfs", "--no-mount", "home", "--unsquash",
+			apptainerVerbosity, executionMode, "--nv", "--cleanenv", "--writable-tmpfs", "--no-mount", "home,bind-paths", "--unsquash",
 		}
 		if hpkEnv {
 			apptainerArgs = append(apptainerArgs, "--bind", "/scratch/etc/resolv.conf:/etc/resolv.conf,/scratch/etc/hosts:/etc/hosts")
@@ -513,7 +553,7 @@ func handleContainers(pod *v1.Pod, wg *sync.WaitGroup, hpkEnv bool) error {
 			apptainerVerbosity = "--debug"
 		}
 		apptainerArgs := []string{
-			apptainerVerbosity, executionMode, "--nv", "--cleanenv", "--writable-tmpfs", "--no-mount", "home", "--unsquash",
+			apptainerVerbosity, executionMode, "--nv", "--cleanenv", "--writable-tmpfs", "--no-mount", "home,bind-paths", "--unsquash",
 		}
 		if hpkEnv {
 			apptainerArgs = append(apptainerArgs, "--bind", "/scratch/etc/resolv.conf:/etc/resolv.conf,/scratch/etc/hosts:/etc/hosts")
