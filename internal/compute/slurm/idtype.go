@@ -101,6 +101,10 @@ func GetPIDFromFile(pidFilePath string) (string, error) {
 // IsProcessJobID checks if the given job ID represents a direct process PID (non-SLURM mode).
 // A job ID that consists only of digits is considered a process PID.
 func IsProcessJobID(jobID string) bool {
+	if strings.TrimSpace(jobID) == "" {
+		return false
+	}
+
 	// If it's all digits, it's a process PID. Otherwise, it's a SLURM job ID.
 	for _, ch := range jobID {
 		if ch < '0' || ch > '9' {

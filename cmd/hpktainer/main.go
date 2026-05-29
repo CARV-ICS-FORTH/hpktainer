@@ -27,6 +27,33 @@ const (
 	CalicoConfig = "/run/calico/subnet.env"
 )
 
+func ensureApptainerRuntimeDirs() (tmpDir string, cacheDir string, err error) {
+	preferredBase := "/root/.hpk/.apptainer"
+	tmpDir = filepath.Join(preferredBase, "tmp")
+	cacheDir = filepath.Join(preferredBase, "cache")
+
+	if err = os.MkdirAll(tmpDir, 0o755); err == nil {
+		if err = os.MkdirAll(cacheDir, 0o755); err == nil {
+			return tmpDir, cacheDir, nil
+		}
+	}
+
+	// Fallback for contexts where /root/.hpk is not available.
+	fallbackBase := "/tmp/.hpk-apptainer"
+	tmpDir = filepath.Join(fallbackBase, "tmp")
+	cacheDir = filepath.Join(fallbackBase, "cache")
+
+	if err = os.MkdirAll(tmpDir, 0o755); err != nil {
+		return "", "", err
+	}
+
+	if err = os.MkdirAll(cacheDir, 0o755); err != nil {
+		return "", "", err
+	}
+
+	return tmpDir, cacheDir, nil
+}
+
 func main() {
 	// 1. Check Root
 	versionFlag := flag.Bool("version", false, "Print version and exit")
@@ -277,6 +304,19 @@ func main() {
 	// Apptainer passes env vars prefixed with APPTAINERENV_ or defaults?
 	// We can use SINGULARITYENV_ / APPTAINERENV_ prefix to pass them into container.
 	hostEnv := os.Environ()
+	tmpDir, cacheDir, err := ensureApptainerRuntimeDirs()
+	if err != nil {
+		log.Fatalf("Failed to prepare apptainer runtime dirs: %v", err)
+	}
+
+	hostEnv = append(hostEnv,
+		"APPTAINER_TMPDIR="+tmpDir,
+		"SINGULARITY_TMPDIR="+tmpDir,
+		"TMPDIR="+tmpDir,
+		"APPTAINER_CACHEDIR="+cacheDir,
+		"SINGULARITY_CACHEDIR="+cacheDir,
+	)
+
 	for _, kv := range envVars {
 		k, v, _ := strings.Cut(kv, "=")
 		hostEnv = append(hostEnv, "APPTAINERENV_"+k+"="+v)

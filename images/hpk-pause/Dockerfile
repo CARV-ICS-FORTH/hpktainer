@@ -20,4 +20,4 @@ RUN apt-get update && \
 # Copy hpk-pause binary
 COPY --from=builder /bin/hpk-pause /usr/local/bin/hpk-pause
 
-ENTRYPOINT ["/usr/local/bin/hpk-pause"]
+CMD ["/usr/local/bin/hpk-pause"]

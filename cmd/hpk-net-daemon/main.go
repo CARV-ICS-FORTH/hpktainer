@@ -23,6 +23,7 @@ func main() {
 	tapName := flag.String("tap", "", "Name of TAP interface")
 	createTap := flag.Bool("create-tap", false, "Whether to create the TAP interface (if false, opens existing)")
 	versionFlag := flag.Bool("version", false, "Print version and exit")
+	mtuFlag := flag.Int("mtu", 1450, "MTU of the TAP interface (defaults to 1400 to match Flannel/Bridge overlay)")
 
 	flag.Parse()
 
@@ -66,13 +67,19 @@ func main() {
 	log.Printf("Opened TAP interface: %s", tap.Name())
 
 	// Ensure interface is UP to avoid I/O errors on write
-	if link, err := netlink.LinkByName(tap.Name()); err == nil {
-		if err := netlink.LinkSetUp(link); err != nil {
-			log.Printf("Warning: failed to set link up: %v", err)
-		}
-	} else {
-		log.Printf("Warning: failed to find link %s: %v", tap.Name(), err)
-	}
+	if link, err := netlink.LinkByName(tap.Name()); err == nil {    
+        if err := netlink.LinkSetMTU(link, *mtuFlag); err != nil {
+            log.Printf("Warning: failed to set MTU %d on %s: %v", *mtuFlag, tap.Name(), err)
+        } else {
+            log.Printf("Set MTU on %s to %d", tap.Name(), *mtuFlag)
+        }
+
+        if err := netlink.LinkSetUp(link); err != nil {
+            log.Printf("Warning: failed to set link up: %v", err)
+        }
+    } else {
+        log.Printf("Warning: failed to find link %s: %v", tap.Name(), err)
+    }
 
 	var conn net.Conn
 

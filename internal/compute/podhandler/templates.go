@@ -250,7 +250,7 @@ function handle_init_containers() {
 	echo "[Virtual] Spawning InitContainer: {{$container.InstanceName}}"
 	 
 	{{- if $container.EnvFilePath}}
-	sh -c {{$container.EnvFilePath}} > /scratch/{{$container.InstanceName}}.env
+	cat {{$container.EnvFilePath}} > /scratch/{{$container.InstanceName}}.env
 	{{- end}}
 
 	# Mark the beginning of an init job (all get the shell's pid).  
@@ -292,7 +292,7 @@ function handle_containers() {
 	####################
 
 	{{- if $container.EnvFilePath}}
-	sh -c {{$container.EnvFilePath}} > /scratch/{{$container.InstanceName}}.env
+	cat {{$container.EnvFilePath}} > /scratch/{{$container.InstanceName}}.env
 	{{- end}}
 
 	$(apptainer {{ $container.ExecutionMode }} \
@@ -449,12 +449,12 @@ echo $$ > "${workdir}/.pid"
 
 export APPTAINERENV_KUBEDNS_IP={{.HostEnv.KubeDNS}}
 
-exec {{$.HostEnv.ApptainerBin}} exec --nv --containall --net --fakeroot --scratch /scratch --workdir ${workdir} \
+exec {{$.HostEnv.ApptainerBin}} run --nv --net --scratch /scratch --workdir ${workdir} \
 {{- if .HostEnv.EnableCgroupV2}}
 --apply-cgroups {{.VirtualEnv.CgroupFilePath}} 		\
 {{- end}}
 --env PARENT=${PPID}								\
---bind $HOME/.hpk-master/kubernetes:/k8s-data			\
+--bind /var/lib/hpk:/k8s-data			\
 --bind /etc/apptainer/apptainer.conf				\
 --bind $HOME,/tmp									\
 --hostname {{truncate .Pod.Name 63}}							\

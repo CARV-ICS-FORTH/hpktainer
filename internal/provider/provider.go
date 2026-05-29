@@ -143,6 +143,17 @@ func NewVirtualK8S(config InitConfig) (*VirtualK8S, error) {
 				archivedPodPath = fmt.Sprintf("%s-%d", archivedPodPath, time.Now().Second())
 				goto retry
 			}
+
+			if errors.Is(err, os.ErrNotExist) {
+				logger.Info("Skipping corrupted pod archive move because source no longer exists",
+					"from", path,
+					"to", archivedPodPath,
+					"error", err,
+				)
+
+				continue
+			}
+
 			return nil, fmt.Errorf("moving error of corrupted pod: %w", err)
 		}
 
