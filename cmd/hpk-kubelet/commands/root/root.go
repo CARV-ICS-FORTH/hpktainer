@@ -69,7 +69,7 @@ func NewCommand(ctx context.Context, name string, c Opts) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   name,
 		Short: name + " run hpk",
-		Long:  name + ` run a kubelet-alike daemon that allows to schedule kubernetes workloads on Slurm nodes`,
+		Long:  name + ` run a kubelet-alike daemon that allows to schedule kubernetes workloads on HPC nodes`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			fmt.Println(logo())
 

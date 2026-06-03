@@ -414,7 +414,7 @@ func (v *VirtualK8S) NotifyPods(ctx context.Context, f func(*corev1.Pod)) {
 	defer v.Logger.Info("[K8s] <- NotifyPods")
 
 	/*---------------------------------------------------
-	 * Listen for Slurm Events caused by Pods.
+	 * Listen for Events caused by Pods.
 	 *---------------------------------------------------*/
 	v.updatedPod = f
 

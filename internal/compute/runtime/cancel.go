@@ -23,15 +23,7 @@ import (
 	"hpk/pkg/process"
 )
 
-var Signal = "--signal=TERM"
 
-// SignalChildren signals the submission script and the pause environment.
-// SignalChildren signals the batch script and its children processes (pause).
-var SignalChildren = "--full"
-
-// SignalParentOnly signals only the submission script.
-// https://slurm.schedmd.com/scancel.html#OPT_batch
-var SignalParentOnly = "--batch"
 
 var ErrRety = errors.New("retry later")
 

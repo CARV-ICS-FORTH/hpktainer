@@ -160,7 +160,7 @@ func DeletePod(podKey client.ObjectKey, watcher filenotify.FileWatcher) bool {
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			// This behavior may raise when trying to delete a deleted pod.
-			// However, deleting a pod from the fs does not guarantee deletion from Slurm.
+			// However, deleting a pod from the fs does not guarantee deletion.
 			// For this reason, we just need to continue.
 			return true
 		}
@@ -173,7 +173,7 @@ func DeletePod(podKey client.ObjectKey, watcher filenotify.FileWatcher) bool {
 	/*---------------------------------------------------
 	 * Kill Direct Process
 	 *---------------------------------------------------*/
-	// Non-SLURM mode: read PID exclusively from controlfiles.
+	// Read PID exclusively from controlfiles.
 	pid, err := resolveProcessPIDFromControlFiles(localPod, podDir, logger)
 	if err != nil {
 		if errors.Is(err, ErrNoProcessIDInControlFiles) {

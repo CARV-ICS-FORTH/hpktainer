@@ -31,7 +31,7 @@ func StartAPIServer(c Opts, virtualk8s *provider.VirtualK8S) {
 	mux := http.NewServeMux()
 
 	mux.Handle("/hello", http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		writer.Write([]byte("Hi there! I 'm HPK-Kubelet. My job is to run your Kubernetes stuff on Slurm.\n"))
+		writer.Write([]byte("Hi there! I 'm HPK-Kubelet. My job is to run your Kubernetes stuff on HPC.\n"))
 	}))
 
 	/*---------------------------------------------------
