@@ -226,7 +226,6 @@ func runRootCommand(ctx context.Context, c Opts) error {
 		}
 
 		DefaultLogger.Info("Informers are ready",
-			"namespace", c.KubeNamespace,
 			"crds", []string{
 				"pods", "secrets", "configMap", "service", "serviceAccount",
 			})

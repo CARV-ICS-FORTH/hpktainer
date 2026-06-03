@@ -44,8 +44,6 @@ type Opts struct {
 	K8sAPICertFilepath string
 	K8sAPIKeyFilepath  string
 
-	// Namespace to watch for pods and other resources
-	KubeNamespace string
 
 	// Node name to use when creating a node in Kubernetes
 	NodeName string
@@ -89,7 +87,6 @@ func installFlags(flags *pflag.FlagSet, c *Opts) {
 	flags.StringVar(&c.K8sAPICertFilepath, "certificate", os.Getenv(EnvAPICertLocation), "location for certificate to the API server")
 	flags.StringVar(&c.K8sAPIKeyFilepath, "key", os.Getenv(EnvAPIKeyLocation), "location for key for the API server")
 
-	flags.StringVar(&c.KubeNamespace, "namespace", corev1.NamespaceAll, "kubernetes namespace (default is 'all')")
 	flags.StringVar(&c.NodeName, "nodename", "hpk-kubelet", "kubernetes node name")
 
 	flags.StringVar(&c.DefaultHostEnvironment.ApptainerBin, "apptainer", "apptainer", "path to Apptainer bin")

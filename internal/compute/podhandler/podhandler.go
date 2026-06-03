@@ -482,7 +482,6 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, watcher filenotify.FileWatc
 
 	// Set annotations from VirtualEnvironment
 	pod.Annotations["cgroupFilePath"] = h.podDirectory.CgroupFilePath()
-	pod.Annotations["constructorFilePath"] = h.podDirectory.ConstructorFilePath()
 	pod.Annotations["ipAddressPath"] = h.podDirectory.IPAddressPath()
 	pod.Annotations["stdoutPath"] = h.podDirectory.StdoutPath()
 	pod.Annotations["stderrPath"] = h.podDirectory.StderrPath()
@@ -495,13 +494,12 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, watcher filenotify.FileWatc
 		PauseImageFilePath: pauseImage.Filepath,
 		HostEnv:            compute.Environment,
 		VirtualEnv: compute.VirtualEnvironment{
-			PodDirectory:        h.podDirectory.String(),
-			CgroupFilePath:      h.podDirectory.CgroupFilePath(),
-			ConstructorFilePath: h.podDirectory.ConstructorFilePath(),
-			IPAddressPath:       h.podDirectory.IPAddressPath(),
-			StdoutPath:          h.podDirectory.StdoutPath(),
-			StderrPath:          h.podDirectory.StderrPath(),
-			SysErrorFilePath:    h.podDirectory.SysErrorFilePath(),
+			PodDirectory:     h.podDirectory.String(),
+			CgroupFilePath:   h.podDirectory.CgroupFilePath(),
+			IPAddressPath:    h.podDirectory.IPAddressPath(),
+			StdoutPath:       h.podDirectory.StdoutPath(),
+			StderrPath:       h.podDirectory.StderrPath(),
+			SysErrorFilePath: h.podDirectory.SysErrorFilePath(),
 		},
 		InitContainers:  initContainers,
 		Containers:      containers,

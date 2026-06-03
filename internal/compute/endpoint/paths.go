@@ -224,11 +224,6 @@ func (p PodPath) EncodedJSONPath() string {
 	return filepath.Join(p.JobDir(), "pod"+ExtensionCRD)
 }
 
-// ConstructorFilePath .hpk/namespace/podName/.virtualenv/constructor.sh
-func (p PodPath) ConstructorFilePath() string {
-	return filepath.Join(p.JobDir(), "constructor.sh")
-}
-
 // CgroupFilePath .hpk/namespace/podName/.virtualenv/cgroup.toml
 func (p PodPath) CgroupFilePath() string {
 	return filepath.Join(p.JobDir(), "cgroup.toml")

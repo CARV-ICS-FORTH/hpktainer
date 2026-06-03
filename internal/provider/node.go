@@ -72,10 +72,7 @@ func (v *VirtualK8S) ConfigureNode(ctx context.Context, node *corev1.Node) {
 	/*---------------------------------------------------
 	 * Preamble used for Request tracing on the logs
 	 *---------------------------------------------------*/
-	v.Logger.Info("[K8s] -> ConfigureNode")
-	defer v.Logger.Info("[K8s] <- ConfigureNode")
-
-	panic("not yet supported")
+	v.Logger.Info("[K8s] -> ConfigureNode (not yet supported)")
 }
 
 // NodeConditions creates a slice of node conditions representing a

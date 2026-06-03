@@ -50,8 +50,6 @@ type VirtualEnvironment struct {
 	// CgroupFilePath points to the cgroup configuration for the virtual environment.
 	CgroupFilePath string
 
-	// ConstructorFilePath points to the script for creating the virtual environment for Pod.
-	ConstructorFilePath string
 
 	// IPAddressPath is where we store the internal Pod's ip.
 	IPAddressPath string

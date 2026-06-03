@@ -43,9 +43,6 @@ func StartAPIServer(c Opts, virtualk8s *provider.VirtualK8S) {
 		GetPods:          virtualk8s.GetPods,
 		PortForward:      virtualk8s.PortForward,
 		// AttachToContainer: ,
-		// GetPodsFromKubernetes: func(context.Context) ([]*corev1.Pod, error) {
-		//	return k8sclientset.CoreV1().Pods(c.KubeNamespace).List(ctx, labels.Everything())
-		// },
 		// GetStatsSummary:       virtualk8s.GetStatsSummary,
 		// StreamIdleTimeout:     0,
 		// StreamCreationTimeout: 0,
