@@ -166,7 +166,7 @@ func (p HPKPath) ParseControlFilePath(absPath string) (podKey types.NamespacedNa
 }
 
 /*
-	Pod-Related paths captured by Slurm Notifier.
+	Pod-Related paths captured by the Event Listener.
 	They are necessary to drive the lifecycle of a Pod.
 */
 
@@ -183,7 +183,7 @@ func (p PodPath) String() string {
 }
 
 /*
-	Pod-Related paths not captured by Slurm Notifier.
+	Pod-Related paths not captured by the Event Listener.
 	They are needed for HPK to bootstrap a pod.
 */
 
@@ -255,7 +255,7 @@ func (p PodPath) IPAddressPath() string {
 }
 
 /*
-	Container-Related paths captured by Slurm Notifier.
+	Container-Related paths captured by the Event Listener.
 	They are necessary to drive the lifecycle of a Container.
 */
 
@@ -284,7 +284,7 @@ func (c ContainerPath) ExitCodePath() string {
 }
 
 /*
-	Container-Related paths not captured by Slurm Notifier.
+	Container-Related paths not captured by the Event Listener.
 	They are needed for HPK to bootstrap a container.
 */
 

@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package job contains code for accessing compute resources via Slurm.
-package slurm
+// Package runtime contains code for managing compute environments.
+package runtime
 
 import (
 	"fmt"

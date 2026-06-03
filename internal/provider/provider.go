@@ -28,7 +28,6 @@ import (
 	"hpk/internal/compute/events"
 	PodHandler "hpk/internal/compute/podhandler"
 	"hpk/internal/compute/runtime"
-	"hpk/internal/compute/slurm"
 	"hpk/pkg/container"
 
 	"github.com/sirupsen/logrus"
@@ -79,7 +78,7 @@ type VirtualK8S struct {
 }
 
 // NewVirtualK8S reads a kubeconfig file and sets up a client to interact
-// with Slurm cluster. It is designed to restore missing state after a restart.
+// with the execution environment. It is designed to restore missing state after a restart.
 func NewVirtualK8S(config InitConfig) (*VirtualK8S, error) {
 	var err error
 	var watcher filenotify.FileWatcher
@@ -261,9 +260,9 @@ func (v *VirtualK8S) UpdatePod(ctx context.Context, pod *corev1.Pod) error {
 		return nil
 	}
 
-	if !slurm.HasJobID(pod) {
-		// If the pod has not a received a job id, it means that it still being in the Slurm queue.
-		logger.Info("Discard update because job is still in the queue")
+	if !runtime.HasJobID(pod) {
+		// If the pod has not received a job id, it means that it is still starting.
+		logger.Info("Discard update because container is still starting")
 		return nil
 	}
 

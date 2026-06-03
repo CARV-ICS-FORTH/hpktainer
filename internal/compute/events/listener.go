@@ -31,13 +31,13 @@ import (
 
 /************************************************************
 
-			Listen for SLURM events
+			Listen for pod events
 
 ************************************************************/
 
 var ErrClosedQueue = errors.New("queue is closed")
 
-// Options represent options for SlurmEventHandler.
+// Options represent options for EventHandler.
 type Options struct {
 	MaxWorkers   int // Number of workers to spawn.
 	MaxQueueSize int // Maximum length for the queue to hold events.
@@ -96,7 +96,7 @@ func (h *EventHandler) Listen(ctx context.Context, control PodControl) {
 			for {
 				select {
 				case <-ctx.Done():
-					compute.DefaultLogger.Info("Shutting down the Slurm listener", "err", ctx.Err())
+					compute.DefaultLogger.Info("Shutting down the event listener", "err", ctx.Err())
 
 					// Ensure no new messages are added.
 					h.locker.Lock()
@@ -110,7 +110,7 @@ func (h *EventHandler) Listen(ctx context.Context, control PodControl) {
 				case event := <-h.Queue:
 					// filter events other than creations.
 					if !event.Op.Has(fsnotify.Create) {
-						compute.DefaultLogger.Info("SLURM: omit non-create event", "details", event)
+						compute.DefaultLogger.Info("Event: omit non-create event", "details", event)
 
 						// return from select
 						break
@@ -119,21 +119,21 @@ func (h *EventHandler) Listen(ctx context.Context, control PodControl) {
 					// ensure that the file is a control file.
 					podkey, file, invalid := compute.HPK.ParseControlFilePath(event.Name)
 					if invalid {
-						compute.DefaultLogger.Info("SLURM: omit unexpected event", "details", event)
+						compute.DefaultLogger.Info("Event: omit unexpected event", "details", event)
 
 						continue
 					}
 
 					logger := compute.DefaultLogger.WithValues("pod", podkey)
 
-					/*-- Skip events that are not related to pod changes driven by Slurm --*/
+					/*-- Skip events that are not related to pod changes --*/
 					/* In previous versions, this condition was fsnotify.Write, with the goal to avoid race
 					conditions between creating a file and writing a file. However, this does not seem to work
 					with the Polling watcher, and we can only capture Create events. In turn, that means that
 					file readers must retry if there are no contents in the file.
 					*/
 					if !(event.Op.Has(fsnotify.Create) || event.Op.Has(fsnotify.Write)) {
-						logger.Info("SLURM: omit known event", "op", event.Op, "file", file)
+						logger.Info("Event: omit known event", "op", event.Op, "file", file)
 						continue
 					}
 
@@ -143,8 +143,8 @@ func (h *EventHandler) Listen(ctx context.Context, control PodControl) {
 					ext := filepath.Ext(file)
 					switch ext {
 					case endpoint.ExtensionSysError:
-						/*-- Sbatch failed. Pod should fail immediately without other checks --*/
-						logger.Info("[Slurm] -> Pod initialization error", "op", event.Op, "file", file)
+						/*-- Pod failed. Pod should fail immediately without other checks --*/
+						logger.Info("[Runtime] -> Pod initialization error", "op", event.Op, "file", file)
 
 						// load local pod
 						pod, err := control.LoadFromDisk(podkey)
@@ -172,13 +172,13 @@ func (h *EventHandler) Listen(ctx context.Context, control PodControl) {
 						continue
 
 					case endpoint.ExtensionIP: // Pod started
-						logger.Info("[Slurm] -> Pod Started", "op", event.Op, "file", file)
+						logger.Info("[Runtime] -> Pod Started", "op", event.Op, "file", file)
 
 					case endpoint.ExtensionJobID: // Container Started
-						logger.Info("[Slurm] -> Container Started", "op", event.Op, "file", file)
+						logger.Info("[Runtime] -> Container Started", "op", event.Op, "file", file)
 
 					case endpoint.ExtensionExitCode: // Container Terminated
-						logger.Info("[Slurm] -> Container Terminated", "op", event.Op, "file", file)
+						logger.Info("[Runtime] -> Container Terminated", "op", event.Op, "file", file)
 
 					default:
 						/*-- Any other file is ignored --*/
@@ -196,7 +196,7 @@ func (h *EventHandler) Listen(ctx context.Context, control PodControl) {
 					/*-- Load Pod from reference --*/
 					pod, err := control.LoadFromDisk(podkey)
 					if err != nil {
-						// Race conditions may between the deletion of a pod and Slurm events.
+						// Race conditions may exist between the deletion of a pod and events.
 						logger.Info("Omit event",
 							"reason", "pod was not found. this is probably a conflict",
 							"pod", podkey,
@@ -220,7 +220,7 @@ func (h *EventHandler) Listen(ctx context.Context, control PodControl) {
 					/*-- Update the remote Copy --*/
 					control.NotifyVirtualKubelet(pod)
 
-					logger.Info("[Slurm] <- Listen for events")
+					logger.Info("[Runtime] <- Listen for events")
 				}
 			}
 		}()

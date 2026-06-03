@@ -19,7 +19,7 @@ import (
 	"fmt"
 	"runtime"
 
-	"hpk/internal/compute/slurm"
+	computeruntime "hpk/internal/compute/runtime"
 	"hpk/pkg/version"
 
 	"github.com/matishsiao/goInfo"
@@ -55,13 +55,13 @@ func (v *VirtualK8S) NewVirtualNode(ctx context.Context, nodename string, taint 
 			DaemonEndpoints: v.NodeDaemonEndpoints(ctx),
 			Conditions:      NodeConditions(ctx),
 			Phase: func() corev1.NodePhase {
-				if slurm.ConnectionOK() {
+				if computeruntime.ConnectionOK() {
 					return corev1.NodeRunning
 				}
 				return corev1.NodePending
 			}(),
-			Capacity:    slurm.TotalResources(),
-			Allocatable: slurm.AllocatableResources(ctx),
+			Capacity:    computeruntime.TotalResources(),
+			Allocatable: computeruntime.AllocatableResources(ctx),
 		},
 	}
 }

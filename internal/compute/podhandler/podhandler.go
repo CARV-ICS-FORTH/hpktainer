@@ -27,7 +27,6 @@ import (
 	"hpk/internal/compute/endpoint"
 	"hpk/internal/compute/image"
 	"hpk/internal/compute/runtime"
-	"hpk/internal/compute/slurm"
 	"hpk/pkg/filenotify"
 
 	"errors"
@@ -99,15 +98,15 @@ func parseProcessPID(raw string) (string, error) {
 		return "", fmt.Errorf("empty process id")
 	}
 
-	if strings.HasPrefix(value, string(slurm.JobIDTypeProcess)) {
-		value = strings.TrimPrefix(value, string(slurm.JobIDTypeProcess))
+	if strings.HasPrefix(value, string(runtime.JobIDTypeProcess)) {
+		value = strings.TrimPrefix(value, string(runtime.JobIDTypeProcess))
 		value = strings.TrimSpace(value)
 		if value == "" {
 			return "", fmt.Errorf("empty process id")
 		}
 	}
 
-	if !slurm.IsProcessJobID(value) {
+	if !runtime.IsProcessJobID(value) {
 		return "", fmt.Errorf("invalid process id '%s'", raw)
 	}
 
@@ -194,9 +193,9 @@ func DeletePod(podKey client.ObjectKey, watcher filenotify.FileWatcher) bool {
 	}
 
 	{
-		out, err := slurm.KillProcessByPID(pid)
+		out, err := runtime.KillProcessByPID(pid)
 		if err != nil {
-			if errors.Is(err, slurm.ErrInvalidJob) {
+			if errors.Is(err, runtime.ErrInvalidJob) {
 				logger.Info(" * No such process", "pid", pid, "pod", podKey)
 				// the process does not exist, so it can be considered as deleted.
 				goto remove_pod
@@ -479,7 +478,7 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, watcher filenotify.FileWatc
 	/*---------------------------------------------------
 	 * Submit job directly, and store the JobID
 	 *---------------------------------------------------*/
-	jobID, err := slurm.SubmitJob(scriptFilePath)
+	jobID, err := runtime.SubmitJob(scriptFilePath)
 	if err != nil {
 		compute.SystemPanic(err, "failed to submit job")
 	}
@@ -487,7 +486,7 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, watcher filenotify.FileWatc
 	logger.Info(" * Job has been submitted", "jobID", jobID)
 
 	// update pod with the job id
-	slurm.SetPodID(h.Pod, slurm.JobIDTypeProcess, "0")
+	runtime.SetPodID(h.Pod, runtime.JobIDTypeProcess, "0")
 
 	// needed for subsequent GetPod()
 	if err := SavePodToFile(ctx, h.Pod); err != nil {

@@ -23,7 +23,7 @@ import (
 	"hpk/internal/compute"
 	"hpk/internal/compute/endpoint"
 	"hpk/internal/compute/image"
-	"hpk/internal/compute/slurm"
+	"hpk/internal/compute/runtime"
 	kubecontainer "hpk/pkg/container"
 	"hpk/pkg/hostutil"
 
@@ -253,7 +253,7 @@ func SyncContainerStatuses(pod *corev1.Pod) {
 		/*-- Presence of Job ID indicated Running state (need to be set only once)--*/
 		if jobIDExists {
 			if containerStatus.State.Running == nil {
-				slurm.SetContainerStatusID(containerStatus, jobID)
+				runtime.SetContainerStatusID(containerStatus, jobID)
 
 				containerStatus.State.Waiting = nil
 				containerStatus.State.Running = &corev1.ContainerStateRunning{
@@ -272,8 +272,8 @@ func SyncContainerStatuses(pod *corev1.Pod) {
 
 		/*-- Lack of jobID indicates Waiting state --*/
 		containerStatus.State.Waiting = &corev1.ContainerStateWaiting{
-			Reason:  "InSlurmQueue",
-			Message: "Job waiting in the Slurm queue",
+			Reason:  "ContainerStarting",
+			Message: "Container is starting on the host",
 		}
 		containerStatus.State.Running = nil
 		containerStatus.State.Terminated = nil

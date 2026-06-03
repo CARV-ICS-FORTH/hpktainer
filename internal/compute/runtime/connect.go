@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package slurm
+package runtime
 
 
-// ConnectionOK return true if HPK maintains connection with the Slurm manager.
+// ConnectionOK returns true if the runtime environment is active.
 // Otherwise, it returns false.
 func ConnectionOK() bool {
 	return true

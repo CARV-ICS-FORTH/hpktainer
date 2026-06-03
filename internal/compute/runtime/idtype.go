@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package slurm
+package runtime
 
 import (
 	"os"
@@ -65,14 +65,14 @@ func GetPIDFromFile(pidFilePath string) (string, error) {
 	return pid, nil
 }
 
-// IsProcessJobID checks if the given job ID represents a direct process PID (non-SLURM mode).
+// IsProcessJobID checks if the given job ID represents a direct process PID.
 // A job ID that consists only of digits is considered a process PID.
 func IsProcessJobID(jobID string) bool {
 	if strings.TrimSpace(jobID) == "" {
 		return false
 	}
 
-	// If it's all digits, it's a process PID. Otherwise, it's a SLURM job ID.
+	// If it's all digits, it's a process PID.
 	for _, ch := range jobID {
 		if ch < '0' || ch > '9' {
 			return false
