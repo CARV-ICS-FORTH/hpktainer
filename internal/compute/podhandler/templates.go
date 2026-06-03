@@ -25,7 +25,6 @@ import (
 
 	"hpk/internal/compute"
 	"hpk/pkg/process"
-	"hpk/pkg/resources"
 
 	"al.essio.dev/pkg/shellescape"
 	"github.com/Masterminds/sprig"
@@ -239,13 +238,6 @@ type JobFields struct {
 
 	// Containers is a list of container requests to be executed.
 	Containers []Container
-
-	// ResourceRequest are reserved resources for the job.
-	ResourceRequest resources.ResourceList
-
-	// CustomFlags are flags given by the user via 'slurm.hpk.io/flags' annotations
-	CustomFlags []string
-
 
 	// UseTmp is a flag that shows if tmp directories should be used.
 	UseTmp bool

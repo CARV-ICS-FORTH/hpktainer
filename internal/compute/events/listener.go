@@ -224,7 +224,7 @@ func (h *EventHandler) Listen(ctx context.Context, control PodControl) {
 				}
 			}
 		}()
-
-		waitGroup.Wait()
 	}
+
+	waitGroup.Wait()
 }

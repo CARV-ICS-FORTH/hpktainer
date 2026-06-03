@@ -25,11 +25,7 @@ import (
 type JobIDType string
 
 const (
-	JobIDTypeInstance JobIDType = "instance://"
-
 	JobIDTypeProcess JobIDType = "pid://"
-
-	JobIDTypeEmpty JobIDType = "Empty"
 )
 
 func SetPodID(pod *corev1.Pod, idType JobIDType, value string) {
@@ -55,19 +51,6 @@ func parseIDType(raw string) string {
 	}
 
 	panic("unknown id format: " + raw)
-
-	/*-- Extract id from raw format '<type>://<job_id>'.
-	switch {
-
-	case strings.HasPrefix(raw, string(JobIDTypeInstance)):
-		return JobIDTypeInstance, strings.Split(raw, string(JobIDTypeInstance))[1]
-	case strings.HasPrefix(raw, string(JobIDTypeProcess)):
-		return JobIDTypeProcess, strings.Split(raw, string(JobIDTypeProcess))[1]
-	default:
-
-	}
-
-	*/
 }
 
 // GetPIDFromFile reads the process ID from a .pid file in the pod's working directory.

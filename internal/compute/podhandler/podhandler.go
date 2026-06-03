@@ -29,7 +29,6 @@ import (
 	"hpk/internal/compute/runtime"
 	"hpk/internal/compute/slurm"
 	"hpk/pkg/filenotify"
-	"hpk/pkg/resources"
 
 	"errors"
 
@@ -39,9 +38,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-const (
-	CustomSlurmFlags = "slurm.hpk.io/flags"
-)
+
 
 var ErrNoProcessIDInControlFiles = errors.New("no process id found in control files")
 
@@ -402,18 +399,6 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, watcher filenotify.FileWatc
 	/*---------------------------------------------------
 	 * Handle Cgroups and Resource Reservation
 	 *---------------------------------------------------*/
-	resourceRequest := resources.NewResourceList()
-
-	// set per-container limitations
-	// TODO: add the pod limit's
-	for _, initContainer := range pod.Spec.InitContainers {
-		resources.Sum(resourceRequest, initContainer.Resources.Requests)
-	}
-
-	for _, container := range pod.Spec.Containers {
-		resources.Sum(resourceRequest, container.Resources.Requests)
-	}
-
 	// create cgroups for the pod
 	if compute.Environment.EnableCgroupV2 {
 		if _, err := os.Create(h.podDirectory.CgroupFilePath()); err != nil {
@@ -434,10 +419,6 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, watcher filenotify.FileWatc
 	/*---------------------------------------------------
 	 * Prepare Fields for Sbatch Templates
 	 *---------------------------------------------------*/
-	var customFlags []string
-	if flags, hasFlags := h.Pod.GetAnnotations()[CustomSlurmFlags]; hasFlags {
-		customFlags = strings.Split(flags, " ")
-	}
 
 	scriptTemplate, err := ParseTemplate(HostScriptTemplate)
 	if err != nil {
@@ -479,11 +460,9 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, watcher filenotify.FileWatc
 			StderrPath:       h.podDirectory.StderrPath(),
 			SysErrorFilePath: h.podDirectory.SysErrorFilePath(),
 		},
-		InitContainers:  initContainers,
-		Containers:      containers,
-		ResourceRequest: resources.ResourceListToStruct(resourceRequest),
-		CustomFlags:     customFlags,
-		UseTmp:          useTmp,
+		InitContainers: initContainers,
+		Containers:     containers,
+		UseTmp:         useTmp,
 	}); err != nil {
 		/*-- since both the template and fields are internal to the code, the evaluation should always succeed	--*/
 		compute.SystemPanic(err, "failed to evaluate sbatch template")
