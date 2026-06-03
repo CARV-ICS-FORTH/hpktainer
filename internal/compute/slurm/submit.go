@@ -12,13 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package job contains code for accessing compute resources via Slurm.
+// Package slurm contains code for accessing compute resources.
 package slurm
 
 import (
-	"regexp"
-	"strconv"
-
 	"fmt"
 	"os"
 
@@ -26,55 +23,20 @@ import (
 	"hpk/pkg/process"
 )
 
-// ExcludeNodes EXISTS ONLY FOR DEBUGGING PURPOSES of Inotify on NFS.
-var ExcludeNodes = "--exclude="
-
-// NewUserEnv is used to generate the /run/user/ folder required by cgroups.
-// The optional mode value control the "su" options.
-// With a mode value of "S", "su" is executed without the "-" option.
-// With a mode value of "L", "su" is executed with the "-" option, replicating the login environment.
-var NewUserEnv = "--get-user-env=10L"
-
-// SubmitJobWithRunSlurm submits a job either via SLURM (if runSlurm is true) or directly via bash (if false).
-func SubmitJobWithRunSlurm(scriptFile string, runSlurm bool) (string, error) {
+// SubmitJob executes a job script directly via bash in the background.
+func SubmitJob(scriptFile string) (string, error) {
 	outputFile := os.Getenv("HOME") + "/.hpk/logs.log"
 
-	var out []byte
-	var err error
-
-	if runSlurm {
-		// Submit Job via SLURM
-		out, err = process.Execute(Slurm.SubmitCmd, ExcludeNodes, NewUserEnv, scriptFile)
-		fmt.Println("Submitting (SLURM mode): ", Slurm.SubmitCmd, ExcludeNodes, NewUserEnv, scriptFile)
-	} else {
-		// Execute script directly via bash in background
-		commandString := fmt.Sprintf("nohup bash -l -c 'source %s' > %s 2>&1 &", scriptFile, outputFile)
-		out, err = process.Execute("bash", "-c", commandString)
-		fmt.Println("Submitting (Direct bash mode): ", commandString)
-	}
+	// Execute script directly via bash in background
+	commandString := fmt.Sprintf("nohup bash -l -c 'source %s' > %s 2>&1 &", scriptFile, outputFile)
+	out, err := process.Execute("bash", "-c", commandString)
+	fmt.Println("Submitting (Direct bash mode): ", commandString)
 
 	if err != nil {
 		compute.SystemPanic(err, "job submission error. out : '%s'", out)
 	}
 
-	var jobID string
-
-	if runSlurm {
-		// Parse Job ID from SLURM output
-		// Expected format: "Submitted batch job <jobid>"
-		expectedOutput := regexp.MustCompile(`Submitted batch job (?P<jid>\d+)`)
-		jid := expectedOutput.FindStringSubmatch(string(out))
-
-		if _, err := strconv.Atoi(jid[1]); err != nil {
-			compute.SystemPanic(err, "Invalid JobID")
-		}
-
-		jobID = jid[1]
-	} else {
-		// For direct bash mode, return a placeholder job ID
-		// The actual PID will be read from the container's jobid file by the event system
-		jobID = "0"
-	}
-
-	return jobID, nil
+	// For direct bash mode, return a placeholder job ID
+	// The actual PID will be read from the container's jobid file by the event system
+	return "0", nil
 }

@@ -175,28 +175,28 @@ func DeletePod(podKey client.ObjectKey, watcher filenotify.FileWatcher) bool {
 	podDir := compute.HPK.Pod(podKey)
 
 	/*---------------------------------------------------
-	 * Cancel Slurm Job or Kill Direct Process
+	 * Kill Direct Process
 	 *---------------------------------------------------*/
-	if !compute.Environment.RunSlurm {
-		// Non-SLURM mode: read PID exclusively from controlfiles.
-		pid, err := resolveProcessPIDFromControlFiles(localPod, podDir, logger)
-		if err != nil {
-			if errors.Is(err, ErrNoProcessIDInControlFiles) {
-				logger.Info(" * No process id found in control files; assuming process already exited", "pod", podKey)
-
-				goto remove_pod
-			}
-
-			compute.SystemPanic(err, "failed to resolve process id for pod '%s' from control files", podKey)
-		}
-
-		logger.Info(" * Resolved process id from control files", "pid", pid)
-		if strings.TrimSpace(pid) == "" {
-			logger.Info(" * Empty process id resolved from control files; assuming process already exited", "pod", podKey)
+	// Non-SLURM mode: read PID exclusively from controlfiles.
+	pid, err := resolveProcessPIDFromControlFiles(localPod, podDir, logger)
+	if err != nil {
+		if errors.Is(err, ErrNoProcessIDInControlFiles) {
+			logger.Info(" * No process id found in control files; assuming process already exited", "pod", podKey)
 
 			goto remove_pod
 		}
 
+		compute.SystemPanic(err, "failed to resolve process id for pod '%s' from control files", podKey)
+	}
+
+	logger.Info(" * Resolved process id from control files", "pid", pid)
+	if strings.TrimSpace(pid) == "" {
+		logger.Info(" * Empty process id resolved from control files; assuming process already exited", "pod", podKey)
+
+		goto remove_pod
+	}
+
+	{
 		out, err := slurm.KillProcessByPID(pid)
 		if err != nil {
 			if errors.Is(err, slurm.ErrInvalidJob) {
@@ -209,28 +209,6 @@ func DeletePod(podKey client.ObjectKey, watcher filenotify.FileWatcher) bool {
 		}
 
 		logger.Info(" * Process is terminated", "pid", pid, "pod", podKey, "out", out)
-	} else if slurm.HasJobID(localPod) {
-		jobID := slurm.GetJobID(localPod)
-
-		out, err := slurm.CancelJob(jobID)
-		if err != nil {
-			if errors.Is(err, slurm.ErrInvalidJob) {
-				logger.Info(" * No such Slurm job", "job", jobID, "pod", podKey)
-
-				// the job does not exist, so it can be considered as deleted.
-				goto remove_pod
-			}
-
-			if errors.Is(err, slurm.ErrRety) {
-				logger.Info(" * Slurm job cannot be deleted. Retry later", "job", jobID, "pod", podKey, "out", out)
-
-				return false
-			}
-
-			compute.SystemPanic(err, "failed to cancel job '%s' (%s). out: '%s'", jobID, podKey, out)
-		}
-
-		logger.Info(" * Slurm job is cancelled", "job", jobID, "pod", podKey, "out", out)
 	}
 
 	/*---------------------------------------------------
@@ -505,7 +483,6 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, watcher filenotify.FileWatc
 		Containers:      containers,
 		ResourceRequest: resources.ResourceListToStruct(resourceRequest),
 		CustomFlags:     customFlags,
-		RunSlurm:        compute.Environment.RunSlurm,
 		UseTmp:          useTmp,
 	}); err != nil {
 		/*-- since both the template and fields are internal to the code, the evaluation should always succeed	--*/
@@ -518,24 +495,20 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, watcher filenotify.FileWatc
 		compute.SystemPanic(err, "unable to write sbatch script in file '%s'", scriptFilePath)
 	}
 
-	logger.Info(" * Slurm script has been generated")
+	logger.Info(" * Container script has been generated")
 
 	/*---------------------------------------------------
-	 * Submit job to Slurm, and store the JobID
+	 * Submit job directly, and store the JobID
 	 *---------------------------------------------------*/
-	jobID, err := slurm.SubmitJobWithRunSlurm(scriptFilePath, compute.Environment.RunSlurm)
+	jobID, err := slurm.SubmitJob(scriptFilePath)
 	if err != nil {
 		compute.SystemPanic(err, "failed to submit job")
-		//[TODO:] update pod status with insufficient resources
 	}
 
-	logger.Info(" * Slurm job has been submitted", "jobID", jobID)
+	logger.Info(" * Job has been submitted", "jobID", jobID)
 
 	// update pod with the job id
-	if compute.Environment.RunSlurm {
-		slurm.SetPodID(h.Pod, slurm.JobIDTypeSlurm, jobID)
-	}
-	// In non-SLURM mode no annotation is needed; PID is resolved from controlfiles at delete time.
+	slurm.SetPodID(h.Pod, slurm.JobIDTypeProcess, "0")
 
 	// needed for subsequent GetPod()
 	if err := SavePodToFile(ctx, h.Pod); err != nil {

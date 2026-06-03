@@ -163,34 +163,6 @@ func generateTmpCommands(binds []string) TmpCommandsResult {
 }
 
 const HostScriptTemplate = `#!/bin/bash
-{{- if .RunSlurm}}
-
-#SBATCH --job-name={{.Pod.Name}}
-#SBATCH --output={{.VirtualEnv.StdoutPath}}
-#SBATCH --error={{.VirtualEnv.StderrPath}}
-{{- range $index, $flag := .CustomFlags}}
-#SBATCH {{$flag}}
-{{end}}
-
-#SBATCH --signal=B:TERM@60 # tells the controller
-                           # to send SIGTERM to the job 60 secs
-                           # before its time ends to give it a
-                           # chance for better cleanup.
-{{- if .ResourceRequest.CPU}}
-#SBATCH --cpus-per-task={{.ResourceRequest.CPU}}
-{{end}}
-
-{{- if .ResourceRequest.GPU}}
-module load cuda
-module load nvidia
-#SBATCH --gres=gpu:{{.ResourceRequest.GPU}}
-{{end}}
-
-{{- if .ResourceRequest.Memory}}
-#SBATCH --mem={{.ResourceRequest.Memory}} 
-{{end}}
-
-{{end}}
 
 #### BEGIN SECTION: Host Environment ####
 # Description
@@ -274,8 +246,6 @@ type JobFields struct {
 	// CustomFlags are flags given by the user via 'slurm.hpk.io/flags' annotations
 	CustomFlags []string
 
-	// RunSlurm indicates whether to run the job under slurm control or via apptainer directly.
-	RunSlurm bool
 
 	// UseTmp is a flag that shows if tmp directories should be used.
 	UseTmp bool

@@ -153,7 +153,6 @@ func runRootCommand(ctx context.Context, c Opts) error {
 		compute.K8SClientset = k8sclientset
 
 		compute.Environment = c.DefaultHostEnvironment
-		compute.Environment.RunSlurm = c.RunSlurm
 		compute.Environment.PauseImage = c.PauseImage
 
 		kubemaster, err := url.Parse(restConfig.Host)

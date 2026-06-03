@@ -37,32 +37,6 @@ var ErrRety = errors.New("retry later")
 
 var ErrInvalidJob = errors.New("invalid job id")
 
-func CancelJob(args string) (string, error) {
-	/*
-	 Install trap for the signals INT and TERM to
-	 the main BATCH script here.
-	 Send SIGTERM using kill to the internal script's
-	 process and wait for it to close gracefully.
-	*/
-	out, err := process.Execute(Slurm.CancelCmd /*Signal, SignalChildren,*/, args)
-	if err != nil {
-		outStr := string(out)
-
-		// in this case, the job does not exist, so for what it matters it is terminated.
-		if strings.Contains(outStr, "Invalid job id specified") {
-			return outStr, ErrInvalidJob
-		}
-
-		if strings.Contains(outStr, "Job can not be altered now, try again later") {
-			return outStr, ErrRety
-		}
-
-		return string(out), fmt.Errorf("Could not run scancel: %w", err)
-	}
-
-	return string(out), nil
-}
-
 // KillProcessByPID terminates a process by its PID using kill command.
 // Returns an error if the process cannot be terminated.
 func KillProcessByPID(pid string) (string, error) {

@@ -35,9 +35,6 @@ type HostEnvironment struct {
 	// KubeDNS points to the internal DNS of a Kubernetes cluster.
 	KubeDNS string
 
-	// RunSlurm indicates whether to run jobs under SLURM control or via Apptainer directly.
-	RunSlurm bool
-
 	// PauseImage is the image used for the pause container.
 	PauseImage string
 }
