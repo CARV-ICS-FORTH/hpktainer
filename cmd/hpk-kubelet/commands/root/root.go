@@ -368,7 +368,7 @@ func setNodeReady(n *corev1.Node) {
 		c.LastHeartbeatTime = metav1.Now()
 		c.LastTransitionTime = metav1.Now()
 		c.Reason = "KubeletReady"
-		c.Message = "HPK is successfully connected to Slurm"
+		c.Message = "HPK is ready"
 		c.Status = corev1.ConditionTrue
 		n.Status.Conditions[i] = c
 		return

@@ -51,10 +51,10 @@ type VirtualEnvironment struct {
 	// IPAddressPath is where we store the internal Pod's ip.
 	IPAddressPath string
 
-	// StdoutPath instruct Slurm to write stdout into the specified path.
+	// StdoutPath to write stdout into the specified path.
 	StdoutPath string
 
-	// StdoutPath instruct Slurm to write stderr into the specified path.
+	// StdoutPath to write stderr into the specified path.
 	StderrPath string
 
 	// SysErrorFilePath indicate a system failure that cause the Pod to fail Immediately, bypassing any other checks.

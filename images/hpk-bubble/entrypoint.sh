@@ -241,7 +241,6 @@ while ! k3s kubectl get service -n kube-system kube-dns >/dev/null 2>&1; do
 done
 
 echo "Starting hpk-kubelet..."
-# Using --run-slurm=false to run locally
 # Using --apptainer=hpktainer to use our networking wrapper
 
 # Set pause container path based on development mode
@@ -256,7 +255,6 @@ APISERVER_KEY_LOCATION=/var/lib/hpk/kubelet.key \
 APISERVER_CERT_LOCATION=/var/lib/hpk/kubelet.crt \
 VKUBELET_ADDRESS=${HOST_IP} \
 hpk-kubelet \
-  --run-slurm=false \
   --apptainer=hpktainer \
   --nodename=$(hostname) \
   --disable-taint=true \
