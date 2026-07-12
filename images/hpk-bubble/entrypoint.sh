@@ -10,10 +10,6 @@ echo "  Public IP:     ${HOST_IP}"
 echo "  Interface:     tap0"
 echo "  Role:          ${HPK_ROLE}"
 
-mkdir -p ~/.hpk/binaries
-apt-get install -y socat
-cp /usr/bin/socat ~/.hpk/binaries/socat
-
 # Enable IP forwarding
 sysctl -w net.ipv4.ip_forward=1
 

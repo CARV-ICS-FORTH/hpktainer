@@ -87,8 +87,9 @@ develop:
 	
 	# Build hpk-bubble (dev)
 	docker build --build-arg REGISTRY=$(REGISTRY) \
+		--build-arg BASE_IMAGE=$(REGISTRY)/hpk-builder:latest \
 		-t $(REGISTRY)/hpk-bubble:latest \
-		-f images/hpk-bubble-dev/Dockerfile .
+		-f images/hpk-bubble/Dockerfile .
 	
 	# Build hpk-pause
 	docker build --build-arg REGISTRY=$(REGISTRY) \

@@ -1,5 +1,6 @@
 # Builder stage for hpk-net-daemon
 ARG REGISTRY=docker.io/chazapis
+ARG BASE_IMAGE=ubuntu:24.04
 FROM ${REGISTRY}/hpk-builder:latest AS builder
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -9,16 +10,21 @@ RUN CGO_ENABLED=0 go build -o /bin/hpk-net-daemon ./cmd/hpk-net-daemon
 RUN CGO_ENABLED=0 go build -o /bin/hpktainer ./cmd/hpktainer
 RUN CGO_ENABLED=0 go build -o /bin/hpk-kubelet ./cmd/hpk-kubelet
 
-FROM ubuntu:24.04
+FROM ${BASE_IMAGE}
+WORKDIR /
 
 # Basic utilities
 RUN apt-get update && \
-    apt-get install -y vim-tiny curl iproute2 net-tools bridge-utils iputils-ping nano
+    apt-get install -y vim-tiny curl iproute2 net-tools bridge-utils iputils-ping nano socat && \
+    rm -rf /var/lib/apt/lists/*
 
 # Apptainer
-RUN apt-get install -y software-properties-common && \
+RUN apt-get update && \
+    apt-get install -y software-properties-common && \
     add-apt-repository -y ppa:apptainer/ppa && \
-    apt-get install -y apptainer
+    apt-get update && \
+    apt-get install -y apptainer && \
+    rm -rf /var/lib/apt/lists/*
 
 # CNI plugins
 ARG TARGETARCH
@@ -28,7 +34,9 @@ RUN curl -LO https://github.com/containernetworking/plugins/releases/download/v1
     rm /cni-plugins-linux-${TARGETARCH}-v1.9.0.tgz
 
 # Etcd and iptables dependencies
-RUN apt-get install -y iptables nscd etcd-server etcd-client
+RUN apt-get update && \
+    apt-get install -y iptables nscd etcd-server etcd-client && \
+    rm -rf /var/lib/apt/lists/*
 
 # Calicoctl
 ARG CALICO_VERSION=v3.28.0

@@ -19,22 +19,20 @@ SOCAT_PID_10250=""
 SOCAT_PID_2379=""
 
 start_socat_relays() {
-    local socat_bin="$HOME/.hpk/binaries/socat"
-
-    if [ ! -x "$socat_bin" ]; then
-        echo "socat binary not found at $socat_bin; skipping host-ip relay setup"
+    if ! command -v socat >/dev/null 2>&1; then
+        echo "socat command not found; skipping host-ip relay setup"
         return 0
     fi
 
-    "$socat_bin" TCP4-LISTEN:6443,bind=${HOST_IP_DETECTED},reuseaddr,fork TCP4:127.0.0.1:6443 &
+    socat TCP4-LISTEN:6443,bind=${HOST_IP_DETECTED},reuseaddr,fork TCP4:127.0.0.1:6443 &
     SOCAT_PID_6443=$!
 
-    "$socat_bin" TCP4-LISTEN:10250,bind=${HOST_IP_DETECTED},reuseaddr,fork TCP4:127.0.0.1:10250 &
+    socat TCP4-LISTEN:10250,bind=${HOST_IP_DETECTED},reuseaddr,fork TCP4:127.0.0.1:10250 &
     SOCAT_PID_10250=$!
 
     # Expose controller etcd to other bubbles (used by flanneld on worker bubbles)
     if [ "${HPK_ROLE:-controller}" = "controller" ]; then
-        "$socat_bin" TCP4-LISTEN:2379,bind=${HOST_IP_DETECTED},reuseaddr,fork TCP4:127.0.0.1:2379 &
+        socat TCP4-LISTEN:2379,bind=${HOST_IP_DETECTED},reuseaddr,fork TCP4:127.0.0.1:2379 &
         SOCAT_PID_2379=$!
     fi
 
