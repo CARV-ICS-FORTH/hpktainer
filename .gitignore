@@ -2,6 +2,8 @@
 bin/
 *.test
 *.out
+/hpk-net-daemon
+/hpktainer
 
 # Artifacts
 *.sock

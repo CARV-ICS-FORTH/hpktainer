@@ -73,7 +73,7 @@ apt-get update
 apt-get install -y software-properties-common
 add-apt-repository -y ppa:apptainer/ppa
 apt-get update
-apt-get install -y git slurm-wlm munge nfs-common avahi-daemon libnss-mdns apptainer slirp4netns
+apt-get install -y git slurm-wlm munge nfs-common avahi-daemon libnss-mdns apptainer slirp4netns socat
 
 # Enable mDNS
 # Configure Avahi to only listen on eth0 (Cluster Network) to avoid checking out 10.0.2.15 (NAT)

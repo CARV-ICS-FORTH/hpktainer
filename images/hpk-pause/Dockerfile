@@ -10,6 +10,11 @@ RUN CGO_ENABLED=0 go build -o /bin/hpk-pause ./cmd/hpk-pause
 # Final stage
 FROM ${REGISTRY}/hpktainer-base:latest
 
+# Basic utilities
+RUN apt-get update && \
+    apt-get install -y vim-tiny curl iproute2 net-tools iputils-ping nano socat && \
+    rm -rf /var/lib/apt/lists/*
+
 # Install Apptainer (required for hpk-pause agent to spawn containers)
 RUN apt-get update && \
     apt-get install -y software-properties-common && \

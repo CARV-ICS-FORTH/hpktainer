@@ -14,8 +14,9 @@ if [ -z "$HPK_IP" ] || [ -z "$HPK_GATEWAY_IP" ] || [ -z "$HPK_SOCKET_PATH" ]; th
 fi
 
 echo "Starting hpk-net-daemon..."
+HPK_MTU=${HPK_MTU:-1500}
 # Run in background. Daemon will create tap0 and connect to socket.
-hpk-net-daemon -mode client -socket "$HPK_SOCKET_PATH" -tap tap0 -create-tap &
+hpk-net-daemon -mode client -socket "$HPK_SOCKET_PATH" -tap tap0 -create-tap -mtu "$HPK_MTU" &
 DAEMON_PID=$!
 
 # Wait for tap0 to be created by daemon
@@ -32,8 +33,9 @@ done
 echo "Configuring network..."
 # HPK_IP is expected to be CIDR (e.g. 10.244.0.2/24)
 ip addr add "$HPK_IP" dev tap0
-ip link set tap0 up
-ip route add default via "$HPK_GATEWAY_IP"
+ip link set tap0 mtu "$HPK_MTU" up
+ip route add "$HPK_GATEWAY_IP" dev tap0 scope link
+ip route add default via "$HPK_GATEWAY_IP" dev tap0
 
 # Set up trap to clean up the client-side hpk-net-daemon when we exit
 cleanup() {

@@ -15,7 +15,7 @@ WORKDIR /
 
 # Basic utilities
 RUN apt-get update && \
-    apt-get install -y vim-tiny curl iproute2 net-tools bridge-utils iputils-ping nano socat && \
+    apt-get install -y vim-tiny curl iproute2 net-tools iputils-ping nano socat && \
     rm -rf /var/lib/apt/lists/*
 
 # Apptainer

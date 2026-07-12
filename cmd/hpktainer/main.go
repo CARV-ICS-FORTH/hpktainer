@@ -55,258 +55,124 @@ func ensureApptainerRuntimeDirs() (tmpDir string, cacheDir string, err error) {
 }
 
 func main() {
-	// 1. Check Root
-	versionFlag := flag.Bool("version", false, "Print version and exit")
-	flag.Parse()
+	os.Exit(run())
+}
 
-	if *versionFlag {
-		fmt.Printf("hpktainer version: %s (built: %s)\n", version.Version, version.BuildTime)
-		os.Exit(0)
-	}
-
+func isRoot() bool {
 	currentUser, err := user.Current()
 	if err != nil {
-		log.Fatalf("Failed to get current user: %v", err)
+		log.Printf("Failed to get current user: %v", err)
+		return false
 	}
-	if currentUser.Uid != "0" {
-		log.Fatal("hpktainer must be run as root to configure networking.")
-	}
+	return currentUser.Uid == "0"
+}
 
-	// 2. Parse Calico Config
-	calicoConf, err := network.ParseCalicoConfig(CalicoConfig)
-	if err != nil {
-		log.Fatalf("Failed to parse calico config at %s: %v. Is Calico running?", CalicoConfig, err)
-	}
-	log.Printf("Using Subnet: %s", calicoConf.Subnet)
-
-	// 3. Ensure Bridge and IPTables
-	gwIP, err := network.EnsureBridge(calicoConf.Subnet)
-	if err != nil {
-		log.Fatalf("Failed to setup bridge: %v", err)
-	}
-	log.Printf("Bridge %s ready with IP %s", network.BridgeName, gwIP)
-
-
-
-	// 4. Allocate IP via CNI
-	var tapLink netlink.Link
-	var hostTapName string
-
-	containerID := uuid.New().String()
-	containerIP, err := network.AllocateIP(containerID, calicoConf.Subnet, CNIDataDir)
-	if err != nil {
-		log.Fatalf("Failed to allocate IP: %v", err)
-	}
-	defer func() {
-		if tapLink != nil {
-			if _, err := netlink.LinkByName(hostTapName); err == nil {
-				if err := netlink.LinkDel(tapLink); err != nil {
-					log.Printf("Warning: failed to delete TAP %s on defer exit: %v", hostTapName, err)
-				} else {
-					log.Printf("Deleted TAP interface %s on defer exit", hostTapName)
-				}
-			}
-		}
-		if err := network.ReleaseIP(containerID, calicoConf.Subnet, CNIDataDir); err != nil {
-			log.Printf("Failed to release IP: %v", err)
-		}
-	}()
-	log.Printf("Allocated IP %s for container %s", containerIP, containerID)
-
-	// Parse IP for TAP and Socket
-	ip, _, err := net.ParseCIDR(containerIP)
-	if err != nil {
-		log.Fatalf("Invalid container IP format: %v", err)
-	}
-
-	// 5. Host Tap Setup
-	// Tap name: hpk-tap-<LastOctet>
-	// ip was parsed above for socket path.
-	// ip is net.IP
-	ipv4 := ip.To4()
-	if ipv4 == nil {
-		log.Fatal("Non-IPv4 address not supported yet")
-	}
-	lastOctet := ipv4[3]
-	hostTapName = fmt.Sprintf("hpk-tap-%d", lastOctet)
-
-	// We delegate TAP creation to the daemon to ensure correct flags/ownership.
-	// Logic moved to after daemon start.
-
-	if err := os.MkdirAll(SocketDir, 0755); err != nil {
-		log.Fatalf("Failed to create socket dir: %v", err)
-	}
-
-	socketPath := filepath.Join(SocketDir, ip.String()+".sock")
-
-	// Clean up socket if exists (daemon typically handles it but we can ensure)
-	os.Remove(socketPath) // ignore error
-
-	// We assume hpk-net-daemon is in PATH or same dir.
-	// Let's try to find it.
+func findDaemonBinary() (string, error) {
 	daemonBin, err := exec.LookPath("hpk-net-daemon")
-	if err != nil {
-		// Try next to executable
-		exe, _ := os.Executable()
-		candidate := filepath.Join(filepath.Dir(exe), "hpk-net-daemon")
-		if _, err := os.Stat(candidate); err == nil {
-			daemonBin = candidate
-		} else {
-			log.Fatal("hpk-net-daemon binary not found")
-		}
-	}
-
-	daemonCmd := exec.Command(daemonBin,
-		"-mode", "server",
-		"-socket", socketPath,
-		"-tap", hostTapName,
-		"-create-tap", "true",
-	)
-
-	// Forward daemon logs for debug? Or file?
-	// Let's pipe to stdout for now or separate.
-	daemonCmd.Stdout = os.Stdout
-	daemonCmd.Stderr = os.Stderr
-
-	if err := daemonCmd.Start(); err != nil {
-		log.Fatalf("Failed to start daemon: %v", err)
-	}
-	defer func() {
-		if daemonCmd.Process != nil {
-			daemonCmd.Process.Kill()
-		}
-	}()
-
-	// Wait a bit for socket to be created? Daemon "Listening on..."
-	time.Sleep(500 * time.Millisecond)
-	if _, err := os.Stat(socketPath); err != nil {
-		log.Printf("Warning: Socket %s not found yet", socketPath)
-	}
-
-	// Post-Validation: Wait for TAP creation by daemon and attach to bridge
-	log.Printf("Waiting for TAP %s...", hostTapName)
-	for i := 0; i < 50; i++ { // 5 seconds
-		l, err := netlink.LinkByName(hostTapName)
-		if err == nil {
-			tapLink = l
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	if tapLink == nil {
-		log.Fatalf("Timeout waiting for TAP %s", hostTapName)
-	}
-
-	// Ensure we delete it on exit (though daemon exit might close it if it's not persistent?
-	// water might create persistent if not handled right, but usually closes on fd close.
-	// If it closes on daemon exit, we don't need manual delete.
-	// But let's verify bridging requirements.)
-
-	// Enable Proxy ARP and PVLAN Proxy ARP on host tap interface
-	proxyArpPath := fmt.Sprintf("/proc/sys/net/ipv4/conf/%s/proxy_arp", hostTapName)
-	if err := os.WriteFile(proxyArpPath, []byte("1"), 0644); err != nil {
-		log.Printf("Warning: failed to enable proxy_arp on %s: %v", hostTapName, err)
-	}
-	proxyArpPvlanPath := fmt.Sprintf("/proc/sys/net/ipv4/conf/%s/proxy_arp_pvlan", hostTapName)
-	if err := os.WriteFile(proxyArpPvlanPath, []byte("1"), 0644); err != nil {
-		log.Printf("Warning: failed to enable proxy_arp_pvlan on %s: %v", hostTapName, err)
-	}
-
-	// Assign gateway IP directly to host TAP to satisfy arp_ignore
-	gwAddr, err := netlink.ParseAddr(fmt.Sprintf("%s/32", gwIP))
 	if err == nil {
-		if err := netlink.AddrAdd(tapLink, gwAddr); err != nil {
-			log.Printf("Warning: failed to add gateway IP to tap %s: %v", hostTapName, err)
-		} else {
-			log.Printf("Assigned gateway IP %s to %s", gwIP, hostTapName)
+		return daemonBin, nil
+	}
+	// Try next to executable
+	exe, _ := os.Executable()
+	candidate := filepath.Join(filepath.Dir(exe), "hpk-net-daemon")
+	if _, err := os.Stat(candidate); err == nil {
+		return candidate, nil
+	}
+	return "", fmt.Errorf("hpk-net-daemon binary not found")
+}
+
+func pollForSocket(path string) error {
+	for i := 0; i < 40; i++ { // 2 seconds max
+		if _, err := os.Stat(path); err == nil {
+			return nil
 		}
-	} else {
-		log.Printf("Warning: failed to parse gateway IP %s/32: %v", gwIP, err)
+		time.Sleep(50 * time.Millisecond)
+	}
+	return fmt.Errorf("socket %s not found", path)
+}
+
+func pollForTAP(name string) (netlink.Link, error) {
+	log.Printf("Waiting for TAP %s...", name)
+	for i := 0; i < 100; i++ { // 5 seconds max
+		l, err := netlink.LinkByName(name)
+		if err == nil {
+			return l, nil
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return nil, fmt.Errorf("timeout waiting for TAP %s", name)
+}
+
+func configureTAP(name string, link netlink.Link, podIP net.IP) error {
+	// Enable Proxy ARP and PVLAN Proxy ARP on host tap interface
+	proxyArpPath := fmt.Sprintf("/proc/sys/net/ipv4/conf/%s/proxy_arp", name)
+	if err := os.WriteFile(proxyArpPath, []byte("1"), 0644); err != nil {
+		log.Printf("Warning: failed to enable proxy_arp on %s: %v", name, err)
+	}
+	proxyArpPvlanPath := fmt.Sprintf("/proc/sys/net/ipv4/conf/%s/proxy_arp_pvlan", name)
+	if err := os.WriteFile(proxyArpPvlanPath, []byte("1"), 0644); err != nil {
+		log.Printf("Warning: failed to enable proxy_arp_pvlan on %s: %v", name, err)
 	}
 
-	// Add point-to-point route to pod container IP
-	podIP, _, err := net.ParseCIDR(containerIP)
-	if err != nil {
-		daemonCmd.Process.Kill()
-		log.Fatalf("Failed to parse container IP %s: %v", containerIP, err)
-	}
+	// Add point-to-point route to pod container IP (with /32 prefix)
 	route := &netlink.Route{
-		LinkIndex: tapLink.Attrs().Index,
+		LinkIndex: link.Attrs().Index,
 		Dst:       &net.IPNet{IP: podIP, Mask: net.CIDRMask(32, 32)},
 		Scope:     netlink.SCOPE_LINK,
 	}
 	if err := netlink.RouteAdd(route); err != nil {
-		daemonCmd.Process.Kill()
-		log.Fatalf("Failed to add route to pod %s via %s: %v", podIP, hostTapName, err)
+		return fmt.Errorf("failed to add route to pod %s via %s: %w", podIP, name, err)
 	}
 
-	if err := netlink.LinkSetUp(tapLink); err != nil {
+	if err := netlink.LinkSetUp(link); err != nil {
 		log.Printf("Warning: failed to set tap up from host: %v", err)
 	}
-	log.Printf("Point-to-point route to pod %s configured via %s", podIP, hostTapName)
 
-	// 7. Run Apptainer
-	// Args: everything passed to this cli.
-	// Except we need to inject flags.
-	// The user might pass `hpktainer run instance://...` or `hpktainer exec ...` or `hpktainer shell ...`
-	// Typically `apptainer run [options] <image> [args]`
-	// We want to inject `--network none --bind /var/run/hpktainer` at the right place.
-	// And ENV variables.
+	log.Printf("Point-to-point route to pod %s configured via %s", podIP, name)
+	return nil
+}
 
-	// Construct args
+func buildApptainerCommand(containerIP, gwIP, socketPath, mtuStr string) (*exec.Cmd, error) {
 	userArgs := os.Args[1:]
-	// Wait, hpktainer handles "run", "shell", "exec", "instance start"?
-	// The requirement: "It will use apptainer to run containers, passing through all arguments to apptainer except those that refer to network configuration."
-	// So if user types `hpktainer shell img.sif`, we run `apptainer shell ...`.
-
-	// We need to find where to insert flags. apptainer commands often accept global flags and command flags.
-	// Simplest: `apptainer [userArgs] --network none --bind ...` might put flags after image if not careful.
-	// Apptainer syntax: `apptainer [global options] command [command options] [args]`
-	// e.g. `apptainer run --network none img.sif` works.
-	// But `apptainer run img.sif --network none` implies args to the image?
-	// Usually flags for apptainer must be before the image.
-
-	// Strategy: Prepend our flags to the arguments, but we need to respect the command (run/shell/exec).
-	// If first arg is run/shell/exec, we insert flags AFTER it.
-	// If first arg is an image (implicit run?), we insert flags BEFORE it?
-	// Apptainer usually requires explicit command or treats it as run?
-	// Actually `apptainer myimage.sif` works? No, `apptainer` is the binary. `apptainer run myimage.sif`.
-	// If user runs `hpktainer myimage.sif`? User probably runs `hpktainer run ...`.
-	// Let's assume user provides the subcommand.
-
-	// If user calls `hpktainer run -B /foo:/bar image.sif arg1`, we want `apptainer run --network none --bind ... -B /foo:/bar image.sif arg1`.
-
 	if len(userArgs) == 0 {
-		log.Fatal("No arguments provided")
+		return nil, fmt.Errorf("no arguments provided")
 	}
 
 	cmdOp := userArgs[0]
-	// If it's a known command that accepts network flags: run, shell, exec, instance start.
-	// test?
-
-	// We'll insert our flags immediately after the subcommand.
-	// If the first arg is NOT a subcommand, we assume "run"?
-	// Apptainer help says: "Usage: apptainer [global options] <command> [args]"
-	// So we assume the first arg is the command.
-
-	cmdsWithNet := map[string]bool{"run": true, "shell": true, "exec": true, "instance": true /* start? */}
+	cmdsWithNet := map[string]bool{"run": true, "shell": true, "exec": true, "instance": true}
 
 	var finalArgs []string
+	if cmdOp == "instance" && len(userArgs) > 1 && userArgs[1] == "start" {
+		finalArgs = append(finalArgs, "instance", "start")
+		finalArgs = append(finalArgs, "--network", "none", "--bind", SocketDir)
+		finalArgs = append(finalArgs, userArgs[2:]...)
+	} else if cmdsWithNet[cmdOp] {
+		finalArgs = append(finalArgs, cmdOp)
+		finalArgs = append(finalArgs, "--network", "none", "--bind", SocketDir)
+		finalArgs = append(finalArgs, userArgs[1:]...)
+	} else {
+		log.Printf("Unknown or non-network command '%s', passing through without network config", cmdOp)
+		finalArgs = append(finalArgs, userArgs...)
+	}
 
-	// Env variables
+	log.Printf("Executing apptainer: %v", finalArgs)
+
+	runCmd := exec.Command("apptainer", finalArgs...)
+	runCmd.Stdin = os.Stdin
+	runCmd.Stdout = os.Stdout
+	runCmd.Stderr = os.Stderr
+
 	envVars := []string{
 		fmt.Sprintf("HPK_IP=%s", containerIP),
 		fmt.Sprintf("HPK_GATEWAY_IP=%s", gwIP),
 		fmt.Sprintf("HPK_SOCKET_PATH=%s", socketPath),
+		fmt.Sprintf("HPK_MTU=%s", mtuStr),
 	}
 
-	// We'll set these in the environment of the executed command.
-	// Apptainer passes env vars prefixed with APPTAINERENV_ or defaults?
-	// We can use SINGULARITYENV_ / APPTAINERENV_ prefix to pass them into container.
 	hostEnv := os.Environ()
 	tmpDir, cacheDir, err := ensureApptainerRuntimeDirs()
 	if err != nil {
-		log.Fatalf("Failed to prepare apptainer runtime dirs: %v", err)
+		return nil, fmt.Errorf("failed to prepare apptainer runtime dirs: %w", err)
 	}
 
 	hostEnv = append(hostEnv,
@@ -322,88 +188,176 @@ func main() {
 		hostEnv = append(hostEnv, "APPTAINERENV_"+k+"="+v)
 	}
 
-	// Reconstruct args
-	// We insert `--network none --bind /var/run/hpktainer`.
-	// Check if "instance start" is used (2 words).
-
-	if cmdOp == "instance" && len(userArgs) > 1 && userArgs[1] == "start" {
-		// handle instance start
-		finalArgs = append(finalArgs, "instance", "start")
-		finalArgs = append(finalArgs, "--network", "none", "--bind", SocketDir)
-		finalArgs = append(finalArgs, userArgs[2:]...)
-	} else if cmdsWithNet[cmdOp] {
-		finalArgs = append(finalArgs, cmdOp)
-		finalArgs = append(finalArgs, "--network", "none", "--bind", SocketDir)
-		finalArgs = append(finalArgs, userArgs[1:]...)
-	} else {
-		// Just pass through? Or assume implicit run?
-		// If user typed `hpktainer image.sif`, maybe they expect `apptainer run image.sif`?
-		// But if they typed `hpktainer --version`, we shouldn't add network flags.
-		// If it's a flag, likely global option or unknown command.
-		// We'll just pass through if not strictly a container execution command.
-		// Warn user?
-		log.Printf("Unknown or non-network command '%s', passing through without network config", cmdOp)
-		finalArgs = append(finalArgs, userArgs...)
-	}
-
-	log.Printf("Executing apptainer: %v", finalArgs)
-
-	runCmd := exec.Command("apptainer", finalArgs...)
-	runCmd.Stdin = os.Stdin
-	runCmd.Stdout = os.Stdout
-	runCmd.Stderr = os.Stderr
 	runCmd.Env = hostEnv
+	return runCmd, nil
+}
 
-	// Handle signals to propagate to child?
-	// exec.Command starts a process. We wait for it.
-
-	// Create a channel to catch signals
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
-
-	if err := runCmd.Start(); err != nil {
-		log.Fatalf("Failed to start apptainer: %v", err)
+func run() int {
+	// 1. Check Root
+	if !isRoot() {
+		log.Println("hpktainer must be run as root to configure networking.")
+		return 1
 	}
 
-	// Wait for process in another goroutine or select
-	done := make(chan error, 1)
-	go func() {
-		done <- runCmd.Wait()
-	}()
+	versionFlag := flag.Bool("version", false, "Print version and exit")
+	flag.Parse()
 
-	select {
-	case <-sigs:
-		// Forward signal?
-		if runCmd.Process != nil {
-			runCmd.Process.Signal(syscall.SIGTERM)
-		}
-		// Wait for exit
-		<-done
-	case err := <-done:
-		if err != nil {
-			// Explicitly trigger cleanup before exiting because os.Exit/log.Fatalf bypasses defers
-			if daemonCmd != nil && daemonCmd.Process != nil {
-				daemonCmd.Process.Kill()
-				daemonCmd.Wait()
-			}
-			if tapLink != nil {
-				if _, err := netlink.LinkByName(hostTapName); err == nil {
-					if err := netlink.LinkDel(tapLink); err != nil {
-						log.Printf("Warning: failed to delete TAP %s on error exit: %v", hostTapName, err)
-					} else {
-						log.Printf("Deleted TAP interface %s on error exit", hostTapName)
-					}
+	if *versionFlag {
+		fmt.Printf("hpktainer version: %s (built: %s)\n", version.Version, version.BuildTime)
+		return 0
+	}
+
+	// 2. Parse Calico Config
+	calicoConf, err := network.ParseCalicoConfig(CalicoConfig)
+	if err != nil {
+		log.Printf("Failed to parse calico config at %s: %v. Is Calico running?", CalicoConfig, err)
+		return 1
+	}
+	log.Printf("Using Subnet: %s", calicoConf.Subnet)
+
+	// Gateway IP is hardcoded as link-local 169.254.1.1
+	gwIP := "169.254.1.1"
+
+	// 3. Allocate IP via CNI
+	var tapLink netlink.Link
+	var hostTapName string
+
+	containerID := uuid.New().String()
+	containerIP, err := network.AllocateIP(containerID, calicoConf.Subnet, CNIDataDir)
+	if err != nil {
+		log.Printf("Failed to allocate IP: %v", err)
+		return 1
+	}
+	defer func() {
+		if tapLink != nil {
+			if _, err := netlink.LinkByName(hostTapName); err == nil {
+				if err := netlink.LinkDel(tapLink); err != nil {
+					log.Printf("Warning: failed to delete TAP %s on exit: %v", hostTapName, err)
+				} else {
+					log.Printf("Deleted TAP interface %s on exit", hostTapName)
 				}
 			}
-			network.ReleaseIP(containerID, calicoConf.Subnet, CNIDataDir)
-
-			// Extract exit code
-			if exitErr, ok := err.(*exec.ExitError); ok {
-				os.Exit(exitErr.ExitCode())
-			}
-			log.Fatalf("Apptainer exited with error: %v", err)
 		}
+		if err := network.ReleaseIP(containerID, calicoConf.Subnet, CNIDataDir); err != nil {
+			log.Printf("Failed to release IP: %v", err)
+		}
+	}()
+	log.Printf("Allocated IP %s for container %s", containerIP, containerID)
+
+	// Parse IP for TAP and Socket
+	ip, _, err := net.ParseCIDR(containerIP)
+	if err != nil {
+		log.Printf("Invalid container IP format: %v", err)
+		return 1
 	}
 
-	// Cleanup happens via defers (daemon kill, release IP, del tap)
+	ipv4 := ip.To4()
+	if ipv4 == nil {
+		log.Println("Non-IPv4 address not supported yet")
+		return 1
+	}
+	// Derive TAP name using hex representation of full IP (e.g. hpk-0af40105)
+	hostTapName = fmt.Sprintf("hpk-%02x%02x%02x%02x", ipv4[0], ipv4[1], ipv4[2], ipv4[3])
+
+	if err := os.MkdirAll(SocketDir, 0755); err != nil {
+		log.Printf("Failed to create socket dir: %v", err)
+		return 1
+	}
+
+	socketPath := filepath.Join(SocketDir, ip.String()+".sock")
+	os.Remove(socketPath) // ignore error
+
+	// Find daemon binary
+	daemonBin, err := findDaemonBinary()
+	if err != nil {
+		log.Printf("Error finding daemon: %v", err)
+		return 1
+	}
+
+	mtuStr := calicoConf.MTU
+	if mtuStr == "" {
+		mtuStr = "1500"
+	}
+
+	daemonCmd := exec.Command(daemonBin,
+		"-mode", "server",
+		"-socket", socketPath,
+		"-tap", hostTapName,
+		"-create-tap",
+		"-mtu", mtuStr,
+	)
+
+	daemonCmd.Stdout = os.Stdout
+	daemonCmd.Stderr = os.Stderr
+
+	if err := daemonCmd.Start(); err != nil {
+		log.Printf("Failed to start daemon: %v", err)
+		return 1
+	}
+	defer func() {
+		if daemonCmd.Process != nil {
+			daemonCmd.Process.Kill()
+			daemonCmd.Wait()
+		}
+	}()
+
+	// Poll for socket path existence
+	if err := pollForSocket(socketPath); err != nil {
+		log.Printf("Warning: Socket %s not found yet: %v", socketPath, err)
+	}
+
+	// Poll for TAP creation by daemon
+	tapLink, err = pollForTAP(hostTapName)
+	if err != nil {
+		log.Printf("Failed to find TAP %s: %v", hostTapName, err)
+		return 1
+	}
+
+	// Configure Proxy ARP and routing on the TAP
+	if err := configureTAP(hostTapName, tapLink, ip); err != nil {
+		log.Printf("Failed to configure TAP link: %v", err)
+		return 1
+	}
+
+	// 4. Run Apptainer
+	runCmd, err := buildApptainerCommand(containerIP, gwIP, socketPath, mtuStr)
+	if err != nil {
+		log.Printf("Failed to prepare apptainer command: %v", err)
+		return 1
+	}
+
+	// Handle signals to propagate to child
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigs)
+
+	if err := runCmd.Start(); err != nil {
+		log.Printf("Failed to start apptainer: %v", err)
+		return 1
+	}
+
+	// Goroutine for signal propagation
+	doneSig := make(chan struct{})
+	defer close(doneSig)
+	go func() {
+		select {
+		case sig := <-sigs:
+			if runCmd.Process != nil {
+				runCmd.Process.Signal(sig)
+			}
+		case <-doneSig:
+		}
+	}()
+
+	err = runCmd.Wait()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			log.Printf("Apptainer exited with error: %v", err)
+			return exitErr.ExitCode()
+		}
+		log.Printf("Apptainer exited with error: %v", err)
+		return 1
+	}
+
+	return 0
 }
