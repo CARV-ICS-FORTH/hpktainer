@@ -134,14 +134,15 @@ SlurmUser=slurm
 StateSaveLocation=/var/lib/slurm/slurmctld
 SwitchType=switch/none
 TaskPlugin=task/none
+FastSchedule=1
 # TIMERS
 InactiveLimit=0
 MinJobAge=300
 KillWait=30
 Waittime=0
 # NODES
-NodeName=controller NodeAddr=controller.local CPUs=2 State=UNKNOWN
-NodeName=node       NodeAddr=node.local       CPUs=2 State=UNKNOWN
+NodeName=controller NodeAddr=controller.local CPUs=2 RealMemory=1500 State=UNKNOWN
+NodeName=node       NodeAddr=node.local       CPUs=2 RealMemory=1500 State=UNKNOWN
 # PARTITIONS
 PartitionName=debug Nodes=ALL Default=YES MaxTime=INFINITE State=UP
 EOF
