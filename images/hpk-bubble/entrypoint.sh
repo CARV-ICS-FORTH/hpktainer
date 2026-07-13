@@ -81,7 +81,7 @@ if [ "$HPK_ROLE" = "controller" ]; then
 fi
 
 export DATASTORE_TYPE=etcdv3
-export ETCD_ENDPOINTS=$CALICO_ETCD
+export ETCD_ENDPOINTS="${ETCD_ENDPOINTS:-$CALICO_ETCD}"
 
 CALICO_IMAGE="docker://docker.io/calico/node:v3.28.0"
 
@@ -105,6 +105,8 @@ apptainer instance run \
   --env NODENAME="bubble${BUBBLE_ID_VAL}" \
   --env FELIX_FELIXHOSTNAME="bubble${BUBBLE_ID_VAL}" \
   --env IP=${HOST_IP} \
+  --env KUBERNETES_SERVICE_HOST=$(CONTROLLER_IP) \
+  --env KUBERNETES_SERVICE_PORT=6443 \
   $CALICO_IMAGE \
   calico-node
 
@@ -152,6 +154,7 @@ if [ "$HPK_ROLE" = "controller" ]; then
       --disable local-storage \
       --disable metrics-server \
       --disable-cloud-controller \
+      --kubelet-arg=resolv-conf=/etc/resolv.conf \
       --write-kubeconfig-mode 777 \
       --egress-selector-mode=disabled \
       --kube-apiserver-arg=kubelet-certificate-authority=/var/lib/rancher/k3s/server/tls/server-ca.crt \
@@ -175,7 +178,32 @@ if [ "$HPK_ROLE" = "controller" ]; then
     sed -i "s|https://127.0.0.1:6443|https://${HOST_IP}:6443|g" /var/lib/hpk/kubeconfig
     cp /var/lib/rancher/k3s/server/node-token /var/lib/hpk/node-token
     chmod 644 /var/lib/hpk/kubeconfig /var/lib/hpk/node-token
-    
+
+    # Make CoreDNS inherit the bubble resolver instead of the cluster DNS service IP.
+    echo "Configuring CoreDNS to use the bubble resolver..."
+    while ! k3s kubectl -n kube-system get deployment coredns >/dev/null 2>&1; do
+      sleep 1
+    done
+    while ! k3s kubectl -n kube-system get configmap coredns >/dev/null 2>&1; do
+      sleep 1
+    done
+    k3s kubectl -n kube-system patch deployment coredns --type=merge -p '{"spec":{"template":{"spec":{"dnsPolicy":"Default"}}}}'
+    CURRENT_COREFILE="$(k3s kubectl -n kube-system get configmap coredns -o jsonpath='{.data.Corefile}')"
+    UPDATED_COREFILE="$(printf '%s\n' "$CURRENT_COREFILE" | sed -E 's|forward \. (/etc/resolv\.conf|[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)|forward . /etc/resolv.conf|g')"
+    if [ "$CURRENT_COREFILE" != "$UPDATED_COREFILE" ]; then
+      cat <<EOF | k3s kubectl apply -f -
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: coredns
+  namespace: kube-system
+data:
+  Corefile: |
+$(printf '%s\n' "$UPDATED_COREFILE" | sed 's/^/    /')
+EOF
+      k3s kubectl -n kube-system rollout restart deployment coredns
+    fi
+  
     # Generate webhook certificate for hpk-kubelet
     echo "Generating webhook certificate..."
     

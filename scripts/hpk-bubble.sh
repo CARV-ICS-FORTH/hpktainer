@@ -121,6 +121,8 @@ apptainer instance run \
 	--env HOST_IP=$HOST_IP_DETECTED \
 	--env CONTROLLER_IP=$CONTROLLER_IP \
 	--env HPK_DEV=${HPK_DEV:-0} \
+    --env DATASTORE_TYPE=etcdv3 \
+    --env ETCD_ENDPOINTS=http://${CONTROLLER_IP}:2379 \
     --env BUBBLE_ID=$BUBBLE_ID \
 	$BUBBLE_IMAGE \
 	$NAME

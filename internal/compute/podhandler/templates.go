@@ -201,12 +201,12 @@ echo $$ > "${workdir}/.pid"
 #--env PARENT=${PPID}								\
 #--bind $HOME,/tmp										\
 #--hostname {{.Pod.Name}}							\
-#{{$.PauseImageFilePath}} sh -ci {{.VirtualEnv.ConstructorFilePath}} ||
+#{{$.PauseImageFilePath}} sh -ci <constructor-command> ||
 #echo "[HOST] **SYSTEMERROR** apptainer exited with code $?" | tee {{.VirtualEnv.SysErrorFilePath}}
-
+{{$.PauseImageFilePath}} -namespace {{.Pod.Namespace}} -pod {{.Pod.Name}} ||
 export APPTAINERENV_KUBEDNS_IP={{.HostEnv.KubeDNS}}
 
-exec {{$.HostEnv.ApptainerBin}} run --nv --net --scratch /scratch --workdir ${workdir} \
+exec {{$.HostEnv.ApptainerBin}} exec --nv --net --scratch /scratch --workdir ${workdir} \
 {{- if .HostEnv.EnableCgroupV2}}
 --apply-cgroups {{.VirtualEnv.CgroupFilePath}} 		\
 {{- end}}
@@ -215,7 +215,7 @@ exec {{$.HostEnv.ApptainerBin}} run --nv --net --scratch /scratch --workdir ${wo
 --bind /etc/apptainer/apptainer.conf				\
 --bind $HOME,/tmp									\
 --hostname {{truncate .Pod.Name 63}}							\
-{{$.PauseImageFilePath}} /usr/local/bin/hpk-pause -namespace {{.Pod.Namespace}} -pod {{.Pod.Name}} ||
+{{$.PauseImageFilePath}} /entrypoint.sh /usr/local/bin/hpk-pause -namespace {{.Pod.Namespace}} -pod {{.Pod.Name}} ||
 echo "[HOST] **SYSTEMERROR** hpk-pause exited with code $?" | tee {{.VirtualEnv.SysErrorFilePath}}
 
 #### END SECTION: Host Environment ####
