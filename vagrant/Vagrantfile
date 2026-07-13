@@ -3,19 +3,29 @@
 
 Vagrant.configure("2") do |config|
   config.vm.box = "bento/ubuntu-24.04"
-  
+
   # Configure UTM provider for Apple Silicon
   config.vm.provider "utm" do |utm|
-    utm.cpus = 2
-    utm.memory = 2048
+    utm.cpus = 3
+    utm.memory = 3072
     # Enable shared graphics for clipboard sharing, if needed
-    # utm.graphics = "virtio-ramfb" 
+    # utm.graphics = "virtio-ramfb"
   end
-
+  
+  config.vm.provider :libvirt do |libvirt|
+    libvirt.driver = "kvm"
+    libvirt.cpus = 3
+    libvirt.memory = 3072
+  end
   # Prevent Vagrant from replacing the insecure key with a unique one.
   # This avoids authentication issues when /home is mounted via NFS (overwriting .ssh)
   # or when re-provisioning.
   config.ssh.insert_key = false
+
+  config.vm.synced_folder ".", "/vagrant", 
+    type: "nfs",
+    nfs_version: 4,
+    nfs_udp: false
 
   # Controller Node
   config.vm.define "controller" do |controller|
