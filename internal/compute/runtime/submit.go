@@ -17,18 +17,21 @@ package runtime
 
 import (
 	"fmt"
-	"os"
+	"path/filepath"
 
+	"al.essio.dev/pkg/shellescape"
 	"hpk/internal/compute"
 	"hpk/pkg/process"
 )
 
 // SubmitJob executes a job script directly via bash in the background.
 func SubmitJob(scriptFile string) (string, error) {
-	outputFile := os.Getenv("HOME") + "/.hpk/logs.log"
+	outputFile := filepath.Join(filepath.Dir(scriptFile), "submit.log")
+	quotedScript := shellescape.Quote(scriptFile)
+	quotedOutput := shellescape.Quote(outputFile)
 
 	// Execute script directly via bash in background
-	commandString := fmt.Sprintf("nohup bash -l -c 'source %s' > %s 2>&1 &", scriptFile, outputFile)
+	commandString := fmt.Sprintf("nohup bash -l -c 'source %s' >> %s 2>&1 &", quotedScript, quotedOutput)
 	out, err := process.Execute("bash", "-c", commandString)
 	fmt.Println("Submitting (Direct bash mode): ", commandString)
 

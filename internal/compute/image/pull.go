@@ -57,6 +57,13 @@ func ResolveLocal(imageDir string, imageName string) (*Image, error) {
 	return img, nil
 }
 
+var pullLocks sync.Map
+
+func getPullLock(targetPath string) *sync.Mutex {
+	l, _ := pullLocks.LoadOrStore(targetPath, &sync.Mutex{})
+	return l.(*sync.Mutex)
+}
+
 func Pull(imageDir string, transport Transport, imageName string) (*Image, error) {
 	img, err := ResolveLocal(imageDir, imageName)
 	if err == nil {
@@ -69,6 +76,17 @@ func Pull(imageDir string, transport Transport, imageName string) (*Image, error
 
 	img = &Image{Filepath: imageDir + ParseImageName(imageName)}
 
+	lock := getPullLock(img.Filepath)
+	lock.Lock()
+	defer lock.Unlock()
+
+	// Re-check after acquiring lock in case another goroutine completed the pull.
+	if checkedImg, err := ResolveLocal(imageDir, imageName); err == nil {
+		return checkedImg, nil
+	}
+
+	tmpFile := img.Filepath + ".tmp-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+
 	// otherwise, download a fresh copy
 	compute.DefaultLogger.Info(" * Downloading image...", "image", imageName, "dir", imageDir)
 	if _, err := executePullWithProgress(
@@ -76,10 +94,16 @@ func Pull(imageDir string, transport Transport, imageName string) (*Image, error
 		compute.Environment.ApptainerBin,
 		"pull",
 		"--arch", runtime.GOARCH,
-		"--dir", imageDir,
+		tmpFile,
 		transport.Wrap(imageName),
 	); err != nil {
+		_ = os.Remove(tmpFile)
 		return nil, fmt.Errorf("downloading has failed: %w", err)
+	}
+
+	if err := os.Rename(tmpFile, img.Filepath); err != nil {
+		_ = os.Remove(tmpFile)
+		return nil, fmt.Errorf("failed to rename downloaded image: %w", err)
 	}
 
 	compute.DefaultLogger.Info(" * Download completed", "image", imageName, "path", img.Filepath)
@@ -207,44 +231,25 @@ func executePullWithProgress(imageName string, command string, arguments ...stri
 }
 
 func ParseImageName(rawImageName string) string {
-	// filter host
-	var imageName string
-
-	hostImage := strings.Split(rawImageName, "/")
-	switch {
-	case len(hostImage) == 1:
-		imageName = hostImage[0]
-	case len(hostImage) > 1:
-		imageName = hostImage[len(hostImage)-1]
-	default:
-		panic("invalid name: " + rawImageName)
+	if rawImageName == "" {
+		return "/unnamed.sif"
 	}
 
-	// filter version
-	imageNameVersion := strings.Split(imageName, ":")
-	switch {
-	case len(imageNameVersion) == 1:
-		name := imageNameVersion[0]
-		version := "latest"
+	// Remove digest (@sha256:...)
+	nameWithoutDigest := strings.Split(rawImageName, "@")[0]
 
-		return "/" + name + "_" + version + ".sif"
-	case len(imageNameVersion) == 2:
-		name := imageNameVersion[0]
-		version := imageNameVersion[1]
-
-		return "/" + name + "_" + version + ".sif"
-
-	default:
-		// keep the tag (version), but ignore the digest (sha256)
-		// registry.k8s.io/ingress-nginx/kube-webhook-certgen:v20230407@sha256:543c40fd093964bc9ab509d3e791f9989963021f1e9e4c9c7b6700b02bfb227b
-		imageNameVersionDigest := strings.Split(imageName, "@")
-		digest := imageNameVersionDigest[1]
-		_ = digest
-
-		imageNameVersion = strings.Split(imageNameVersionDigest[0], ":")
-		name := imageNameVersion[0]
-		version := imageNameVersion[1]
-
-		return "/" + name + "_" + version + ".sif"
+	// Split name and tag
+	parts := strings.Split(nameWithoutDigest, ":")
+	imageRef := parts[0]
+	tag := "latest"
+	if len(parts) > 1 {
+		tag = parts[1]
 	}
+
+	// Clean imageRef and tag by replacing non-alphanumeric characters with underscores
+	reg := regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
+	cleanRef := reg.ReplaceAllString(imageRef, "_")
+	cleanTag := reg.ReplaceAllString(tag, "_")
+
+	return "/" + cleanRef + "_" + cleanTag + ".sif"
 }

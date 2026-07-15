@@ -18,21 +18,34 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 
 	"hpk/internal/compute"
 	corev1 "k8s.io/api/core/v1"
 
-	// discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+// FromServicesForPod builds environment variables taking into account pod.Spec.EnableServiceLinks.
+func FromServicesForPod(ctx context.Context, pod *corev1.Pod) []corev1.EnvVar {
+	enableServiceLinks := true
+	if pod.Spec.EnableServiceLinks != nil {
+		enableServiceLinks = *pod.Spec.EnableServiceLinks
+	}
+	return FromServices(ctx, pod.GetNamespace(), enableServiceLinks)
+}
+
 // FromServices builds environment variables that a container is started with,
-// which tell the container where to find the services it may need, which are
-// provided as an argument.
-func FromServices(ctx context.Context, namespace string) []corev1.EnvVar {
+// which tell the container where to find the services it may need.
+func FromServices(ctx context.Context, namespace string, enableServiceLinks ...bool) []corev1.EnvVar {
+	enableLinks := true
+	if len(enableServiceLinks) > 0 {
+		enableLinks = enableServiceLinks[0]
+	}
+
 	/*---------------------------------------------------
 	 * Get all Service resources from master
 	 *---------------------------------------------------*/
@@ -51,8 +64,8 @@ func FromServices(ctx context.Context, namespace string) []corev1.EnvVar {
 		// from the master service namespace, even if enableServiceLinks is false.
 		// We also add environment variables for other services in the same
 		// namespace, if enableServiceLinks is true.
-		if service.GetNamespace() == namespace ||
-			service.GetNamespace() == metav1.NamespaceDefault {
+		isDefaultKubernetes := service.GetNamespace() == metav1.NamespaceDefault && service.GetName() == "kubernetes"
+		if isDefaultKubernetes || (enableLinks && (service.GetNamespace() == namespace || service.GetNamespace() == metav1.NamespaceDefault)) {
 			services = append(services, &serviceList.Items[i])
 		}
 	}
@@ -80,14 +93,15 @@ func FromServices(ctx context.Context, namespace string) []corev1.EnvVar {
 
 		// First port - give it the backwards-compatible name.
 		name = makeEnvVariableName(service.Name) + "_SERVICE_PORT"
-		result = append(result, corev1.EnvVar{Name: name, Value: service.Spec.Ports[0].TargetPort.String()})
+		portStr := strconv.Itoa(int(service.Spec.Ports[0].Port))
+		result = append(result, corev1.EnvVar{Name: name, Value: portStr})
 
 		// All named ports (only the first may be unnamed, checked in validation).
 		for i := range service.Spec.Ports {
 			sp := &service.Spec.Ports[i]
 			if sp.Name != "" {
 				pn := name + "_" + makeEnvVariableName(sp.Name)
-				result = append(result, corev1.EnvVar{Name: pn, Value: sp.TargetPort.String()})
+				result = append(result, corev1.EnvVar{Name: pn, Value: strconv.Itoa(int(sp.Port))})
 			}
 		}
 
@@ -117,7 +131,8 @@ func makeLinkVariables(service *corev1.Service) []corev1.EnvVar {
 			protocol = string(sp.Protocol)
 		}
 
-		hostPort := net.JoinHostPort(service.Spec.ClusterIP, sp.TargetPort.String())
+		portStr := strconv.Itoa(int(sp.Port))
+		hostPort := net.JoinHostPort(service.Spec.ClusterIP, portStr)
 
 		if i == 0 {
 			// Docker special-cases the first port.
@@ -138,7 +153,7 @@ func makeLinkVariables(service *corev1.Service) []corev1.EnvVar {
 			},
 			{
 				Name:  portPrefix + "_PORT",
-				Value: sp.TargetPort.String(),
+				Value: portStr,
 			},
 			{
 				Name:  portPrefix + "_ADDR",

@@ -16,16 +16,10 @@ type CNIConfig struct {
 	Name       string `json:"name"`
 	Type       string `json:"type"` // "host-local"
 	IPAM       struct {
-		Type    string  `json:"type"`
-		Subnet  string  `json:"subnet"`
-		Routes  []Route `json:"routes,omitempty"`
-		DataDir string  `json:"dataDir,omitempty"`
+		Type    string `json:"type"`
+		Subnet  string `json:"subnet"`
+		DataDir string `json:"dataDir,omitempty"`
 	} `json:"ipam"`
-}
-
-type Route struct {
-	Dst string `json:"dst"`
-	GW  string `json:"gw,omitempty"`
 }
 
 // CNIResult represents (partial) output from host-local

@@ -188,6 +188,13 @@ func (h *PodHandler) mountVolumeSource(ctx context.Context, vol corev1.Volume) e
 			compute.SystemPanic(err, "mount hostpath volume has failed")
 		}
 
+		dstFullPath := filepath.Join(h.podDirectory.VolumeDir(), vol.Name)
+		if _, err := os.Lstat(dstFullPath); os.IsNotExist(err) {
+			if err := os.Symlink(vol.VolumeSource.HostPath.Path, dstFullPath); err != nil {
+				compute.SystemPanic(err, "cannot link symlink at path '%s'", dstFullPath)
+			}
+		}
+
 		h.logger.Info("  * HostPath Volume is mounted", "name", vol.Name)
 
 		return nil
@@ -238,17 +245,28 @@ func (h *PodHandler) DownwardAPIVolumeSource(ctx context.Context, vol corev1.Vol
 		compute.SystemPanic(err, "cannot create dir '%s'", downApiDir)
 	}
 
-	for _, item := range vol.DownwardAPI.Items {
-		itemPath := filepath.Join(downApiDir, item.Path)
-		value, err := fieldpath.ExtractFieldPathAsString(h.Pod, item.FieldRef.FieldPath)
-		if err != nil {
-			compute.PodError(h.Pod, compute.ReasonSpecError, "%v", err)
+	mode := fs.FileMode(0644)
+	if vol.DownwardAPI != nil && vol.DownwardAPI.DefaultMode != nil {
+		mode = fs.FileMode(*vol.DownwardAPI.DefaultMode)
+	}
 
-			return
-		}
+	if vol.DownwardAPI != nil {
+		for _, item := range vol.DownwardAPI.Items {
+			if item.FieldRef == nil {
+				continue
+			}
 
-		if err := os.WriteFile(itemPath, []byte(value), fs.FileMode(*vol.Projected.DefaultMode)); err != nil {
-			compute.SystemPanic(err, "cannot write config map file '%s'", itemPath)
+			itemPath := filepath.Join(downApiDir, item.Path)
+			value, err := fieldpath.ExtractFieldPathAsString(h.Pod, item.FieldRef.FieldPath)
+			if err != nil {
+				compute.PodError(h.Pod, compute.ReasonSpecError, "%v", err)
+
+				return
+			}
+
+			if err := os.WriteFile(itemPath, []byte(value), mode); err != nil {
+				compute.SystemPanic(err, "cannot write config map file '%s'", itemPath)
+			}
 		}
 	}
 }
@@ -293,7 +311,7 @@ func (h *PodHandler) PersistentVolumeClaimSource(ctx context.Context, vol corev1
 				return nil
 			},
 		); errPVC != nil { // error cehcking
-			compute.PodError(h.Pod, "PVCError", "PVC (%s) has failed. error:'%W'", pvc.GetName(), errPVC)
+			compute.PodError(h.Pod, "PVCError", "PVC (%s) has failed. error:'%v'", pvc.GetName(), errPVC)
 
 			return
 		}
@@ -314,10 +332,12 @@ func (h *PodHandler) PersistentVolumeClaimSource(ctx context.Context, vol corev1
 				return compute.K8SClient.Get(ctx, key, &pv)
 			},
 		); errPV != nil { // error checking
-			compute.PodError(h.Pod, "PVError", "PV (%s) has failed. err:'%W'",
+			compute.PodError(h.Pod, "PVError", "PV (%s) has failed. err:'%v'",
 				pv.GetName(),
 				errPV,
 			)
+
+			return
 		}
 	}
 
@@ -328,20 +348,16 @@ func (h *PodHandler) PersistentVolumeClaimSource(ctx context.Context, vol corev1
 	 *---------------------------------------------------*/
 	switch {
 	case pv.Spec.HostPath != nil:
-		// dstFullPath := filepath.Join(h.podDirectory.VolumeDir(), vol.Name)
+		dstFullPath := filepath.Join(h.podDirectory.VolumeDir(), vol.Name)
 
-		// err := os.MkdirAll(pv.Spec.HostPath.Path, os.FileMode(0755))
-		// if err != nil {
-		// 	if !os.IsExist(err) {
-		// 		compute.SystemPanic(err, "cannot create hostpath directory at path '%s'", pv.Spec.HostPath.Path)
-		// 	}
-		// }
-		// if err := os.Symlink(pv.Spec.HostPath.Path, dstFullPath); err != nil {
-		// 	compute.SystemPanic(err, "cannot link symlink at path '%s'", dstFullPath)
-		// }
+		if err := os.MkdirAll(pv.Spec.HostPath.Path, endpoint.PodGlobalDirectoryPermissions); err != nil && !os.IsExist(err) {
+			compute.SystemPanic(err, "cannot create hostpath directory at path '%s'", pv.Spec.HostPath.Path)
+		}
+		if err := os.Symlink(pv.Spec.HostPath.Path, dstFullPath); err != nil && !os.IsExist(err) {
+			compute.SystemPanic(err, "cannot link symlink at path '%s'", dstFullPath)
+		}
 
-		// h.logger.Info("  * HostPath Volume is mounted", "fullpath", dstFullPath)
-		panic("Hostpath pv")
+		h.logger.Info("  * HostPath PV Volume is mounted", "fullpath", dstFullPath)
 	case pv.Spec.Local != nil:
 		dstFullPath := filepath.Join(h.podDirectory.VolumeDir(), vol.Name)
 

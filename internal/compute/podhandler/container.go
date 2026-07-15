@@ -201,6 +201,8 @@ func SyncContainerStatuses(pod *corev1.Pod) {
 	 * Generic Handler for ContainerStatus
 	 *---------------------------------------------------*/
 	handleStatus := func(containerStatus *corev1.ContainerStatus) {
+		prevState := containerStatus.State
+
 		/*-- Presence of Exit Code indicates Terminated  State--*/
 		exitCodePath := podDir.Container(containerStatus.Name).ExitCodePath()
 		exitCode, exitCodeExists := readIntFromFile(exitCodePath)
@@ -208,7 +210,6 @@ func SyncContainerStatuses(pod *corev1.Pod) {
 		if exitCodeExists {
 			// prepare some messages
 			var reason, message string
-			var restartCount int32
 
 			if exitCode == 0 {
 				reason = "Completed"
@@ -216,33 +217,35 @@ func SyncContainerStatuses(pod *corev1.Pod) {
 			} else {
 				reason = "Error(" + containerStatus.Name + ")"
 				message = HumanReadableCode(exitCode)
-				restartCount = containerStatus.RestartCount + 1
+			}
+
+			startedAt := metav1.Time{}
+			if prevState.Running != nil {
+				startedAt = prevState.Running.StartedAt
+			} else if prevState.Terminated != nil {
+				startedAt = prevState.Terminated.StartedAt
+			}
+
+			// Update LastTerminationState and RestartCount on initial transition to Terminated
+			if prevState.Terminated == nil {
+				containerStatus.LastTerminationState = prevState
+				if exitCode != 0 {
+					containerStatus.RestartCount++
+				}
 			}
 
 			// set current status to terminate.
 			containerStatus.State.Waiting = nil
 			containerStatus.State.Running = nil
 			containerStatus.State.Terminated = &corev1.ContainerStateTerminated{
-				ExitCode: int32(exitCode),
-				Signal:   0,
-				Reason:   reason,
-				Message:  message,
-				StartedAt: func() metav1.Time {
-					if containerStatus.State.Running != nil {
-						return containerStatus.State.Running.StartedAt
-					} else {
-						return metav1.Time{}
-					}
-				}(),
+				ExitCode:    int32(exitCode),
+				Signal:      0,
+				Reason:      reason,
+				Message:     message,
+				StartedAt:   startedAt,
 				FinishedAt:  metav1.Now(), // fixme: get it from the file's ctime
 				ContainerID: containerStatus.ContainerID,
 			}
-
-			// update the last status.
-			containerStatus.LastTerminationState = containerStatus.State
-
-			// increase the restart counter.
-			containerStatus.RestartCount = restartCount
 
 			return
 		}

@@ -15,7 +15,6 @@
 package runtime
 
 import (
-	"os"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -47,23 +46,16 @@ func HasJobID(pod *corev1.Pod) bool {
 
 func parseIDType(raw string) string {
 	if strings.HasPrefix(raw, string(JobIDTypeProcess)) {
-		return strings.Split(raw, string(JobIDTypeProcess))[1]
+		parts := strings.Split(raw, string(JobIDTypeProcess))
+		if len(parts) > 1 {
+			return parts[1]
+		}
 	}
 
-	panic("unknown id format: " + raw)
+	return strings.TrimSpace(raw)
 }
 
-// GetPIDFromFile reads the process ID from a .pid file in the pod's working directory.
-// Returns an error if the file cannot be read or parsed.
-func GetPIDFromFile(pidFilePath string) (string, error) {
-	content, err := os.ReadFile(pidFilePath)
-	if err != nil {
-		return "", err
-	}
 
-	pid := strings.TrimSpace(string(content))
-	return pid, nil
-}
 
 // IsProcessJobID checks if the given job ID represents a direct process PID.
 // A job ID that consists only of digits is considered a process PID.

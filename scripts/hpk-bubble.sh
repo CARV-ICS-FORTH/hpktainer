@@ -13,7 +13,7 @@ NS_ADDR=$CIDR_PREFIX.100
 HOST_IP_DETECTED=$(ip route get 1 | awk '{print $7; exit}')
 # Use provided CONTROLLER_IP or default to detected host IP
 CONTROLLER_IP=${CONTROLLER_IP:-$HOST_IP_DETECTED}
-API_RELAY_PID=""
+
 SOCAT_PID_6443=""
 SOCAT_PID_10250=""
 SOCAT_PID_2379=""
@@ -57,11 +57,7 @@ cleanup() {
         kill $SOCAT_PID_2379 2>/dev/null || true
         wait $SOCAT_PID_2379 2>/dev/null || true
     fi
-    if [[ -n $API_RELAY_PID ]]; then
-        kill $API_RELAY_PID 2>/dev/null
-        wait $API_RELAY_PID 2>/dev/null
-    fi
-    pkill -f "HPK_API_RELAY_${NAME}" 2>/dev/null || true
+
 	if [[ -n $SLIRP_PID ]]; then
 		kill $SLIRP_PID 2>/dev/null
 		wait $SLIRP_PID 2>/dev/null

@@ -12,7 +12,6 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/hashicorp/go-multierror v1.1.1
 	github.com/matishsiao/goInfo v0.0.0-20241216093258-66a9250504d6
-	github.com/niemeyer/pretty v0.0.0-20200227124842-a10e7caefd8e
 	github.com/rs/zerolog v1.34.0
 	github.com/sirupsen/logrus v1.9.4
 	github.com/songgao/water v0.0.0-20200317203138-2b4b6d7c09d8

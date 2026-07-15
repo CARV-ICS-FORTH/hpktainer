@@ -25,10 +25,8 @@ import (
 )
 
 var (
-	ReasonObjectNotFound      = "ObjectNotFound"
 	ReasonSpecError           = "SpecError"
 	ReasonUnsupportedFeatures = "UnsupportedFeatures"
-	ReasonExecutionError      = "ExecutionError"
 	ReasonInitializationError = "InitializationError"
 )
 
@@ -58,6 +56,5 @@ func SystemPanic(err error, errFormat string, errArgs ...any) {
 
 	DefaultLogger.Error(werr, "SystemERROR")
 
-	//[TODO:] reinstate it after debugging
-	//panic(werr)
+	panic(werr)
 }

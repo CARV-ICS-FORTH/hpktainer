@@ -21,6 +21,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"hpk/internal/compute"
 	"hpk/pkg/crdtools"
@@ -72,7 +73,7 @@ func UpdateStatusFromRuntime(pod *corev1.Pod) {
 	// https://kubernetes.io/docs/concepts/workloads/pods/init-containers/
 
 	/*-- A Pod that is initializing is in the Pending state --*/
-	if pod.Status.Phase == corev1.PodPending {
+	if pod.Status.Phase == corev1.PodPending || pod.Status.Phase == "" {
 		for _, initContainer := range pod.Status.InitContainerStatuses {
 			if initContainer.State.Terminated == nil {
 				/*-- Still Initializing: at least one init container is still running --*/
@@ -192,7 +193,7 @@ func UpdateStatusFromRuntime(pod *corev1.Pod) {
 			change: func(status *corev1.PodStatus) {
 				status.Phase = corev1.PodFailed
 				status.Reason = "PodFailure"
-				status.Message = "Add some explanatory message here"
+				status.Message = fmt.Sprintf("Invalid container state transition (pending: %d, running: %d, succeeded: %d, failed: %d)", state.NumPendingJobs(), state.NumRunningJobs(), state.NumSuccessfulJobs(), state.NumFailedJobs())
 			},
 		},
 	}
@@ -334,41 +335,51 @@ func HumanReadableCode(code int) string {
 }
 
 func readStringFromFile(filepath string) (string, bool) {
-	out, err := os.ReadFile(filepath)
-	if os.IsNotExist(err) {
-		return "", false
+	for attempt := 0; attempt < 3; attempt++ {
+		out, err := os.ReadFile(filepath)
+		if os.IsNotExist(err) {
+			return "", false
+		}
+
+		if err != nil {
+			compute.DefaultLogger.Error(err, "cannot read file", "path", filepath)
+			return "", false
+		}
+
+		val := strings.TrimSpace(string(out))
+		if val != "" {
+			return val, true
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 
-	if err != nil {
-		compute.DefaultLogger.Error(err, "cannot read file", "path", filepath)
-		return "", false
-	}
-
-	// filter any new line on file
-	return strings.TrimSuffix(string(out), "\n"), true
+	return "", false
 }
 
 func readIntFromFile(filepath string) (int, bool) {
-	out, err := os.ReadFile(filepath)
-	if os.IsNotExist(err) {
-		return -1, false
-	}
-
-	if err != nil {
-		compute.DefaultLogger.Error(err, "cannot read file", "path", filepath)
-		return -1, false
-	}
-
-	scanner := bufio.NewScanner(strings.NewReader(string(out)))
-	scanner.Split(bufio.ScanWords)
-
-	if scanner.Scan() {
-		code, err := strconv.Atoi(scanner.Text())
-		if err != nil {
-			compute.SystemPanic(err, "cannot decode content to int")
+	for attempt := 0; attempt < 3; attempt++ {
+		out, err := os.ReadFile(filepath)
+		if os.IsNotExist(err) {
+			return -1, false
 		}
 
-		return code, true
+		if err != nil {
+			compute.DefaultLogger.Error(err, "cannot read file", "path", filepath)
+			return -1, false
+		}
+
+		scanner := bufio.NewScanner(strings.NewReader(string(out)))
+		scanner.Split(bufio.ScanWords)
+
+		if scanner.Scan() {
+			code, err := strconv.Atoi(scanner.Text())
+			if err != nil {
+				compute.SystemPanic(err, "cannot decode content to int")
+			}
+
+			return code, true
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 
 	return -1, false
@@ -431,15 +442,7 @@ func (in *Classifier) NumFailedJobs() int {
 	return len(in.failedJobs)
 }
 
-func (in *Classifier) NumAll() string {
-	return fmt.Sprint(
-		"\n * Pending:", in.NumPendingJobs(),
-		"\n * Running:", in.NumRunningJobs(),
-		"\n * Success:", in.NumSuccessfulJobs(),
-		"\n * Failed:", in.NumFailedJobs(),
-		"\n",
-	)
-}
+
 
 func (in *Classifier) ListPendingJobs() []string {
 	list := make([]string, 0, len(in.pendingJobs))
@@ -453,17 +456,7 @@ func (in *Classifier) ListPendingJobs() []string {
 	return list
 }
 
-func (in *Classifier) ListRunningJobs() []string {
-	list := make([]string, 0, len(in.runningJobs))
 
-	for jobName := range in.runningJobs {
-		list = append(list, jobName)
-	}
-
-	sort.Strings(list)
-
-	return list
-}
 
 func (in *Classifier) ListSuccessfulJobs() []string {
 	list := make([]string, 0, len(in.successfulJobs))
@@ -492,93 +485,10 @@ func (in *Classifier) ListFailedJobs() []string {
 func (in *Classifier) ListAll() string {
 	return fmt.Sprint(
 		"\n * Pending:", in.ListPendingJobs(),
-		"\n * Running:", in.ListRunningJobs(),
 		"\n * Success:", in.ListSuccessfulJobs(),
 		"\n * Failed:", in.ListFailedJobs(),
 		"\n",
 	)
 }
 
-func (in *Classifier) GetPendingJobs(jobNames ...string) []*corev1.ContainerStatus {
-	list := make([]*corev1.ContainerStatus, 0, len(in.pendingJobs))
 
-	if len(jobNames) == 0 {
-		// if no job names are defined, return everything
-		for _, job := range in.pendingJobs {
-			list = append(list, job)
-		}
-	} else {
-		// otherwise, iterate the list
-		for _, job := range jobNames {
-			j, exists := in.pendingJobs[job]
-			if exists {
-				list = append(list, j)
-			}
-		}
-	}
-
-	return list
-}
-
-func (in *Classifier) GetRunningJobs(jobNames ...string) []*corev1.ContainerStatus {
-	list := make([]*corev1.ContainerStatus, 0, len(in.runningJobs))
-
-	if len(jobNames) == 0 {
-		// if no job names are defined, return everything
-		for _, job := range in.runningJobs {
-			list = append(list, job)
-		}
-	} else {
-		// otherwise, iterate the list
-		for _, job := range jobNames {
-			j, exists := in.runningJobs[job]
-			if exists {
-				list = append(list, j)
-			}
-		}
-	}
-
-	return list
-}
-
-func (in *Classifier) GetSuccessfulJobs(jobNames ...string) []*corev1.ContainerStatus {
-	list := make([]*corev1.ContainerStatus, 0, len(in.successfulJobs))
-
-	if len(jobNames) == 0 {
-		// if no job names are defined, return everything
-		for _, job := range in.successfulJobs {
-			list = append(list, job)
-		}
-	} else {
-		// otherwise, iterate the list
-		for _, job := range jobNames {
-			j, exists := in.successfulJobs[job]
-			if exists {
-				list = append(list, j)
-			}
-		}
-	}
-
-	return list
-}
-
-func (in *Classifier) GetFailedJobs(jobNames ...string) []*corev1.ContainerStatus {
-	list := make([]*corev1.ContainerStatus, 0, len(in.failedJobs))
-
-	if len(jobNames) == 0 {
-		// if no job names are defined, return everything
-		for _, job := range in.failedJobs {
-			list = append(list, job)
-		}
-	} else {
-		// otherwise, iterate the list
-		for _, job := range jobNames {
-			j, exists := in.failedJobs[job]
-			if exists {
-				list = append(list, j)
-			}
-		}
-	}
-
-	return list
-}

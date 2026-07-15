@@ -16,8 +16,6 @@ package hostutil
 import (
 	"fmt"
 	"os"
-
-	"k8s.io/utils/mount"
 )
 
 // FileType enumerates the known set of possible file types.
@@ -40,33 +38,13 @@ const (
 
 // HostUtils defines the set of methods for interacting with paths on a host.
 type HostUtils interface {
-	// DeviceOpened determines if the device (e.g. /dev/sdc) is in use elsewhere
-	// on the system, i.e. still mounted.
-	DeviceOpened(pathname string) (bool, error)
-	// PathIsDevice determines if a path is a device.
-	PathIsDevice(pathname string) (bool, error)
-	// GetDeviceNameFromMount finds the device name by checking the mount path
-	// to get the global mount path within its plugin directory.
-	GetDeviceNameFromMount(mounter mount.Interface, mountPath, pluginMountDir string) (string, error)
-	// MakeRShared checks that given path is on a mount with 'rshared' mount
-	// propagation. If not, it bind-mounts the path as rshared.
-	MakeRShared(path string) error
 	// GetFileType checks for file/directory/socket/block/character devices.
 	GetFileType(pathname string) (FileType, error)
 	// PathExists tests if the given path already exists
 	// Error is returned on any other error than "file not found".
 	PathExists(pathname string) (bool, error)
-	// EvalHostSymlinks returns the path name after evaluating symlinks.
-	EvalHostSymlinks(pathname string) (string, error)
-	// GetOwner returns the integer ID for the user and group of the given path
-	GetOwner(pathname string) (int64, int64, error)
-	// GetMode returns permissions of the path.
-	GetMode(pathname string) (os.FileMode, error)
 }
 
-// Compile-time check to ensure all HostUtil implementations satisfy
-// the Interface.
-var _ HostUtils = &HostUtil{}
 
 // getFileType checks for file/directory/socket and block/character devices.
 func getFileType(pathname string) (FileType, error) {

@@ -52,21 +52,7 @@ func SetPodStatusCondition(conditions *[]corev1.PodCondition, newCondition corev
 	existingCondition.Message = newCondition.Message
 }
 
-// RemoveStatusCondition removes the corresponding conditionType from conditions.
-// conditions must be non-nil.
-func RemoveStatusCondition(conditions *[]metav1.Condition, conditionType string) {
-	if conditions == nil || len(*conditions) == 0 {
-		return
-	}
-	newConditions := make([]metav1.Condition, 0, len(*conditions)-1)
-	for _, condition := range *conditions {
-		if condition.Type != conditionType {
-			newConditions = append(newConditions, condition)
-		}
-	}
 
-	*conditions = newConditions
-}
 
 // FindStatusCondition finds the conditionType in conditions.
 func FindStatusCondition(conditions []corev1.PodCondition, conditionType corev1.PodConditionType) *corev1.PodCondition {
@@ -79,22 +65,4 @@ func FindStatusCondition(conditions []corev1.PodCondition, conditionType corev1.
 	return nil
 }
 
-// IsStatusConditionTrue returns true when the conditionType is present and set to `metav1.ConditionTrue`
-func IsStatusConditionTrue(conditions []corev1.PodCondition, conditionType corev1.PodConditionType) bool {
-	return IsStatusConditionPresentAndEqual(conditions, conditionType, corev1.ConditionTrue)
-}
 
-// IsStatusConditionFalse returns true when the conditionType is present and set to `metav1.ConditionFalse`
-func IsStatusConditionFalse(conditions []corev1.PodCondition, conditionType corev1.PodConditionType) bool {
-	return IsStatusConditionPresentAndEqual(conditions, conditionType, corev1.ConditionFalse)
-}
-
-// IsStatusConditionPresentAndEqual returns true when conditionType is present and equal to status.
-func IsStatusConditionPresentAndEqual(conditions []corev1.PodCondition, conditionType corev1.PodConditionType, status corev1.ConditionStatus) bool {
-	for _, condition := range conditions {
-		if condition.Type == conditionType {
-			return condition.Status == status
-		}
-	}
-	return false
-}

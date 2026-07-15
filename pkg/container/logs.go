@@ -17,14 +17,11 @@
 package container
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strings"
-	"sync"
-	"time"
-
-	"errors"
 
 	"github.com/sirupsen/logrus"
 )
@@ -47,30 +44,7 @@ const (
 	ANSIEscapeResetCode = "\033[0m"
 )
 
-// LogOptions is the options you can use for logs
-type LogOptions struct {
-	Details    bool
-	Follow     bool
-	Since      time.Time
-	Until      time.Time
-	Tail       int64
-	Timestamps bool
-	Colors     bool
-	Multi      bool
-	WaitGroup  *sync.WaitGroup
-	UseName    bool
-}
 
-// LogLine describes the information for each line of a log
-type LogLine struct {
-	Device       string
-	ParseLogType string
-	Time         time.Time
-	Msg          string
-	CID          string
-	CName        string
-	ColorID      int64
-}
 
 func GetTailLog(path string, tail int) ([]string, error) {
 	var (
@@ -123,6 +97,9 @@ func GetTailLog(path string, tail int) ([]string, error) {
 			// number of F type messages as the desired tail
 			tailLog = append(tailLog, i[j])
 			nllCounter++
+			if nllCounter >= tail {
+				break
+			}
 		}
 		// if we have enough log lines, we can hang up
 		if nllCounter >= tail {
@@ -130,113 +107,15 @@ func GetTailLog(path string, tail int) ([]string, error) {
 		}
 	}
 
+	// Reverse tailLog so lines are returned in chronological order
+	for k, l := 0, len(tailLog)-1; k < l; k, l = k+1, l-1 {
+		tailLog[k], tailLog[l] = tailLog[l], tailLog[k]
+	}
+
 	return tailLog, nil
 }
 
-// getColor returns an ANSI escape code for color based on the colorID
-func getColor(colorID int64) string {
-	colors := map[int64]string{
-		0: "\033[37m", // Light Gray
-		1: "\033[31m", // Red
-		2: "\033[33m", // Yellow
-		3: "\033[34m", // Blue
-		4: "\033[35m", // Magenta
-		5: "\033[36m", // Cyan
-		6: "\033[32m", // Green
-	}
-	return colors[colorID%int64(len(colors))]
-}
 
-func (l *LogLine) colorize(prefix string) string {
-	return getColor(l.ColorID) + prefix + l.Msg + ANSIEscapeResetCode
-}
-
-// String converts a log line to a string for output given whether a detail
-// bool is specified.
-func (l *LogLine) String(options *LogOptions) string {
-	var out string
-	if options.Multi {
-		if options.UseName {
-			out = l.CName + " "
-		} else {
-			cid := l.CID
-			if len(cid) > 12 {
-				cid = cid[:12]
-			}
-			out = fmt.Sprintf("%s ", cid)
-		}
-	}
-
-	if options.Timestamps {
-		out += fmt.Sprintf("%s ", l.Time.Format(LogTimeFormat))
-	}
-
-	if options.Colors {
-		out = l.colorize(out)
-	} else {
-		out += l.Msg
-	}
-
-	return out
-}
-
-// Since returns a bool as to whether a log line occurred after a given time
-func (l *LogLine) Since(since time.Time) bool {
-	return l.Time.After(since) || since.IsZero()
-}
-
-// Until returns a bool as to whether a log line occurred before a given time
-func (l *LogLine) Until(until time.Time) bool {
-	return l.Time.Before(until) || until.IsZero()
-}
-
-// NewLogLine creates a logLine struct from a container log string
-func NewLogLine(line string) (*LogLine, error) {
-	splitLine := strings.Split(line, " ")
-	if len(splitLine) < 4 {
-		return nil, fmt.Errorf("'%s' is not a valid container log line", line)
-	}
-	logTime, err := time.Parse(LogTimeFormat, splitLine[0])
-	if err != nil {
-		return nil, fmt.Errorf("unable to convert time %s from container log: %w", splitLine[0], err)
-	}
-	l := LogLine{
-		Time:         logTime,
-		Device:       splitLine[1],
-		ParseLogType: splitLine[2],
-		Msg:          strings.Join(splitLine[3:], " "),
-	}
-	return &l, nil
-}
-
-// Partial returns a bool if the log line is a partial log type
-func (l *LogLine) Partial() bool {
-	return l.ParseLogType == PartialLogType
-}
-
-func (l *LogLine) Write(stdout io.Writer, stderr io.Writer, logOpts *LogOptions) {
-	switch l.Device {
-	case "stdout":
-		if stdout != nil {
-			if l.Partial() {
-				fmt.Fprint(stdout, l.String(logOpts))
-			} else {
-				fmt.Fprintln(stdout, l.String(logOpts))
-			}
-		}
-	case "stderr":
-		if stderr != nil {
-			if l.Partial() {
-				fmt.Fprint(stderr, l.String(logOpts))
-			} else {
-				fmt.Fprintln(stderr, l.String(logOpts))
-			}
-		}
-	default:
-		// Warn the user if the device type does not match. Most likely the file is corrupted.
-		logrus.Warnf("Unknown Device type '%s' in log file from Container %s", l.Device, l.CID)
-	}
-}
 
 // ReverseReader structure for reading a file backwards
 type ReverseReader struct {

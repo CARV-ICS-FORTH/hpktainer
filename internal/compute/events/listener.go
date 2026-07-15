@@ -20,7 +20,6 @@ import (
 	"path/filepath"
 	"sync"
 
-	"errors"
 	"hpk/internal/compute"
 	"hpk/internal/compute/endpoint"
 
@@ -35,7 +34,6 @@ import (
 
 ************************************************************/
 
-var ErrClosedQueue = errors.New("queue is closed")
 
 // Options represent options for EventHandler.
 type Options struct {
@@ -75,7 +73,13 @@ func (h *EventHandler) Push(event fsnotify.Event) {
 		return
 	}
 
-	h.Queue <- event
+	select {
+	case h.Queue <- event:
+	default:
+		compute.DefaultLogger.Info("drop event due to queue being full.",
+			"event", event.String(),
+		)
+	}
 }
 
 type PodControl struct {
@@ -108,13 +112,7 @@ func (h *EventHandler) Listen(ctx context.Context, control PodControl) {
 
 					return
 				case event := <-h.Queue:
-					// filter events other than creations.
-					if !event.Op.Has(fsnotify.Create) {
-						compute.DefaultLogger.Info("Event: omit non-create event", "details", event)
 
-						// return from select
-						break
-					}
 
 					// ensure that the file is a control file.
 					podkey, file, invalid := compute.HPK.ParseControlFilePath(event.Name)
@@ -212,6 +210,8 @@ func (h *EventHandler) Listen(ctx context.Context, control PodControl) {
 							"event", event,
 							"phase", pod.Status.Phase,
 						)
+
+						continue
 					}
 
 					/*-- Recalculate the Pod status from locally stored containers --*/

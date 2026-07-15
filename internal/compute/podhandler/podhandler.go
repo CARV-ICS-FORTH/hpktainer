@@ -66,7 +66,7 @@ func LoadPodFromFile(filePath string) (*corev1.Pod, error) {
 	var pod corev1.Pod
 
 	if err := json.Unmarshal(podDef, &pod); err != nil {
-		compute.SystemPanic(err, "failed decoding file '%s'", filePath)
+		return nil, fmt.Errorf("failed decoding file '%s': %w", filePath, err)
 	}
 
 	return &pod, nil
@@ -86,7 +86,7 @@ func SavePodToFile(_ context.Context, pod *corev1.Pod) error {
 	}
 
 	if err := os.WriteFile(filePath, podDef, endpoint.PodSpecJsonFilePermissions); err != nil {
-		compute.SystemPanic(err, "failed to write file path '%s'", filePath)
+		return fmt.Errorf("failed to write file path '%s': %w", filePath, err)
 	}
 
 	return nil
@@ -114,6 +114,22 @@ func parseProcessPID(raw string) (string, error) {
 }
 
 func resolveProcessPIDFromControlFiles(pod *corev1.Pod, podDir endpoint.PodPath, logger logr.Logger) (string, error) {
+	// First check main containers
+	for _, container := range pod.Spec.Containers {
+		jobIDPath := podDir.Container(container.Name).IDPath()
+		if raw, ok := readStringFromFile(jobIDPath); ok {
+			pid, err := parseProcessPID(raw)
+			if err != nil {
+				logger.Info(" * Invalid process id in control file", "path", jobIDPath, "value", raw, "err", err)
+
+				continue
+			}
+
+			return pid, nil
+		}
+	}
+
+	// Fallback to init containers
 	for _, container := range pod.Spec.InitContainers {
 		jobIDPath := podDir.Container(container.Name).IDPath()
 		if raw, ok := readStringFromFile(jobIDPath); ok {
@@ -128,16 +144,11 @@ func resolveProcessPIDFromControlFiles(pod *corev1.Pod, podDir endpoint.PodPath,
 		}
 	}
 
-	for _, container := range pod.Spec.Containers {
-		jobIDPath := podDir.Container(container.Name).IDPath()
-		if raw, ok := readStringFromFile(jobIDPath); ok {
-			pid, err := parseProcessPID(raw)
-			if err != nil {
-				logger.Info(" * Invalid process id in control file", "path", jobIDPath, "value", raw, "err", err)
-
-				continue
-			}
-
+	// Fallback to wrapper process pid file if written
+	wrapperPIDPath := filepath.Join("/tmp", fmt.Sprintf("%s_%s", pod.Namespace, pod.Name), ".pid")
+	if raw, ok := readStringFromFile(wrapperPIDPath); ok {
+		pid, err := parseProcessPID(raw)
+		if err == nil {
 			return pid, nil
 		}
 	}
@@ -213,8 +224,8 @@ func DeletePod(podKey client.ObjectKey, watcher filenotify.FileWatcher) bool {
 remove_pod:
 	// because fswatch does not work recursively, we cannot have the container directories nested within the pod.
 	// instead, we use a flat directory in the format "podir/containername.{jid,stdout,stdour,...}"
-	if err := watcher.Remove(podDir.String()); err != nil {
-		compute.SystemPanic(err, "deregister watcher for path '%s' has failed", podDir)
+	if err := watcher.Remove(podDir.ControlFileDir()); err != nil && !errors.Is(err, os.ErrNotExist) {
+		compute.SystemPanic(err, "deregister watcher for path '%s' has failed", podDir.ControlFileDir())
 	}
 
 	logger.Info(" * Pod Watcher has been removed.")
@@ -233,7 +244,7 @@ remove_pod:
 			// try to delete directory using the fakeroot from pause container.
 			out, err := runtime.DefaultPauseImage.FakerootExec(
 				[]string{"--mount", "type=bind,src=" + podDir.String() + ",dst=/pod"}, // mount the pod directory in apptainer
-				[]string{"rm", "-rf", "/pod/*"},                                       // remove the pod directory using fakeroot
+				[]string{"sh", "-c", "rm -rf /pod/* /pod"},                            // remove the pod directory contents using fakeroot
 			)
 
 			compute.DefaultLogger.Info(" * Result",
@@ -287,15 +298,15 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, watcher filenotify.FileWatc
 		podKey:          podKey,
 		podDirectory:    compute.HPK.Pod(podKey),
 		logger:          logger,
-		podEnvVariables: FromServices(ctx, pod.GetNamespace()),
+		podEnvVariables: FromServicesForPod(ctx, pod),
 	}
 
 	for _, env := range h.podEnvVariables {
-		logger.Info("env", env.Name, env.Value)
+		logger.Info("env", "name", env.Name)
 	}
 	for _, container := range pod.Spec.Containers {
 		for _, env := range container.Env {
-			logger.Info("container", env.Name, env.Value)
+			logger.Info("container env", "name", env.Name)
 		}
 	}
 	// create directory for the job environment.
@@ -351,6 +362,7 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, watcher filenotify.FileWatc
 		// h.Pod.Spec.Containers[0].VolumeMounts
 		if err := h.mountVolumeSource(ctx, vol); err != nil {
 			compute.PodError(pod, "VolumeError", "%v", err)
+			_ = SavePodToFile(ctx, h.Pod)
 
 			return
 		}
@@ -371,6 +383,7 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, watcher filenotify.FileWatc
 		c, err := h.buildContainer(initContainer, initContainerStatus)
 		if err != nil {
 			compute.PodError(pod, "InitContainerError", "failed to materialize pod.Spec.InitContainers[%d]", i)
+			_ = SavePodToFile(ctx, h.Pod)
 
 			return
 		}
@@ -388,6 +401,7 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, watcher filenotify.FileWatc
 		c, err := h.buildContainer(container, containerStatus)
 		if err != nil {
 			compute.PodError(pod, "MainContainerError", "failed to materialize pod.Spec.Containers[%d]", i)
+			_ = SavePodToFile(ctx, h.Pod)
 
 			return
 		}
@@ -459,7 +473,6 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, watcher filenotify.FileWatc
 			StderrPath:       h.podDirectory.StderrPath(),
 			SysErrorFilePath: h.podDirectory.SysErrorFilePath(),
 		},
-		InitContainers: initContainers,
 		Containers:     containers,
 		UseTmp:         useTmp,
 	}); err != nil {

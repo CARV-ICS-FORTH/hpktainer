@@ -25,7 +25,7 @@ type filePoller struct {
 	// the duration between polls.
 	interval time.Duration
 	// watches is the list of files currently being polled, close the associated channel to stop the watch
-	watches map[string]struct{}
+	watches map[string]chan struct{}
 	// Will be closed when done.
 	done chan struct{}
 	// events is the channel to listen to for watch events
@@ -57,14 +57,15 @@ func (w *filePoller) Add(name string) error {
 	}
 
 	if w.watches == nil {
-		w.watches = make(map[string]struct{})
+		w.watches = make(map[string]chan struct{})
 	}
 	if _, exists := w.watches[name]; exists {
 		return ErrWatchExists
 	}
-	w.watches[name] = struct{}{}
+	stopCh := make(chan struct{})
+	w.watches[name] = stopCh
 
-	go w.watch(item)
+	go w.watch(item, stopCh)
 	return nil
 }
 
@@ -80,10 +81,11 @@ func (w *filePoller) remove(name string) error {
 		return errPollerClosed
 	}
 
-	_, exists := w.watches[name]
+	stopCh, exists := w.watches[name]
 	if !exists {
-		return nil
+		return os.ErrNotExist
 	}
+	close(stopCh)
 	delete(w.watches, name)
 	return nil
 }
@@ -139,13 +141,15 @@ func (w *filePoller) sendErr(e error) error {
 }
 
 // watch watches item for changes until done is closed.
-func (w *filePoller) watch(item *itemToWatch) {
+func (w *filePoller) watch(item *itemToWatch, stopCh chan struct{}) {
 	ticker := time.NewTicker(w.interval)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ticker.C:
+		case <-stopCh:
+			return
 		case <-w.done:
 			return
 		}

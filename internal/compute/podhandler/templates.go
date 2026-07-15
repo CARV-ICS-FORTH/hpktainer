@@ -24,7 +24,6 @@ import (
 	"text/template"
 
 	"hpk/internal/compute"
-	"hpk/pkg/process"
 
 	"al.essio.dev/pkg/shellescape"
 	"github.com/Masterminds/sprig"
@@ -192,21 +191,11 @@ echo $$ > "${workdir}/.pid"
 
 
 
-# --network-args "portmap=8080:80/tcp"
-# --container is needed to start a separate /dev/sh
-#exec {{$.HostEnv.ApptainerBin}} exec --nv --containall --net --fakeroot --scratch /scratch --workdir ${workdir} \
-#{{- if .HostEnv.EnableCgroupV2}}
-#--apply-cgroups {{.VirtualEnv.CgroupFilePath}} 		\
-#{{- end}}
-#--env PARENT=${PPID}								\
-#--bind $HOME,/tmp										\
-#--hostname {{.Pod.Name}}							\
-#{{$.PauseImageFilePath}} sh -ci <constructor-command> ||
-#echo "[HOST] **SYSTEMERROR** apptainer exited with code $?" | tee {{.VirtualEnv.SysErrorFilePath}}
+
 {{$.PauseImageFilePath}} -namespace {{.Pod.Namespace}} -pod {{.Pod.Name}} ||
 export APPTAINERENV_KUBEDNS_IP={{.HostEnv.KubeDNS}}
 
-exec {{$.HostEnv.ApptainerBin}} exec --nv --net --scratch /scratch --workdir ${workdir} \
+{{$.HostEnv.ApptainerBin}} exec --nv --net --scratch /scratch --workdir ${workdir} \
 {{- if .HostEnv.EnableCgroupV2}}
 --apply-cgroups {{.VirtualEnv.CgroupFilePath}} 		\
 {{- end}}
@@ -232,9 +221,6 @@ type JobFields struct {
 	VirtualEnv compute.VirtualEnvironment
 
 	HostEnv compute.HostEnvironment
-
-	// InitContainers is a list of init container requests to be executed.
-	InitContainers []Container
 
 	// Containers is a list of container requests to be executed.
 	Containers []Container
@@ -289,7 +275,7 @@ const GenerateEnvTemplate = `#!/bin/bash
 {{- if eq $variable.Value ".status.podIP"}}
 echo {{$variable.Name}}=$(ip route get 1 | sed -n 's/.*src \([0-9.]\+\).*/\1/p')
 {{ else }}
-echo {{$variable.Name}}=\''{{$variable.Value}}'\'
+echo {{$variable.Name}}={{$variable.Value | param}}
 {{- end}}
 {{- end}}
 `
@@ -299,8 +285,4 @@ type GenerateEnvFields = struct {
 	Variables []corev1.EnvVar
 }
 
-// ValidateScript runs the bash -n <filename.sh> to validate the generated script.
-func ValidateScript(filepath string) error {
-	_, err := process.Execute("bash", "-n", filepath)
-	return err
-}
+

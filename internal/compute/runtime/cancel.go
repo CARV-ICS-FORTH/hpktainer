@@ -25,8 +25,6 @@ import (
 
 
 
-var ErrRety = errors.New("retry later")
-
 var ErrInvalidJob = errors.New("invalid job id")
 
 // KillProcessByPID terminates a process by its PID using kill command.
@@ -43,16 +41,17 @@ func KillProcessByPID(pid string) (string, error) {
 	 Send SIGTERM using kill to the main process
 	 and wait for it to close gracefully.
 	*/
-	out, err := process.Execute("pkill", "-P", pid)
+	out, err := process.Execute("kill", "-TERM", pid)
 	if err != nil {
 		outStr := string(out)
 
 		// if the process does not exist, consider it as terminated
-		if strings.Contains(outStr, "No such process") {
+		if strings.Contains(outStr, "No such process") || strings.Contains(outStr, "arguments must be process or job IDs") {
 			return outStr, ErrInvalidJob
 		}
 
-		return string(out), fmt.Errorf("Could not kill process: %w", err)
+		// Also check if process already exited
+		return string(out), fmt.Errorf("Could not kill process '%s': %w", pid, err)
 	}
 
 	return string(out), nil

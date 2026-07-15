@@ -45,7 +45,7 @@ import (
 )
 
 func getPodDetails(clientset *kubernetes.Clientset, namespace string, podID string) (*v1.Pod, error) {
-	// Create a context with a 5-minute timeout
+	// Create a context with a 20-second timeout per request attempt
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
@@ -62,12 +62,9 @@ func fileExists(filename string) bool {
 	}
 	info, err := os.Stat(filename)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return false
-		}
-		panic(err)
+		return false
 	}
-	return !info.IsDir() // Ensure it's a file, not a directory
+	return !info.IsDir()
 }
 
 func main() {
@@ -297,7 +294,7 @@ func cleanEnvironment() error {
 }
 
 func prepareDNS(pod *v1.Pod) error {
-	if err := os.MkdirAll("/scratch/etc", 0644); err != nil {
+	if err := os.MkdirAll("/scratch/etc", 0755); err != nil {
 		return fmt.Errorf("could not create /scratch/etc folder: %v", err)
 	}
 
@@ -394,7 +391,7 @@ func handleInitContainers(pod *v1.Pod, hpkEnv bool) error {
 			subPath := mount.SubPath
 			if mount.SubPathExpr != "" {
 
-				path, err := kubecontainer.ExpandContainerVolumeMounts(mount, podhandler.FromServices(context.Background(), pod.Namespace))
+				path, err := kubecontainer.ExpandContainerVolumeMounts(mount, podhandler.FromServicesForPod(context.Background(), pod))
 				if err != nil {
 					compute.SystemPanic(err, "cannot expand env variables for container '%s' of pod '%s'", container.Name, podKey)
 				}
@@ -436,7 +433,7 @@ func handleInitContainers(pod *v1.Pod, hpkEnv bool) error {
 			*bindArgs += "," + strings.Join(binds, ",")
 		}
 		if uid != 0 {
-			apptainerArgs = append(apptainerArgs, "--security", fmt.Sprintf("uid:%d,gid:%d", uid, uid), "--userns")
+			apptainerArgs = append(apptainerArgs, "--security", fmt.Sprintf("uid:%d,gid:%d", uid, gid), "--userns")
 		}
 		if gid != 0 {
 			apptainerArgs = append(apptainerArgs, "--security", fmt.Sprintf("gid:%d", gid), "--userns")
@@ -521,7 +518,7 @@ func handleContainers(pod *v1.Pod, wg *sync.WaitGroup, hpkEnv bool) error {
 			subPath := mount.SubPath
 			if mount.SubPathExpr != "" {
 
-				path, err := kubecontainer.ExpandContainerVolumeMounts(mount, podhandler.FromServices(context.Background(), pod.Namespace))
+				path, err := kubecontainer.ExpandContainerVolumeMounts(mount, podhandler.FromServicesForPod(context.Background(), pod))
 				if err != nil {
 					compute.SystemPanic(err, "cannot expand env variables for container '%s' of pod '%s'", container.Name, podKey)
 				}
@@ -557,13 +554,13 @@ func handleContainers(pod *v1.Pod, wg *sync.WaitGroup, hpkEnv bool) error {
 		}
 		if hpkEnv {
 			apptainerArgs = append(apptainerArgs, "--bind", "/scratch/etc/resolv.conf:/etc/resolv.conf,/scratch/etc/hosts:/etc/hosts")
-			if len(binds) > 0 {
-				bindArgs := &apptainerArgs[len(apptainerArgs)-1]
-				*bindArgs += "," + strings.Join(binds, ",")
-			}
+		}
+		if len(binds) > 0 {
+			bindArgs := &apptainerArgs[len(apptainerArgs)-1]
+			*bindArgs += "," + strings.Join(binds, ",")
 		}
 		if uid != 0 {
-			apptainerArgs = append(apptainerArgs, "--security", fmt.Sprintf("uid:%d,gid:%d", uid, uid), "--userns")
+			apptainerArgs = append(apptainerArgs, "--security", fmt.Sprintf("uid:%d,gid:%d", uid, gid), "--userns")
 		}
 		if gid != 0 {
 			apptainerArgs = append(apptainerArgs, "--security", fmt.Sprintf("gid:%d", gid), "--userns")
@@ -599,6 +596,7 @@ func handleContainers(pod *v1.Pod, wg *sync.WaitGroup, hpkEnv bool) error {
 			// Start the  container
 			if err := cmd.Start(); err != nil {
 				log.Error().Err(err).Msg("Failed to start Apptainer container")
+				return
 			}
 
 			// Get the PID

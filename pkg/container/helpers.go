@@ -34,22 +34,11 @@ func envVarsToMap(envs []corev1.EnvVar) map[string]string {
 	return result
 }
 
-// v1EnvVarsToMap constructs a map of environment name to value from a slice
-// of env vars.
-func v1EnvVarsToMap(envs []corev1.EnvVar) map[string]string {
-	result := map[string]string{}
-	for _, env := range envs {
-		result[env.Name] = env.Value
-	}
-
-	return result
-}
-
 // ExpandContainerCommandOnlyStatic substitutes only static environment variable values from the
 // container environment definitions. This does *not* include valueFrom substitutions.
 // TODO: callers should use ExpandContainerCommandAndArgs with a fully resolved list of environment.
 func ExpandContainerCommandOnlyStatic(containerCommand []string, envs []corev1.EnvVar) (command []string) {
-	mapping := expansion.MappingFuncFor(v1EnvVarsToMap(envs))
+	mapping := expansion.MappingFuncFor(envVarsToMap(envs))
 	if len(containerCommand) != 0 {
 		for _, cmd := range containerCommand {
 			command = append(command, expansion.Expand(cmd, mapping))

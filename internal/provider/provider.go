@@ -21,6 +21,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -30,7 +31,6 @@ import (
 	"hpk/internal/compute/runtime"
 	"hpk/pkg/container"
 
-	"github.com/sirupsen/logrus"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
@@ -42,7 +42,6 @@ import (
 	"errors"
 
 	"github.com/go-logr/logr"
-	"github.com/niemeyer/pretty"
 	"github.com/virtual-kubelet/virtual-kubelet/errdefs"
 	vkapi "github.com/virtual-kubelet/virtual-kubelet/node/api"
 	corev1 "k8s.io/api/core/v1"
@@ -167,7 +166,7 @@ func NewVirtualK8S(config InitConfig) (*VirtualK8S, error) {
 	 *---------------------------------------------------*/
 	if err := compute.HPK.WalkPodDirectories(func(path endpoint.PodPath) error {
 		// register the watcher
-		return watcher.Add(path.String())
+		return watcher.Add(path.ControlFileDir())
 	}); err != nil {
 		return nil, fmt.Errorf("failed to restore watchers: %w", err)
 	}
@@ -220,9 +219,11 @@ func (v *VirtualK8S) CreatePod(ctx context.Context, pod *corev1.Pod) error {
 	go func() {
 		// acknowledge the creation request and do the creation in the background.
 		// if the creation fails, the pod should be marked as failed and returned to the provider.
-		PodHandler.CreatePod(ctx, pod, v.fileWatcher, v.UseTmp)
+		PodHandler.CreatePod(context.Background(), pod, v.fileWatcher, v.UseTmp)
 
-		v.updatedPod(pod)
+		if v.updatedPod != nil {
+			v.updatedPod(pod)
+		}
 	}()
 
 	/*
@@ -253,9 +254,19 @@ func (v *VirtualK8S) UpdatePod(ctx context.Context, pod *corev1.Pod) error {
 		return errdefs.NotFoundf("object not found")
 	}
 
-	if localPod.ResourceVersion >= pod.ResourceVersion {
-		// The received pod is old, so we can safely discard it
-		logger.Info("Discard update since its ResourceVersion is older than the local")
+	localVersion, errLocal := strconv.ParseUint(localPod.ResourceVersion, 10, 64)
+	newVersion, errNew := strconv.ParseUint(pod.ResourceVersion, 10, 64)
+
+	isOlder := false
+	if errLocal == nil && errNew == nil {
+		isOlder = localVersion >= newVersion
+	} else {
+		isOlder = localPod.ResourceVersion == pod.ResourceVersion
+	}
+
+	if isOlder {
+		// The received pod is old or identical, so we can safely discard it
+		logger.Info("Discard update since its ResourceVersion is not newer than local")
 
 		return nil
 	}
@@ -266,21 +277,7 @@ func (v *VirtualK8S) UpdatePod(ctx context.Context, pod *corev1.Pod) error {
 		return nil
 	}
 
-	/*---------------------------------------------------
-	 * Identify any intermediate actions that must taken
-	 *---------------------------------------------------*/
-	if metaDiff := pretty.Diff(localPod.ObjectMeta.Annotations, pod.ObjectMeta.Annotations); len(metaDiff) > 0 {
-		/* ... */
-		logrus.Warn("DIFFERENCES ", metaDiff)
-	}
 
-	if specDiff := pretty.Diff(localPod.Spec, pod.Spec); len(specDiff) > 0 {
-		/* ... */
-	}
-
-	if statusDiff := pretty.Diff(localPod.Status, pod.Status); len(statusDiff) > 0 {
-		/* ... */
-	}
 
 	/*-- Update the local status of Pod --*/
 	if err := PodHandler.SavePodToFile(ctx, pod); err != nil {
@@ -387,10 +384,8 @@ func (v *VirtualK8S) GetPods(ctx context.Context) ([]*corev1.Pod, error) {
 			return fmt.Errorf("cannot decode pod description file '%s': %w", path, err)
 		}
 
-		/*-- return only the pods that are known to be running --*/
-		if pod.Status.Phase == corev1.PodRunning {
-			pods = append(pods, &pod)
-		}
+		/*-- return all pods managed by this provider --*/
+		pods = append(pods, &pod)
 
 		return nil
 	}); err != nil {
@@ -459,7 +454,7 @@ func (v *VirtualK8S) NotifyPods(ctx context.Context, f func(*corev1.Pod)) {
 					return
 				}
 
-				panic(fmt.Errorf("fsnotify failed: %w", err))
+				v.Logger.Error(err, "fsnotify event error")
 			}
 		}
 	}()
