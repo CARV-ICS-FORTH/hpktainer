@@ -161,5 +161,70 @@ else
     systemctl start slurmd
 fi
 
-# Add hosts to /etc/hosts - Not needed with mDNS
+# Add dynamic host resolution service for Slurm
+cat <<EOF > /usr/local/bin/resolve-hosts.sh
+#!/bin/bash
+
+# Wait for avahi-daemon to be active
+while [ "\$(systemctl is-active avahi-daemon)" != "active" ]; do
+    sleep 1
+done
+
+resolve_ip() {
+    local host="\$1"
+    # Try getent hosts first
+    local ip=\$(getent hosts "\$host" | awk '{print \$1}' | grep -v '^10.0.2.' | grep -v '^127.' | grep -v ':' | head -n1)
+    if [ -n "\$ip" ]; then
+        echo "\$ip"
+        return 0
+    fi
+    # Fall back to nslookup
+    ip=\$(nslookup "\$host" 2>/dev/null | awk '/Address:/ {print \$2}' | grep -v '^10.0.2.' | grep -v '^127.' | grep -v ':' | head -n1)
+    if [ -n "\$ip" ]; then
+        echo "\$ip"
+        return 0
+    fi
+    return 1
+}
+
+# Loop indefinitely until both hosts are resolved
+while true; do
+    CONTROLLER_IP=\$(resolve_ip controller.local)
+    NODE_IP=\$(resolve_ip node.local)
+    
+    if [ -n "\$CONTROLLER_IP" ] && [ -n "\$NODE_IP" ]; then
+        # Remove existing entries
+        sed -i '/controller/d' /etc/hosts
+        sed -i '/node/d' /etc/hosts
+
+        # Write updated entries
+        echo "\$CONTROLLER_IP controller controller.local" >> /etc/hosts
+        echo "\$NODE_IP node node.local" >> /etc/hosts
+
+        # Restart Slurm to pick up changes
+        systemctl restart slurmctld slurmd 2>/dev/null || true
+        break
+    fi
+    sleep 5
+done
+EOF
+chmod +x /usr/local/bin/resolve-hosts.sh
+
+cat <<EOF > /etc/systemd/system/resolve-hosts.service
+[Unit]
+Description=Resolve Slurm Hostnames in /etc/hosts
+After=avahi-daemon.service
+Wants=avahi-daemon.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/resolve-hosts.sh
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now resolve-hosts.service
+
 echo "Provisioning complete."
