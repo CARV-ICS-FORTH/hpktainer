@@ -105,7 +105,7 @@ apptainer instance run \
   --env NODENAME="bubble${BUBBLE_ID_VAL}" \
   --env FELIX_FELIXHOSTNAME="bubble${BUBBLE_ID_VAL}" \
   --env IP=${HOST_IP} \
-  --env KUBERNETES_SERVICE_HOST=$(CONTROLLER_IP) \
+  --env KUBERNETES_SERVICE_HOST=${CONTROLLER_IP} \
   --env KUBERNETES_SERVICE_PORT=6443 \
   $CALICO_IMAGE \
   calico-node

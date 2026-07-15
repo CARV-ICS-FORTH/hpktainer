@@ -114,10 +114,10 @@ apptainer instance run \
     --bind $HOME/.hpk:/root/.hpk \
     --bind $HOME/.apptainer/cache:/root/.apptainer/cache \
     --env APPTAINER_CACHEDIR=/root/.hpk/.apptainer/cache \
-    --env APPTAINER_TMPDIR=/root/.hpk/.apptainer/tmp \
+    --env APPTAINER_TMPDIR=/tmp/.hpk-apptainer/tmp \
     --env SINGULARITY_CACHEDIR=/root/.hpk/.apptainer/cache \
-    --env SINGULARITY_TMPDIR=/root/.hpk/.apptainer/tmp \
-    --env TMPDIR=/root/.hpk/.apptainer/tmp \
+    --env SINGULARITY_TMPDIR=/tmp/.hpk-apptainer/tmp \
+    --env TMPDIR=/tmp/.hpk-apptainer/tmp \
 	--env HOST_IP=$HOST_IP_DETECTED \
 	--env CONTROLLER_IP=$CONTROLLER_IP \
 	--env HPK_DEV=${HPK_DEV:-0} \
