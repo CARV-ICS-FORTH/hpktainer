@@ -320,15 +320,8 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, watcher filenotify.FileWatc
 	}
 
 	// create directory for volumes.
-	//if err := os.MkdirAll(h.podDirectory.VolumeDir(), endpoint.PodGlobalDirectoryPermissions); err != nil {
-	//	compute.SystemPanic(err, "cannot create volume directory '%s'", h.podDirectory.VolumeDir())
-	//}
-
-	if !useTmp {
-		// create directory for volumes.
-		if err := os.MkdirAll(h.podDirectory.VolumeDir(), endpoint.PodGlobalDirectoryPermissions); err != nil {
-			compute.SystemPanic(err, "cannot create volume directory '%s'", h.podDirectory.VolumeDir())
-		}
+	if err := os.MkdirAll(h.podDirectory.VolumeDir(), endpoint.PodGlobalDirectoryPermissions); err != nil {
+		compute.SystemPanic(err, "cannot create volume directory '%s'", h.podDirectory.VolumeDir())
 	}
 
 	// create directory for control files.

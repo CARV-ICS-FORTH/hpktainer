@@ -107,15 +107,20 @@ func (b *VolumeMounter) collectData(ctx context.Context) (map[string]util.FilePr
 			key := types.NamespacedName{Namespace: b.Pod.GetNamespace(), Name: source.Secret.Name}
 
 			{ // get the resource
-				if err := retry.OnError(volume.NotFoundBackoff,
-					k8errors.IsNotFound, // retry condition
-					func() error { // execution
-						return compute.K8SClient.Get(ctx, key, &secretAPI)
-					},
-				); err != nil { // error checking
-					if !(k8errors.IsNotFound(err) && optional) {
+				if optional {
+					if err := compute.K8SClient.Get(ctx, key, &secretAPI); err != nil && !k8errors.IsNotFound(err) {
 						b.Logger.Info("Couldn't get projected.secret", "key", key)
-
+						errlist = append(errlist, err)
+						continue
+					}
+				} else {
+					if err := retry.OnError(volume.NotFoundBackoff,
+						k8errors.IsNotFound, // retry condition
+						func() error { // execution
+							return compute.K8SClient.Get(ctx, key, &secretAPI)
+						},
+					); err != nil {
+						b.Logger.Info("Couldn't get projected.secret", "key", key)
 						errlist = append(errlist, err)
 						continue
 					}
@@ -145,15 +150,20 @@ func (b *VolumeMounter) collectData(ctx context.Context) (map[string]util.FilePr
 			key := types.NamespacedName{Namespace: b.Pod.GetNamespace(), Name: source.ConfigMap.Name}
 
 			{ // get the resource
-				if err := retry.OnError(volume.NotFoundBackoff,
-					k8errors.IsNotFound, // retry condition
-					func() error { // execution
-						return compute.K8SClient.Get(ctx, key, &configMapAPI)
-					},
-				); err != nil { // error checking
-					if !(k8errors.IsNotFound(err) && optional) {
+				if optional {
+					if err := compute.K8SClient.Get(ctx, key, &configMapAPI); err != nil && !k8errors.IsNotFound(err) {
 						b.Logger.Info("Couldn't get projected.configmap", "key", key)
-
+						errlist = append(errlist, err)
+						continue
+					}
+				} else {
+					if err := retry.OnError(volume.NotFoundBackoff,
+						k8errors.IsNotFound, // retry condition
+						func() error { // execution
+							return compute.K8SClient.Get(ctx, key, &configMapAPI)
+						},
+					); err != nil {
+						b.Logger.Info("Couldn't get projected.configmap", "key", key)
 						errlist = append(errlist, err)
 						continue
 					}

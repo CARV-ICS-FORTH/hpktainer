@@ -54,20 +54,26 @@ func (b *VolumeMounter) SetUpAt(ctx context.Context, dir string) error {
 
 	key := types.NamespacedName{Namespace: b.Pod.GetNamespace(), Name: source.Name}
 
-	if err := retry.OnError(volume.NotFoundBackoff,
-		k8errors.IsNotFound, // retry condition
-		func() error { // execution
-			return compute.K8SClient.Get(ctx, key, &configMap)
-		}); err != nil { // error checking
-		if !(k8errors.IsNotFound(err) && optional) {
-			return fmt.Errorf("Couldn't get secret '%s': %w", key, err)
+	if optional {
+		if err := compute.K8SClient.Get(ctx, key, &configMap); err != nil {
+			if k8errors.IsNotFound(err) {
+				configMap = corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace: b.Pod.GetNamespace(),
+						Name:      source.Name,
+					},
+				}
+			} else {
+				return fmt.Errorf("Couldn't get configMap '%s': %w", key, err)
+			}
 		}
-
-		configMap = corev1.ConfigMap{
-			ObjectMeta: metav1.ObjectMeta{
-				Namespace: b.Pod.GetNamespace(),
-				Name:      source.Name,
-			},
+	} else {
+		if err := retry.OnError(volume.NotFoundBackoff,
+			k8errors.IsNotFound, // retry condition
+			func() error { // execution
+				return compute.K8SClient.Get(ctx, key, &configMap)
+			}); err != nil {
+			return fmt.Errorf("Couldn't get configMap '%s': %w", key, err)
 		}
 	}
 
