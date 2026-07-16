@@ -1,5 +1,9 @@
 #!/bin/bash
 
+# Redirect all stdout and stderr to /var/log/entrypoint.log while keeping terminal output
+mkdir -p /var/log /tmp/.hpk-apptainer/tmp /root/.hpk/.apptainer/cache
+exec > >(tee -a /var/log/entrypoint.log) 2>&1
+
 # Default values if not provided
 HOST_IP=${HOST_IP:-$(ip route get 1 | awk '{print $7; exit}')}
 CONTROLLER_IP=${CONTROLLER_IP:-$HOST_IP}
@@ -23,7 +27,7 @@ ip link set tap0 up
 
 # Add Host IP as secondary address to tap0
 # This is required for Calico VXLAN to use it as a source IP
-ip addr add ${HOST_IP}/32 dev tap0
+ip addr add ${HOST_IP}/32 dev tap0 2>/dev/null || true
 
 # Start Etcd if Controller
 if [ "$HPK_ROLE" = "controller" ]; then
@@ -40,8 +44,11 @@ if [ "$HPK_ROLE" = "controller" ]; then
          --data-dir /var/lib/etcd \
          >> /var/log/etcd.log 2>&1 &
     
-    # Wait for etcd
-    sleep 5
+    # Wait for etcd to accept connections
+    echo "Waiting for Etcd to accept connections on port 2379..."
+    while ! (echo > /dev/tcp/127.0.0.1/2379) 2>/dev/null; do
+        sleep 1
+    done
     
     # Initialize Calico config in Etcd
     echo "Initializing Calico config in Etcd..."
@@ -179,6 +186,13 @@ if [ "$HPK_ROLE" = "controller" ]; then
     cp /var/lib/rancher/k3s/server/node-token /var/lib/hpk/node-token
     chmod 644 /var/lib/hpk/kubeconfig /var/lib/hpk/node-token
 
+    # Export server-ca to shared directory for node certificates
+    echo "Copying server-ca to /var/lib/hpk/tls..."
+    mkdir -p /var/lib/hpk/tls
+    cp /var/lib/rancher/k3s/server/tls/server-ca.crt /var/lib/hpk/tls/
+    cp /var/lib/rancher/k3s/server/tls/server-ca.key /var/lib/hpk/tls/
+    chmod 600 /var/lib/hpk/tls/server-ca.key
+
     # Make CoreDNS inherit the bubble resolver instead of the cluster DNS service IP.
     echo "Configuring CoreDNS to use the bubble resolver..."
     while ! k3s kubectl -n kube-system get deployment coredns >/dev/null 2>&1; do
@@ -203,17 +217,26 @@ $(printf '%s\n' "$UPDATED_COREFILE" | sed 's/^/    /')
 EOF
       k3s kubectl -n kube-system rollout restart deployment coredns
     fi
-  
-    # Generate webhook certificate for hpk-kubelet
-    echo "Generating webhook certificate..."
-    
-    # Build alt_names section with all node IPs.
-    # Keep explicit VM IPs to avoid SAN mismatch when host-ip inference differs.
-    # PLACEHOLDERS, NOT FINAL (TODO)
-    ALT_NAMES="IP.1 = 127.0.0.1
-  IP.2 = ${HOST_IP}"
-    
-    cat >kubelet.cnf <<EOF
+fi
+
+# Wait for kubeconfig and node-token (Controller creates them, Nodes wait for them)
+echo "Waiting for /var/lib/hpk/kubeconfig and /var/lib/hpk/node-token..."
+while [ ! -f /var/lib/hpk/kubeconfig ] || [ ! -f /var/lib/hpk/node-token ]; do
+  sleep 1
+done
+
+# Wait for server-ca (Controller creates them, Nodes wait for them)
+echo "Waiting for /var/lib/hpk/tls/server-ca.crt and /var/lib/hpk/tls/server-ca.key..."
+while [ ! -f /var/lib/hpk/tls/server-ca.crt ] || [ ! -f /var/lib/hpk/tls/server-ca.key ]; do
+  sleep 1
+done
+
+# Generate per-node webhook certificate for hpk-kubelet with node IP SAN
+NODE_NAME="$(hostname)"
+NODE_CERT_DIR="/var/lib/hpk/.certs/${NODE_NAME}"
+mkdir -p "${NODE_CERT_DIR}"
+
+cat > /tmp/kubelet.cnf <<EOF
 [req]
 req_extensions = v3_req
 distinguished_name = req_distinguished_name
@@ -227,35 +250,20 @@ extendedKeyUsage = serverAuth, clientAuth
 subjectAltName = @alt_names
 
 [alt_names]
-${ALT_NAMES}
+IP.1 = 127.0.0.1
+IP.2 = ${HOST_IP}
 EOF
-    TLS_PATH=/var/lib/rancher/k3s/server/tls
-    if [ ! -f kubelet.key ]; then openssl genrsa -out kubelet.key 2048; fi
-    openssl req -new -key kubelet.key -subj "/CN=hpk-kubelet" \
-      -out kubelet.csr -config kubelet.cnf
-    openssl x509 -req -days 365 -set_serial 01 \
-      -CA ${TLS_PATH}/server-ca.crt -CAkey ${TLS_PATH}/server-ca.key \
-      -in kubelet.csr -out kubelet.crt \
-      -extfile kubelet.cnf -extensions v3_req
-    
-    # Copy certificates to shared directory
-    echo "Copying certificates to /var/lib/hpk..."
-    cp kubelet.crt /var/lib/hpk/
-    cp kubelet.key /var/lib/hpk/
-    chmod 644 /var/lib/hpk/kubelet.crt /var/lib/hpk/kubelet.key
+
+if [ ! -f "${NODE_CERT_DIR}/kubelet.key" ]; then
+    openssl genrsa -out "${NODE_CERT_DIR}/kubelet.key" 2048
 fi
-
-# Wait for kubeconfig and node-token (Controller creates them, Nodes wait for them)
-echo "Waiting for /var/lib/hpk/kubeconfig and /var/lib/hpk/node-token..."
-while [ ! -f /var/lib/hpk/kubeconfig ] || [ ! -f /var/lib/hpk/node-token ]; do
-  sleep 1
-done
-
-# Wait for certificates (Controller creates them, Nodes wait for them)
-echo "Waiting for /var/lib/hpk/kubelet.crt and /var/lib/hpk/kubelet.key..."
-while [ ! -f /var/lib/hpk/kubelet.crt ] || [ ! -f /var/lib/hpk/kubelet.key ]; do
-  sleep 1
-done
+openssl req -new -key "${NODE_CERT_DIR}/kubelet.key" -subj "/CN=hpk-kubelet" \
+  -out /tmp/kubelet.csr -config /tmp/kubelet.cnf
+openssl x509 -req -days 365 -set_serial 01 \
+  -CA /var/lib/hpk/tls/server-ca.crt -CAkey /var/lib/hpk/tls/server-ca.key \
+  -in /tmp/kubelet.csr -out "${NODE_CERT_DIR}/kubelet.crt" \
+  -extfile /tmp/kubelet.cnf -extensions v3_req
+chmod 644 "${NODE_CERT_DIR}/kubelet.crt" "${NODE_CERT_DIR}/kubelet.key"
 
 # Wait for kube-dns service (Controller creates it via K3s, Nodes wait for it)
 echo "Waiting for kube-dns service..."
@@ -275,8 +283,8 @@ else
 fi
 
 KUBECONFIG=/var/lib/hpk/kubeconfig \
-APISERVER_KEY_LOCATION=/var/lib/hpk/kubelet.key \
-APISERVER_CERT_LOCATION=/var/lib/hpk/kubelet.crt \
+APISERVER_KEY_LOCATION="${NODE_CERT_DIR}/kubelet.key" \
+APISERVER_CERT_LOCATION="${NODE_CERT_DIR}/kubelet.crt" \
 VKUBELET_ADDRESS=${HOST_IP} \
 hpk-kubelet \
   --apptainer=hpktainer \

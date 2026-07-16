@@ -84,10 +84,15 @@ develop:
 	docker build --build-arg REGISTRY=$(REGISTRY) \
 		-t $(REGISTRY)/hpktainer-base:latest \
 		-f images/hpktainer-base/Dockerfile .
-	
+
 	# Build hpk-bubble (dev)
+	# docker build --build-arg REGISTRY=$(REGISTRY) \
+	# 	--build-arg BASE_IMAGE=$(REGISTRY)/hpk-builder:latest \
+	# 	-t $(REGISTRY)/hpk-bubble:latest \
+	# 	-f images/hpk-bubble/Dockerfile .
+	
+	# Build hpk-bubble
 	docker build --build-arg REGISTRY=$(REGISTRY) \
-		--build-arg BASE_IMAGE=$(REGISTRY)/hpk-builder:latest \
 		-t $(REGISTRY)/hpk-bubble:latest \
 		-f images/hpk-bubble/Dockerfile .
 	

@@ -277,26 +277,22 @@ func (item *itemToWatch) checkForChanges() ([]fsnotify.Event, error) {
 		return nil, nil
 	}
 
-	leftIsIn := false
-	left, right := item.left.entries, item.right.entries
-	if len(right) > len(left) {
-		left, right = right, left
-		leftIsIn = true
+	allNames := make(map[string]struct{}, len(item.left.entries)+len(item.right.entries))
+	for name := range item.left.entries {
+		allNames[name] = struct{}{}
+	}
+	for name := range item.right.entries {
+		allNames[name] = struct{}{}
 	}
 
 	var evs []fsnotify.Event
-
-	for name, fi1 := range left {
-		fi2 := right[name]
-		fil, fir := fi1, fi2
-		if leftIsIn {
-			fil, fir = fir, fil
-		}
+	for name := range allNames {
+		fil := item.left.entries[name]
+		fir := item.right.entries[name]
 		op := checkChange(fil, fir)
 		if op != 0 {
 			evs = append(evs, fsnotify.Event{Op: op, Name: filepath.Join(item.filename, name)})
 		}
-
 	}
 
 	return evs, nil

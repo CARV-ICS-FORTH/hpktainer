@@ -425,18 +425,17 @@ func handleInitContainers(pod *v1.Pod, hpkEnv bool) error {
 		apptainerArgs := []string{
 			apptainerVerbosity, executionMode, "--nv", "--cleanenv", "--writable-tmpfs", "--no-mount", "home,bind-paths", "--unsquash",
 		}
+		var allBinds []string
 		if hpkEnv {
-			apptainerArgs = append(apptainerArgs, "--bind", "/scratch/etc/resolv.conf:/etc/resolv.conf,/scratch/etc/hosts:/etc/hosts")
+			allBinds = append(allBinds, "/scratch/etc/resolv.conf:/etc/resolv.conf", "/scratch/etc/hosts:/etc/hosts")
 		}
-		if len(binds) > 0 {
-			bindArgs := &apptainerArgs[len(apptainerArgs)-1]
-			*bindArgs += "," + strings.Join(binds, ",")
+		allBinds = append(allBinds, binds...)
+
+		if len(allBinds) > 0 {
+			apptainerArgs = append(apptainerArgs, "--bind", strings.Join(allBinds, ","))
 		}
-		if uid != 0 {
+		if uid != 0 || gid != 0 {
 			apptainerArgs = append(apptainerArgs, "--security", fmt.Sprintf("uid:%d,gid:%d", uid, gid), "--userns")
-		}
-		if gid != 0 {
-			apptainerArgs = append(apptainerArgs, "--security", fmt.Sprintf("gid:%d", gid), "--userns")
 		}
 
 		if fileExists(envFilePath) {
@@ -552,18 +551,17 @@ func handleContainers(pod *v1.Pod, wg *sync.WaitGroup, hpkEnv bool) error {
 		apptainerArgs := []string{
 			apptainerVerbosity, executionMode, "--nv", "--cleanenv", "--writable-tmpfs", "--no-mount", "home,bind-paths", "--unsquash",
 		}
+		var allBinds []string
 		if hpkEnv {
-			apptainerArgs = append(apptainerArgs, "--bind", "/scratch/etc/resolv.conf:/etc/resolv.conf,/scratch/etc/hosts:/etc/hosts")
+			allBinds = append(allBinds, "/scratch/etc/resolv.conf:/etc/resolv.conf", "/scratch/etc/hosts:/etc/hosts")
 		}
-		if len(binds) > 0 {
-			bindArgs := &apptainerArgs[len(apptainerArgs)-1]
-			*bindArgs += "," + strings.Join(binds, ",")
+		allBinds = append(allBinds, binds...)
+
+		if len(allBinds) > 0 {
+			apptainerArgs = append(apptainerArgs, "--bind", strings.Join(allBinds, ","))
 		}
-		if uid != 0 {
+		if uid != 0 || gid != 0 {
 			apptainerArgs = append(apptainerArgs, "--security", fmt.Sprintf("uid:%d,gid:%d", uid, gid), "--userns")
-		}
-		if gid != 0 {
-			apptainerArgs = append(apptainerArgs, "--security", fmt.Sprintf("gid:%d", gid), "--userns")
 		}
 
 		if fileExists(envFilePath) {

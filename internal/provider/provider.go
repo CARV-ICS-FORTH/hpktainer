@@ -565,7 +565,7 @@ func (v *VirtualK8S) GetContainerLogs(ctx context.Context, namespace, podName, c
 	/*---------------------------------------------------
 	 * Log Batch (Without Follow)
 	 *---------------------------------------------------*/
-	if opts.Tail == 0 {
+	if opts.Tail <= 0 {
 		// return everything
 		logs, err := os.Open(logfilePath)
 		if err != nil {

@@ -40,10 +40,8 @@ if [ "${HPK_DEV:-0}" = "1" ]; then
         IMAGE_TAR="$IMAGE_DIR/${img}.tar"
         IMAGE_SIF="$IMAGE_DIR/${img}.sif"
         if [ -f "$IMAGE_TAR" ]; then
-            if [ ! -f "$IMAGE_SIF" ] || [ "$IMAGE_TAR" -nt "$IMAGE_SIF" ]; then
-                echo "Converting $IMAGE_TAR to $IMAGE_SIF..."
-                apptainer build --force "$IMAGE_SIF" "docker-archive://$IMAGE_TAR"
-            fi
+            echo "Converting $IMAGE_TAR to $IMAGE_SIF..."
+            apptainer build --force "$IMAGE_SIF" "docker-archive://$IMAGE_TAR"
         else
             echo "Warning: $IMAGE_TAR not found!"
         fi

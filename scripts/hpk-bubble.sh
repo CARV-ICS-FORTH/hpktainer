@@ -97,6 +97,9 @@ else
     BUBBLE_IMAGE="docker://docker.io/chazapis/hpk-bubble:latest"
 fi
 
+# Ensure required Apptainer cache and tmp directories exist
+mkdir -p /tmp/.hpk-apptainer/tmp $HOME/.hpk/.apptainer/cache $HOME/.apptainer/cache
+
 # Pass IPs as env variables
 apptainer instance run \
 	--fakeroot \

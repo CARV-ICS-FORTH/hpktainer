@@ -192,10 +192,9 @@ echo $$ > "${workdir}/.pid"
 
 
 
-{{$.PauseImageFilePath}} -namespace {{.Pod.Namespace}} -pod {{.Pod.Name}} ||
 export APPTAINERENV_KUBEDNS_IP={{.HostEnv.KubeDNS}}
 
-{{$.HostEnv.ApptainerBin}} exec --nv --net --scratch /scratch --workdir ${workdir} \
+{{$.HostEnv.ApptainerBin}} exec --nv --scratch /scratch --workdir ${workdir} \
 {{- if .HostEnv.EnableCgroupV2}}
 --apply-cgroups {{.VirtualEnv.CgroupFilePath}} 		\
 {{- end}}
