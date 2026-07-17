@@ -16,7 +16,7 @@ fi
 echo "Starting hpk-net-daemon..."
 HPK_MTU=${HPK_MTU:-1500}
 # Run in background. Daemon will create tap0 and connect to socket.
-hpk-net-daemon -mode client -socket "$HPK_SOCKET_PATH" -tap tap0 -create-tap -mtu "$HPK_MTU" &
+hpk-net-daemon -mode client -socket "$HPK_SOCKET_PATH" -tap tap0 -mtu "$HPK_MTU" &
 DAEMON_PID=$!
 
 # Wait for tap0 to be created by daemon

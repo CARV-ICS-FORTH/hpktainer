@@ -52,7 +52,7 @@ func UpdateStatusFromRuntime(pod *corev1.Pod) {
 		return
 	}
 
-	/*-- Initialization of virtual environment (e.g, sbatch code, IP, ...)  --*/
+	/*-- Initialization of virtual environment  --*/
 	if pod.Status.PodIP == "" {
 		podIPPath := podDir.IPAddressPath()
 		ip, ok := readStringFromFile(podIPPath)
@@ -443,8 +443,6 @@ func (in *Classifier) NumFailedJobs() int {
 	return len(in.failedJobs)
 }
 
-
-
 func (in *Classifier) ListPendingJobs() []string {
 	list := make([]string, 0, len(in.pendingJobs))
 
@@ -456,8 +454,6 @@ func (in *Classifier) ListPendingJobs() []string {
 
 	return list
 }
-
-
 
 func (in *Classifier) ListSuccessfulJobs() []string {
 	list := make([]string, 0, len(in.successfulJobs))
@@ -491,5 +487,3 @@ func (in *Classifier) ListAll() string {
 		"\n",
 	)
 }
-
-

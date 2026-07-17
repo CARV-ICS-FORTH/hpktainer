@@ -283,5 +283,3 @@ echo {{$variable.Name}}={{$variable.Value | param}}
 type GenerateEnvFields = struct {
 	Variables []corev1.EnvVar
 }
-
-

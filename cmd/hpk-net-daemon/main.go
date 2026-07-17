@@ -23,12 +23,10 @@ func main() {
 	mode := flag.String("mode", "", "Mode: 'server' or 'client'")
 	socketPath := flag.String("socket", "", "Path to UNIX socket")
 	tapName := flag.String("tap", "", "Name of TAP interface")
-	createTap := flag.Bool("create-tap", false, "Whether to create the TAP interface (if false, opens existing)")
 	versionFlag := flag.Bool("version", false, "Print version and exit")
 	mtuFlag := flag.Int("mtu", 1500, "MTU of the TAP interface")
 
 	flag.Parse()
-	_ = createTap
 
 	if *versionFlag {
 		fmt.Printf("hpk-net-daemon version: %s (built: %s)\n", version.Version, version.BuildTime)

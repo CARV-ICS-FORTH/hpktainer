@@ -33,18 +33,18 @@ const (
 
 type ControlFileType = string
 
-// Control File (Written by the Sbatch script)
+// Control File (Written by the container execution)
 const (
-	// ExtensionSysError describes the file where the sbatch will describe its failure.
+	// ExtensionSysError describes the file where container execution will describe its failure.
 	ExtensionSysError ControlFileType = ".syserror"
 
-	// ExtensionIP describes the file where the sbatch script will write its ip.
+	// ExtensionIP describes the file where container execution will write its ip.
 	ExtensionIP ControlFileType = ".ip"
 
-	// ExtensionExitCode describes the file where the sbatch script will write its exit code.
+	// ExtensionExitCode describes the file where container execution will write its exit code.
 	ExtensionExitCode ControlFileType = ".exitCode"
 
-	// ExtensionJobID describes the file  where the sbatch script will write its job id.
+	// ExtensionJobID describes the file  where container execution will write its job id.
 	ExtensionJobID ControlFileType = ".jobid"
 )
 
@@ -53,10 +53,10 @@ const (
 	// ExtensionCRD describes the file where HPK will write the pod definition.
 	ExtensionCRD = ".crd"
 
-	// ExtensionStdout describes the file where the sbatch script will write its stdout.
+	// ExtensionStdout describes the file where container execution will write its stdout.
 	ExtensionStdout = ".stdout"
 
-	// ExtensionStderr describes the file where the sbatch script will write its stderr.
+	// ExtensionStderr describes the file where container execution will write its stderr.
 	ExtensionStderr = ".stderr"
 )
 
@@ -65,7 +65,7 @@ const (
 	// ExtensionEnvironment describes the file  where the environment variables for the container are held.
 	ExtensionEnvironment = ".env"
 
-	// ExtensionLogs describes the file  where the sbatch script will write its logs.
+	// ExtensionLogs describes the file  where container execution will write its logs.
 	ExtensionLogs = ".logs"
 )
 

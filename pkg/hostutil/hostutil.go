@@ -45,7 +45,6 @@ type HostUtils interface {
 	PathExists(pathname string) (bool, error)
 }
 
-
 // getFileType checks for file/directory/socket and block/character devices.
 func getFileType(pathname string) (FileType, error) {
 	var pathType FileType

@@ -44,8 +44,6 @@ const (
 	ANSIEscapeResetCode = "\033[0m"
 )
 
-
-
 func GetTailLog(path string, tail int) ([]string, error) {
 	var (
 		nllCounter int
@@ -114,8 +112,6 @@ func GetTailLog(path string, tail int) ([]string, error) {
 
 	return tailLog, nil
 }
-
-
 
 // ReverseReader structure for reading a file backwards
 type ReverseReader struct {

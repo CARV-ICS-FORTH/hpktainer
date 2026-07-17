@@ -288,8 +288,6 @@ func (v *VirtualK8S) UpdatePod(ctx context.Context, pod *corev1.Pod) error {
 		return nil
 	}
 
-
-
 	/*-- Update the local status of Pod --*/
 	if err := PodHandler.SavePodToFile(ctx, pod); err != nil {
 		logger.Error(err, "failed to save updated pod to file", "pod", podKey)
@@ -509,69 +507,7 @@ func (v *VirtualK8S) GetContainerLogs(ctx context.Context, namespace, podName, c
 	 * Log Streaming (With Follow)
 	 *---------------------------------------------------*/
 	if opts.Follow {
-		// 	return io.NopCloser(strings.NewReader("Follow is not yet supported by HPK.\n")), nil
 		v.Logger.Info("[K8s] WARNING -- Log with \"follow\" is not yet supported by HPK")
-
-		/*
-			seek := tail.SeekInfo{
-				Offset: 0,
-				Whence: 0,
-			}
-
-			// whence 0=origin, 2=end
-			if opts.Tail >= 0 {
-				seek.Whence = 2
-			}
-
-			tailConfig := tail.Config{
-				MustExist: true,
-				Poll:      true,
-				Follow:    opts.Follow,
-				Location:  &seek,
-				DefaultLogger:    tail.DefaultLogger,
-				ReOpen:    opts.Follow,
-			}
-
-			// tail the file and stream it to a pipe (that ends to a network socket).
-			t, err := tail.TailFile(logfilePath, tailConfig)
-			if err != nil {
-				return nil, errors.Wrapf(err, "unable to stream log file")
-			}
-
-			pr, pw := io.Pipe()
-
-			go func() {
-				defer pw.Close()
-
-				var line *tail.Line
-				var ok bool
-
-				for {
-					select {
-					case <-ctx.Done():
-						// the consumer has cancelled
-						t.Kill(errors.New("hangup by client"))
-						return
-					case line, ok = <-t.Lines:
-						if !ok {
-							// channel was closed
-							return
-						}
-					}
-
-					n, err := pw.Write([]byte(line.Text))
-					if err != nil {
-						panic("this should never happen:" + err.Error())
-					}
-
-					// Unfortunately this pience of code does not seem to work
-					// because virtual kubelet does not support streaming.
-					// Nonethess, it stays here for further investigation.
-				}
-			}()
-
-			return io.NopCloser(pr), nil
-		*/
 	}
 
 	/*---------------------------------------------------

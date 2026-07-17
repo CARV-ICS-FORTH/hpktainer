@@ -49,7 +49,7 @@ func TestHandleInitContainers_Success(t *testing.T) {
 		t.Errorf("create pod directory failed unexpectedly: %v", err)
 	}
 
-	if err := handleInitContainers(pod, false); err != nil {
+	if err := handleInitContainers(pod); err != nil {
 		t.Errorf("handleInitContainers failed unexpectedly: %v", err)
 	}
 	//  Verify log file contents (adjust the path as needed based on your implementation)
@@ -110,7 +110,7 @@ func TestHandleContainers_Success(t *testing.T) {
 	}
 
 	var wg sync.WaitGroup
-	if err := handleContainers(pod, &wg, false); err != nil {
+	if err := handleContainers(pod, &wg); err != nil {
 		t.Errorf("handleContainers failed unexpectedly: %v", err)
 	}
 

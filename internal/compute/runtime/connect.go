@@ -14,7 +14,6 @@
 
 package runtime
 
-
 // ConnectionOK returns true if the runtime environment is active.
 // Otherwise, it returns false.
 func ConnectionOK() bool {

@@ -52,8 +52,6 @@ func SetPodStatusCondition(conditions *[]corev1.PodCondition, newCondition corev
 	existingCondition.Message = newCondition.Message
 }
 
-
-
 // FindStatusCondition finds the conditionType in conditions.
 func FindStatusCondition(conditions []corev1.PodCondition, conditionType corev1.PodConditionType) *corev1.PodCondition {
 	for i := range conditions {
@@ -64,5 +62,3 @@ func FindStatusCondition(conditions []corev1.PodCondition, conditionType corev1.
 
 	return nil
 }
-
-

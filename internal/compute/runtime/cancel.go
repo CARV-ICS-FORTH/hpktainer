@@ -23,8 +23,6 @@ import (
 	"hpk/pkg/process"
 )
 
-
-
 var ErrInvalidJob = errors.New("invalid job id")
 
 // KillProcessByPID terminates a process by its PID using kill command.

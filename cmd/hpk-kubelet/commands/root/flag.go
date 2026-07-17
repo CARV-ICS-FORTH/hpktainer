@@ -44,7 +44,6 @@ type Opts struct {
 	K8sAPICertFilepath string
 	K8sAPIKeyFilepath  string
 
-
 	// Node name to use when creating a node in Kubernetes
 	NodeName string
 
@@ -61,7 +60,6 @@ type Opts struct {
 	TaintKey     string
 	TaintValue   string
 	TaintEffect  string
-
 
 	// Use tmp for the volume directories of the pods
 	UseTmp bool

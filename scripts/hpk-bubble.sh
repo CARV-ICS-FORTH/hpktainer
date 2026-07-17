@@ -30,7 +30,7 @@ start_socat_relays() {
     socat TCP4-LISTEN:10250,bind=${HOST_IP_DETECTED},reuseaddr,fork TCP4:127.0.0.1:10250 &
     SOCAT_PID_10250=$!
 
-    # Expose controller etcd to other bubbles (used by flanneld on worker bubbles)
+    # Expose controller etcd to other bubbles
     if [ "${HPK_ROLE:-controller}" = "controller" ]; then
         socat TCP4-LISTEN:2379,bind=${HOST_IP_DETECTED},reuseaddr,fork TCP4:127.0.0.1:2379 &
         SOCAT_PID_2379=$!

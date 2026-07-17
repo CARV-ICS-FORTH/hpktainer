@@ -35,7 +35,6 @@ import (
 
 ************************************************************/
 
-
 // Options represent options for EventHandler.
 type Options struct {
 	MaxWorkers   int // Number of workers to spawn.
@@ -118,7 +117,6 @@ func (h *EventHandler) Listen(ctx context.Context, control PodControl) {
 
 					return
 				case event := <-h.Queue:
-
 
 					// ensure that the file is a control file.
 					podkey, file, invalid := compute.HPK.ParseControlFilePath(event.Name)

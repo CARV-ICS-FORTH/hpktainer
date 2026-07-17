@@ -16,13 +16,13 @@ package provider
 
 import (
 	"context"
-	"fmt"
+	"os/exec"
 	"runtime"
+	"strings"
 
 	computeruntime "hpk/internal/compute/runtime"
 	"hpk/pkg/version"
 
-	"github.com/matishsiao/goInfo"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -152,26 +152,9 @@ func (v *VirtualK8S) NodeDaemonEndpoints(_ context.Context) corev1.NodeDaemonEnd
 }
 
 func (v *VirtualK8S) NodeSystemInfo(_ context.Context) corev1.NodeSystemInfo {
-	// goinfo.GetInfo may crash sometimes. use this method to recover and continue.
-	defer func() {
-		if r := recover(); r != nil {
-			fmt.Println("Recovered from goinfo failure:", r)
-		}
-	}()
-
-	var kernelVersion string
-	var operatingSystem string
-	var architecture string
-
-	info, err := goInfo.GetInfo()
-	if err != nil {
-		kernelVersion = "unknown"
-		operatingSystem = runtime.GOOS
-		architecture = runtime.GOARCH
-	} else {
-		kernelVersion = info.Kernel
-		operatingSystem = info.OS
-		architecture = info.Platform
+	kernelVersion := "unknown"
+	if out, err := exec.Command("uname", "-r").Output(); err == nil {
+		kernelVersion = strings.TrimSpace(string(out))
 	}
 
 	return corev1.NodeSystemInfo{
@@ -183,7 +166,7 @@ func (v *VirtualK8S) NodeSystemInfo(_ context.Context) corev1.NodeSystemInfo {
 		KubeProxyVersion:        version.K8sVersion,
 		KubeletVersion:          v.InitConfig.BuildVersion,
 		ContainerRuntimeVersion: "apptainer://1.1.3", // fixme: find it automatically
-		OperatingSystem:         operatingSystem,
-		Architecture:            architecture,
+		OperatingSystem:         runtime.GOOS,
+		Architecture:            runtime.GOARCH,
 	}
 }

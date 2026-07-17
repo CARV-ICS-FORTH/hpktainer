@@ -58,7 +58,7 @@ func (h *PodHandler) buildContainer(container *corev1.Container, containerStatus
 
 	if err := envFileTemplate.Execute(&envFileContent, fields); err != nil {
 		/*-- since both the template and fields are internal to the code, the evaluation should always succeed	--*/
-		return Container{}, fmt.Errorf("failed to evaluate sbatch template: %w", err)
+		return Container{}, fmt.Errorf("failed to evaluate container execution template: %w", err)
 	}
 
 	envfilePath := h.podDirectory.Container(container.Name).EnvFilePath()

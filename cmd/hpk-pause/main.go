@@ -128,13 +128,13 @@ acquire_pod_loop:
 	}
 
 	if len(pod.Spec.InitContainers) > 0 {
-		if err := handleInitContainers(pod, true); err != nil {
+		if err := handleInitContainers(pod); err != nil {
 			log.Error().Err(err).Msg("Error executing init containers")
 			return
 		}
 	}
 
-	if err := handleContainers(pod, &wg, true); err != nil {
+	if err := handleContainers(pod, &wg); err != nil {
 		log.Error().Err(err).Msg("Error executing main containers")
 		return
 	}
@@ -351,7 +351,7 @@ func DebugDNSInfo(resolvConfContent string, hostsContent string) {
 
 }
 
-func handleInitContainers(pod *v1.Pod, hpkEnv bool) error {
+func handleInitContainers(pod *v1.Pod) error {
 	isDebug := os.Getenv("DEBUG_MODE") == "true"
 	podKey := client.ObjectKeyFromObject(pod)
 	hpk := endpoint.HPK(pod.Annotations["workingDirectory"])
@@ -430,7 +430,7 @@ func handleInitContainers(pod *v1.Pod, hpkEnv bool) error {
 			apptainerVerbosity, executionMode, "--nv", "--cleanenv", "--writable-tmpfs", "--no-mount", "home,bind-paths", "--unsquash",
 		}
 		var allBinds []string
-		if hpkEnv {
+		if fileExists("/scratch/etc/resolv.conf") {
 			allBinds = append(allBinds, "/scratch/etc/resolv.conf:/etc/resolv.conf", "/scratch/etc/hosts:/etc/hosts")
 		}
 		allBinds = append(allBinds, binds...)
@@ -482,7 +482,7 @@ func handleInitContainers(pod *v1.Pod, hpkEnv bool) error {
 	return nil
 }
 
-func handleContainers(pod *v1.Pod, wg *sync.WaitGroup, hpkEnv bool) error {
+func handleContainers(pod *v1.Pod, wg *sync.WaitGroup) error {
 	isDebug := os.Getenv("DEBUG_MODE") == "true"
 	podKey := client.ObjectKeyFromObject(pod)
 	hpk := endpoint.HPK(pod.Annotations["workingDirectory"])
@@ -560,7 +560,7 @@ func handleContainers(pod *v1.Pod, wg *sync.WaitGroup, hpkEnv bool) error {
 			apptainerVerbosity, executionMode, "--nv", "--cleanenv", "--writable-tmpfs", "--no-mount", "home,bind-paths", "--unsquash",
 		}
 		var allBinds []string
-		if hpkEnv {
+		if fileExists("/scratch/etc/resolv.conf") {
 			allBinds = append(allBinds, "/scratch/etc/resolv.conf:/etc/resolv.conf", "/scratch/etc/hosts:/etc/hosts")
 		}
 		allBinds = append(allBinds, binds...)

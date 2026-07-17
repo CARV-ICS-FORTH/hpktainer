@@ -11,7 +11,6 @@ require (
 	github.com/go-logr/logr v1.4.3
 	github.com/google/uuid v1.6.0
 	github.com/hashicorp/go-multierror v1.1.1
-	github.com/matishsiao/goInfo v0.0.0-20241216093258-66a9250504d6
 	github.com/rs/zerolog v1.34.0
 	github.com/sirupsen/logrus v1.9.4
 	github.com/songgao/water v0.0.0-20200317203138-2b4b6d7c09d8

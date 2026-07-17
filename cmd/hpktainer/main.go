@@ -280,7 +280,6 @@ func run() int {
 		"-mode", "server",
 		"-socket", socketPath,
 		"-tap", hostTapName,
-		"-create-tap",
 		"-mtu", mtuStr,
 	)
 

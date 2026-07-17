@@ -37,8 +37,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-
-
 var ErrNoProcessIDInControlFiles = errors.New("no process id found in control files")
 
 // LoadPodFromKey waits LoadPodFromFile with filePath discovery.
@@ -247,7 +245,7 @@ remove_pod:
 			// try to delete directory contents using the fakeroot from pause container.
 			out, err := runtime.DefaultPauseImage.FakerootExec(
 				[]string{"--mount", "type=bind,src=" + podDir.String() + ",dst=/pod"}, // mount the pod directory in apptainer
-				[]string{"find", "/pod", "-mindepth", "1", "-delete"},                  // remove the pod directory contents using fakeroot
+				[]string{"find", "/pod", "-mindepth", "1", "-delete"},                 // remove the pod directory contents using fakeroot
 			)
 
 			compute.DefaultLogger.Info(" * Result",
@@ -455,12 +453,12 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, watcher filenotify.FileWatc
 	}
 
 	/*---------------------------------------------------
-	 * Prepare Fields for Sbatch Templates
+	 * Prepare Fields for Container Execution Templates
 	 *---------------------------------------------------*/
 
 	scriptTemplate, err := ParseTemplate(HostScriptTemplate)
 	if err != nil {
-		compute.PodError(pod, "TemplateError", "sbatch template error: %v", err)
+		compute.PodError(pod, "TemplateError", "container execution template error: %v", err)
 		_ = SavePodToFile(ctx, h.Pod)
 		return
 	}
@@ -500,10 +498,10 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, watcher filenotify.FileWatc
 			StderrPath:       h.podDirectory.StderrPath(),
 			SysErrorFilePath: h.podDirectory.SysErrorFilePath(),
 		},
-		Containers:     containers,
-		UseTmp:         useTmp,
+		Containers: containers,
+		UseTmp:     useTmp,
 	}); err != nil {
-		compute.PodError(pod, "TemplateError", "failed to evaluate sbatch template: %v", err)
+		compute.PodError(pod, "TemplateError", "failed to evaluate container execution template: %v", err)
 		_ = SavePodToFile(ctx, h.Pod)
 		return
 	}
@@ -511,7 +509,7 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, watcher filenotify.FileWatc
 	scriptFilePath := h.podDirectory.SubmitJobPath()
 
 	if err := os.WriteFile(scriptFilePath, scriptFileContent.Bytes(), endpoint.ContainerJobPermissions); err != nil {
-		compute.PodError(pod, "ScriptWriteError", "unable to write sbatch script in file '%s': %v", scriptFilePath, err)
+		compute.PodError(pod, "ScriptWriteError", "unable to write container execution script in file '%s': %v", scriptFilePath, err)
 		_ = SavePodToFile(ctx, h.Pod)
 		return
 	}

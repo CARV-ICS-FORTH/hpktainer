@@ -55,8 +55,6 @@ func parseIDType(raw string) string {
 	return strings.TrimSpace(raw)
 }
 
-
-
 // IsProcessJobID checks if the given job ID represents a direct process PID.
 // A job ID that consists only of digits is considered a process PID.
 func IsProcessJobID(jobID string) bool {
