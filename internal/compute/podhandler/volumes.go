@@ -66,7 +66,7 @@ func (h *PodHandler) mountVolumeSource(ctx context.Context, vol corev1.Volume) e
 		emptyDir := filepath.Join(h.podDirectory.VolumeDir(), vol.Name)
 
 		if err := os.MkdirAll(emptyDir, endpoint.PodGlobalDirectoryPermissions); err != nil {
-			compute.SystemPanic(err, "cannot create dir '%s'", emptyDir)
+			return fmt.Errorf("cannot create dir '%s': %w", emptyDir, err)
 		}
 
 		mounter := emptydir.VolumeMounter{
@@ -76,7 +76,7 @@ func (h *PodHandler) mountVolumeSource(ctx context.Context, vol corev1.Volume) e
 		}
 
 		if err := mounter.SetUpAt(ctx, emptyDir); err != nil {
-			compute.SystemPanic(err, "mount emptyDir volume to dir '%s' has failed", emptyDir)
+			return fmt.Errorf("mount emptyDir volume to dir '%s' has failed: %w", emptyDir, err)
 		}
 
 		h.logger.Info("  * EmptyDir Volume is mounted", "name", vol.Name)
@@ -90,7 +90,7 @@ func (h *PodHandler) mountVolumeSource(ctx context.Context, vol corev1.Volume) e
 		configMapDir := filepath.Join(h.podDirectory.VolumeDir(), vol.Name)
 
 		if err := os.MkdirAll(configMapDir, endpoint.PodGlobalDirectoryPermissions); err != nil {
-			compute.SystemPanic(err, "cannot create dir '%s'", configMapDir)
+			return fmt.Errorf("cannot create dir '%s': %w", configMapDir, err)
 		}
 
 		mounter := configmap.VolumeMounter{
@@ -119,7 +119,7 @@ func (h *PodHandler) mountVolumeSource(ctx context.Context, vol corev1.Volume) e
 		secretDir := filepath.Join(h.podDirectory.VolumeDir(), vol.Name)
 
 		if err := os.MkdirAll(secretDir, endpoint.PodGlobalDirectoryPermissions); err != nil {
-			compute.SystemPanic(err, "cannot create dir '%s'", secretDir)
+			return fmt.Errorf("cannot create dir '%s': %w", secretDir, err)
 		}
 
 		mounter := secret.VolumeMounter{
@@ -145,7 +145,9 @@ func (h *PodHandler) mountVolumeSource(ctx context.Context, vol corev1.Volume) e
 		/*---------------------------------------------------
 		 * Downward API
 		 *---------------------------------------------------*/
-		h.DownwardAPIVolumeSource(ctx, vol)
+		if err := h.DownwardAPIVolumeSource(ctx, vol); err != nil {
+			return fmt.Errorf("failed to mount DownwardAPI volume '%s': %w", vol.Name, err)
+		}
 
 		h.logger.Info("  * DownwardAPI Volume is mounted", "name", vol.Name)
 
@@ -159,7 +161,7 @@ func (h *PodHandler) mountVolumeSource(ctx context.Context, vol corev1.Volume) e
 			// ensure that the references host path exists
 			exists, err := mounter.PathExists(vol.VolumeSource.HostPath.Path)
 			if err != nil {
-				compute.SystemPanic(err, "failed to inspect HostPath at path '%s'", vol.VolumeSource.HostPath.Path)
+				return fmt.Errorf("failed to inspect HostPath at path '%s': %w", vol.VolumeSource.HostPath.Path, err)
 			}
 
 			if !exists {
@@ -171,7 +173,7 @@ func (h *PodHandler) mountVolumeSource(ctx context.Context, vol corev1.Volume) e
 			dstFullPath := filepath.Join(h.podDirectory.VolumeDir(), vol.Name)
 
 			if err := os.Symlink(vol.VolumeSource.HostPath.Path, dstFullPath); err != nil {
-				compute.SystemPanic(err, "cannot link symlink at path '%s'", dstFullPath)
+				return fmt.Errorf("cannot link symlink at path '%s': %w", dstFullPath, err)
 			}
 
 			// nothing to do
@@ -185,13 +187,13 @@ func (h *PodHandler) mountVolumeSource(ctx context.Context, vol corev1.Volume) e
 		}
 
 		if err := mounter.SetUpAt(ctx); err != nil {
-			compute.SystemPanic(err, "mount hostpath volume has failed")
+			return fmt.Errorf("mount hostpath volume has failed: %w", err)
 		}
 
 		dstFullPath := filepath.Join(h.podDirectory.VolumeDir(), vol.Name)
 		if _, err := os.Lstat(dstFullPath); os.IsNotExist(err) {
 			if err := os.Symlink(vol.VolumeSource.HostPath.Path, dstFullPath); err != nil {
-				compute.SystemPanic(err, "cannot link symlink at path '%s'", dstFullPath)
+				return fmt.Errorf("cannot link symlink at path '%s': %w", dstFullPath, err)
 			}
 		}
 
@@ -203,7 +205,9 @@ func (h *PodHandler) mountVolumeSource(ctx context.Context, vol corev1.Volume) e
 		/*---------------------------------------------------
 		 * Persistent Volume Claim
 		 *---------------------------------------------------*/
-		h.PersistentVolumeClaimSource(ctx, vol)
+		if err := h.PersistentVolumeClaimSource(ctx, vol); err != nil {
+			return fmt.Errorf("failed to mount PersistentVolumeClaim volume '%s': %w", vol.Name, err)
+		}
 
 		h.logger.Info("  * PersistentVolumeClaim Volume is mounted", "name", vol.Name)
 
@@ -216,7 +220,7 @@ func (h *PodHandler) mountVolumeSource(ctx context.Context, vol corev1.Volume) e
 		projectedDir := filepath.Join(h.podDirectory.VolumeDir(), vol.Name)
 
 		if err := os.MkdirAll(projectedDir, endpoint.PodGlobalDirectoryPermissions); err != nil {
-			compute.SystemPanic(err, "cannot create dir '%s'", projectedDir)
+			return fmt.Errorf("cannot create dir '%s': %w", projectedDir, err)
 		}
 
 		mounter := projected.VolumeMounter{
@@ -234,15 +238,15 @@ func (h *PodHandler) mountVolumeSource(ctx context.Context, vol corev1.Volume) e
 	default:
 		logrus.Warn(vol)
 
-		panic("It seems I have missed a Volume type")
+		return fmt.Errorf("unsupported volume type for volume '%s'", vol.Name)
 	}
 }
 
-func (h *PodHandler) DownwardAPIVolumeSource(ctx context.Context, vol corev1.Volume) {
+func (h *PodHandler) DownwardAPIVolumeSource(ctx context.Context, vol corev1.Volume) error {
 	downApiDir := filepath.Join(h.podDirectory.VolumeDir(), vol.Name)
 
 	if err := os.MkdirAll(downApiDir, endpoint.PodGlobalDirectoryPermissions); err != nil {
-		compute.SystemPanic(err, "cannot create dir '%s'", downApiDir)
+		return fmt.Errorf("cannot create dir '%s': %w", downApiDir, err)
 	}
 
 	mode := fs.FileMode(0644)
@@ -261,17 +265,19 @@ func (h *PodHandler) DownwardAPIVolumeSource(ctx context.Context, vol corev1.Vol
 			if err != nil {
 				compute.PodError(h.Pod, compute.ReasonSpecError, "%v", err)
 
-				return
+				return err
 			}
 
 			if err := os.WriteFile(itemPath, []byte(value), mode); err != nil {
-				compute.SystemPanic(err, "cannot write config map file '%s'", itemPath)
+				return fmt.Errorf("cannot write config map file '%s': %w", itemPath, err)
 			}
 		}
 	}
+
+	return nil
 }
 
-func (h *PodHandler) PersistentVolumeClaimSource(ctx context.Context, vol corev1.Volume) {
+func (h *PodHandler) PersistentVolumeClaimSource(ctx context.Context, vol corev1.Volume) error {
 	/*---------------------------------------------------
 	 * Get the Referenced PVC from Volume
 	 *---------------------------------------------------*/
@@ -313,7 +319,7 @@ func (h *PodHandler) PersistentVolumeClaimSource(ctx context.Context, vol corev1
 		); errPVC != nil { // error cehcking
 			compute.PodError(h.Pod, "PVCError", "PVC (%s) has failed. error:'%v'", pvc.GetName(), errPVC)
 
-			return
+			return errPVC
 		}
 	}
 
@@ -337,7 +343,7 @@ func (h *PodHandler) PersistentVolumeClaimSource(ctx context.Context, vol corev1
 				errPV,
 			)
 
-			return
+			return errPV
 		}
 	}
 
@@ -351,24 +357,26 @@ func (h *PodHandler) PersistentVolumeClaimSource(ctx context.Context, vol corev1
 		dstFullPath := filepath.Join(h.podDirectory.VolumeDir(), vol.Name)
 
 		if err := os.MkdirAll(pv.Spec.HostPath.Path, endpoint.PodGlobalDirectoryPermissions); err != nil && !os.IsExist(err) {
-			compute.SystemPanic(err, "cannot create hostpath directory at path '%s'", pv.Spec.HostPath.Path)
+			return fmt.Errorf("cannot create hostpath directory at path '%s': %w", pv.Spec.HostPath.Path, err)
 		}
 		if err := os.Symlink(pv.Spec.HostPath.Path, dstFullPath); err != nil && !os.IsExist(err) {
-			compute.SystemPanic(err, "cannot link symlink at path '%s'", dstFullPath)
+			return fmt.Errorf("cannot link symlink at path '%s': %w", dstFullPath, err)
 		}
 
 		h.logger.Info("  * HostPath PV Volume is mounted", "fullpath", dstFullPath)
+		return nil
 	case pv.Spec.Local != nil:
 		dstFullPath := filepath.Join(h.podDirectory.VolumeDir(), vol.Name)
 
 		if err := os.Symlink(pv.Spec.Local.Path, dstFullPath); err != nil {
-			compute.SystemPanic(err, "cannot link symlink at path '%s'", dstFullPath)
+			return fmt.Errorf("cannot link symlink at path '%s': %w", dstFullPath, err)
 		}
 
 		h.logger.Info("  * Local Volume is mounted", "fullpath", dstFullPath)
+		return nil
 	default:
 		logrus.Warn(vol)
 
-		panic("It seems I have missed a PersistentVolume type")
+		return fmt.Errorf("unsupported PersistentVolume type for volume '%s'", vol.Name)
 	}
 }

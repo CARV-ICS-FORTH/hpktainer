@@ -20,7 +20,6 @@ import (
 	"path/filepath"
 
 	"al.essio.dev/pkg/shellescape"
-	"hpk/internal/compute"
 	"hpk/pkg/process"
 )
 
@@ -36,7 +35,7 @@ func SubmitJob(scriptFile string) (string, error) {
 	fmt.Println("Submitting (Direct bash mode): ", commandString)
 
 	if err != nil {
-		compute.SystemPanic(err, "job submission error. out : '%s'", out)
+		return "", fmt.Errorf("job submission error. out: '%s': %w", out, err)
 	}
 
 	// For direct bash mode, return a placeholder job ID

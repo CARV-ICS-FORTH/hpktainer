@@ -391,7 +391,11 @@ func handleInitContainers(pod *v1.Pod, hpkEnv bool) error {
 			subPath := mount.SubPath
 			if mount.SubPathExpr != "" {
 
-				path, err := kubecontainer.ExpandContainerVolumeMounts(mount, podhandler.FromServicesForPod(context.Background(), pod))
+				podEnv, err := podhandler.FromServicesForPod(context.Background(), pod)
+				if err != nil {
+					compute.SystemPanic(err, "failed to get service env vars for pod '%s'", podKey)
+				}
+				path, err := kubecontainer.ExpandContainerVolumeMounts(mount, podEnv)
 				if err != nil {
 					compute.SystemPanic(err, "cannot expand env variables for container '%s' of pod '%s'", container.Name, podKey)
 				}
@@ -517,7 +521,11 @@ func handleContainers(pod *v1.Pod, wg *sync.WaitGroup, hpkEnv bool) error {
 			subPath := mount.SubPath
 			if mount.SubPathExpr != "" {
 
-				path, err := kubecontainer.ExpandContainerVolumeMounts(mount, podhandler.FromServicesForPod(context.Background(), pod))
+				podEnv, err := podhandler.FromServicesForPod(context.Background(), pod)
+				if err != nil {
+					compute.SystemPanic(err, "failed to get service env vars for pod '%s'", podKey)
+				}
+				path, err := kubecontainer.ExpandContainerVolumeMounts(mount, podEnv)
 				if err != nil {
 					compute.SystemPanic(err, "cannot expand env variables for container '%s' of pod '%s'", container.Name, podKey)
 				}

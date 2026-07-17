@@ -176,7 +176,8 @@ func DeletePod(podKey client.ObjectKey, watcher filenotify.FileWatcher) bool {
 			return true
 		}
 
-		compute.SystemPanic(err, "failed to load pod")
+		logger.Error(err, "failed to load pod for deletion")
+		return false
 	}
 
 	podDir := compute.HPK.Pod(podKey)
@@ -193,7 +194,8 @@ func DeletePod(podKey client.ObjectKey, watcher filenotify.FileWatcher) bool {
 			goto remove_pod
 		}
 
-		compute.SystemPanic(err, "failed to resolve process id for pod '%s' from control files", podKey)
+		logger.Error(err, "failed to resolve process id from control files", "pod", podKey)
+		goto remove_pod
 	}
 
 	logger.Info(" * Resolved process id from control files", "pid", pid)
@@ -212,7 +214,8 @@ func DeletePod(podKey client.ObjectKey, watcher filenotify.FileWatcher) bool {
 				goto remove_pod
 			}
 
-			compute.SystemPanic(err, "failed to kill process '%s' (%s). out: '%s'", pid, podKey, out)
+			logger.Error(err, "failed to kill process", "pid", pid, "pod", podKey, "out", out)
+			goto remove_pod
 		}
 
 		logger.Info(" * Process is terminated", "pid", pid, "pod", podKey, "out", out)
@@ -225,7 +228,7 @@ remove_pod:
 	// because fswatch does not work recursively, we cannot have the container directories nested within the pod.
 	// instead, we use a flat directory in the format "podir/containername.{jid,stdout,stdour,...}"
 	if err := watcher.Remove(podDir.ControlFileDir()); err != nil && !errors.Is(err, os.ErrNotExist) {
-		compute.SystemPanic(err, "deregister watcher for path '%s' has failed", podDir.ControlFileDir())
+		logger.Error(err, "deregister watcher for path has failed", "directory", podDir.ControlFileDir())
 	}
 
 	logger.Info(" * Pod Watcher has been removed.")
@@ -253,10 +256,12 @@ remove_pod:
 			)
 
 			if err != nil {
-				compute.SystemPanic(err, "failed to forcible remove pod directory '%s'", podDir)
+				logger.Error(err, "failed to forcibly remove pod directory", "directory", podDir)
+				return false
 			}
 		} else {
-			compute.SystemPanic(err, "failed to remove pod directory '%s'", podDir)
+			logger.Error(err, "failed to remove pod directory", "directory", podDir)
+			return false
 		}
 	}
 
@@ -293,12 +298,19 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, watcher filenotify.FileWatc
 	podKey := client.ObjectKeyFromObject(pod)
 	logger := compute.DefaultLogger.WithValues("pod", podKey)
 
+	podEnvVars, err := FromServicesForPod(ctx, pod)
+	if err != nil {
+		compute.PodError(pod, "EnvVarError", "failed to list services when setting up env vars: %v", err)
+		_ = SavePodToFile(ctx, pod)
+		return
+	}
+
 	h := PodHandler{
 		Pod:             pod,
 		podKey:          podKey,
 		podDirectory:    compute.HPK.Pod(podKey),
 		logger:          logger,
-		podEnvVariables: FromServicesForPod(ctx, pod),
+		podEnvVariables: podEnvVars,
 	}
 
 	for _, env := range h.podEnvVariables {
@@ -311,28 +323,37 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, watcher filenotify.FileWatc
 	}
 	// create directory for the job environment.
 	if err := os.MkdirAll(h.podDirectory.JobDir(), endpoint.PodGlobalDirectoryPermissions); err != nil {
-		compute.SystemPanic(err, "Cant create pod directory '%s'", h.podDirectory.JobDir())
+		compute.PodError(pod, "PodDirectoryError", "Cant create pod directory '%s': %v", h.podDirectory.JobDir(), err)
+		_ = SavePodToFile(ctx, h.Pod)
+		return
 	}
 
 	// create directory for logs.
 	if err := os.MkdirAll(h.podDirectory.LogDir(), endpoint.PodGlobalDirectoryPermissions); err != nil {
-		compute.SystemPanic(err, "cannot create log directory '%s'", h.podDirectory.LogDir())
+		compute.PodError(pod, "PodDirectoryError", "cannot create log directory '%s': %v", h.podDirectory.LogDir(), err)
+		_ = SavePodToFile(ctx, h.Pod)
+		return
 	}
 
 	// create directory for volumes.
 	if err := os.MkdirAll(h.podDirectory.VolumeDir(), endpoint.PodGlobalDirectoryPermissions); err != nil {
-		compute.SystemPanic(err, "cannot create volume directory '%s'", h.podDirectory.VolumeDir())
+		compute.PodError(pod, "PodDirectoryError", "cannot create volume directory '%s': %v", h.podDirectory.VolumeDir(), err)
+		_ = SavePodToFile(ctx, h.Pod)
+		return
 	}
 
 	// create directory for control files.
 	if err := os.MkdirAll(h.podDirectory.ControlFileDir(), endpoint.PodGlobalDirectoryPermissions); err != nil {
-		compute.SystemPanic(err, "cannot create control file directory '%s'", h.podDirectory.ControlFileDir())
+		compute.PodError(pod, "PodDirectoryError", "cannot create control file directory '%s': %v", h.podDirectory.ControlFileDir(), err)
+		_ = SavePodToFile(ctx, h.Pod)
+		return
 	}
 
 	// Persist pod metadata early so in-progress pods are not considered corrupted
 	// by startup reconciliation while volume setup is still running.
 	if err := SavePodToFile(ctx, h.Pod); err != nil {
-		compute.SystemPanic(err, "failed to persist pod metadata early")
+		compute.PodError(pod, "SavePodError", "failed to persist pod metadata early: %v", err)
+		return
 	}
 
 	// watch for control files on the root directory of the pod.
@@ -342,7 +363,9 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, watcher filenotify.FileWatc
 		if errors.Is(err, filenotify.ErrWatchExists) {
 			logger.Info("Pod watcher already exists", "directory", h.podDirectory.ControlFileDir())
 		} else {
-			compute.SystemPanic(err, "register watcher for path '%s' has failed", h.podDirectory.ControlFileDir())
+			compute.PodError(pod, "WatcherError", "register watcher for path '%s' has failed: %v", h.podDirectory.ControlFileDir(), err)
+			_ = SavePodToFile(ctx, h.Pod)
+			return
 		}
 	}
 
@@ -408,7 +431,9 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, watcher filenotify.FileWatc
 	// create cgroups for the pod
 	if compute.Environment.EnableCgroupV2 {
 		if _, err := os.Create(h.podDirectory.CgroupFilePath()); err != nil {
-			compute.SystemPanic(err, "Cant create cgroup configuration file '%s'", h.podDirectory.CgroupFilePath())
+			compute.PodError(pod, "CgroupError", "Cant create cgroup configuration file '%s': %v", h.podDirectory.CgroupFilePath(), err)
+			_ = SavePodToFile(ctx, h.Pod)
+			return
 		}
 
 		logger.Info(" * Cgroups are set")
@@ -419,7 +444,9 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, watcher filenotify.FileWatc
 	 *---------------------------------------------------*/
 	pauseImage, err := image.Pull(compute.HPK.ImageDir(), image.Docker, compute.Environment.PauseImage)
 	if err != nil {
-		compute.SystemPanic(err, "ImagePull error. Image:%s", compute.Environment.PauseImage)
+		compute.PodError(pod, "ImagePullError", "ImagePull error. Image:%s: %v", compute.Environment.PauseImage, err)
+		_ = SavePodToFile(ctx, h.Pod)
+		return
 	}
 
 	/*---------------------------------------------------
@@ -428,7 +455,9 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, watcher filenotify.FileWatc
 
 	scriptTemplate, err := ParseTemplate(HostScriptTemplate)
 	if err != nil {
-		compute.SystemPanic(err, "sbatch template error")
+		compute.PodError(pod, "TemplateError", "sbatch template error: %v", err)
+		_ = SavePodToFile(ctx, h.Pod)
+		return
 	}
 
 	scriptFileContent := bytes.Buffer{}
@@ -469,14 +498,17 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, watcher filenotify.FileWatc
 		Containers:     containers,
 		UseTmp:         useTmp,
 	}); err != nil {
-		/*-- since both the template and fields are internal to the code, the evaluation should always succeed	--*/
-		compute.SystemPanic(err, "failed to evaluate sbatch template")
+		compute.PodError(pod, "TemplateError", "failed to evaluate sbatch template: %v", err)
+		_ = SavePodToFile(ctx, h.Pod)
+		return
 	}
 
 	scriptFilePath := h.podDirectory.SubmitJobPath()
 
 	if err := os.WriteFile(scriptFilePath, scriptFileContent.Bytes(), endpoint.ContainerJobPermissions); err != nil {
-		compute.SystemPanic(err, "unable to write sbatch script in file '%s'", scriptFilePath)
+		compute.PodError(pod, "ScriptWriteError", "unable to write sbatch script in file '%s': %v", scriptFilePath, err)
+		_ = SavePodToFile(ctx, h.Pod)
+		return
 	}
 
 	logger.Info(" * Container script has been generated")
@@ -486,7 +518,9 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, watcher filenotify.FileWatc
 	 *---------------------------------------------------*/
 	jobID, err := runtime.SubmitJob(scriptFilePath)
 	if err != nil {
-		compute.SystemPanic(err, "failed to submit job")
+		compute.PodError(pod, "JobSubmissionError", "failed to submit job: %v", err)
+		_ = SavePodToFile(ctx, h.Pod)
+		return
 	}
 
 	logger.Info(" * Job has been submitted", "jobID", jobID)
@@ -496,6 +530,7 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, watcher filenotify.FileWatc
 
 	// needed for subsequent GetPod()
 	if err := SavePodToFile(ctx, h.Pod); err != nil {
-		compute.SystemPanic(err, "failed to persistent pod")
+		compute.PodError(pod, "SavePodError", "failed to persistent pod: %v", err)
+		return
 	}
 }

@@ -47,7 +47,7 @@ func (h *PodHandler) buildContainer(container *corev1.Container, containerStatus
 	 *---------------------------------------------------*/
 	envFileTemplate, err := ParseTemplate(GenerateEnvTemplate)
 	if err != nil {
-		compute.SystemPanic(err, "generate env template error")
+		return Container{}, fmt.Errorf("generate env template error: %w", err)
 	}
 
 	fields := GenerateEnvFields{
@@ -58,13 +58,13 @@ func (h *PodHandler) buildContainer(container *corev1.Container, containerStatus
 
 	if err := envFileTemplate.Execute(&envFileContent, fields); err != nil {
 		/*-- since both the template and fields are internal to the code, the evaluation should always succeed	--*/
-		compute.SystemPanic(err, "failed to evaluate sbatch template")
+		return Container{}, fmt.Errorf("failed to evaluate sbatch template: %w", err)
 	}
 
 	envfilePath := h.podDirectory.Container(container.Name).EnvFilePath()
 
 	if err := os.WriteFile(envfilePath, []byte(envFileContent.String()), endpoint.PodGlobalDirectoryPermissions); err != nil {
-		compute.SystemPanic(err, "cannot write env file for container '%s' of pod '%s'", container, h.podKey)
+		return Container{}, fmt.Errorf("cannot write env file for container '%s' of pod '%s': %w", container.Name, h.podKey, err)
 	}
 
 	/*---------------------------------------------------
@@ -80,7 +80,7 @@ func (h *PodHandler) buildContainer(container *corev1.Container, containerStatus
 		if mount.SubPathExpr != "" {
 			subPath, err = kubecontainer.ExpandContainerVolumeMounts(mount, h.podEnvVariables)
 			if err != nil {
-				compute.SystemPanic(err, "cannot expand env variables for container '%s' of pod '%s'", container, h.podKey)
+				return Container{}, fmt.Errorf("cannot expand env variables for container '%s' of pod '%s': %w", container.Name, h.podKey, err)
 			}
 		}
 
@@ -93,7 +93,7 @@ func (h *PodHandler) buildContainer(container *corev1.Container, containerStatus
 
 			subPathFileExists, err := mounter.PathExists(subPathFile)
 			if err != nil {
-				compute.SystemPanic(err, "Could not determine if subPath exists. mount:'%v'", mount)
+				return Container{}, fmt.Errorf("could not determine if subPath exists. mount:'%v': %w", mount, err)
 			}
 
 			if !subPathFileExists {
@@ -107,14 +107,14 @@ func (h *PodHandler) buildContainer(container *corev1.Container, containerStatus
 				// For the particular case of Argo, we know that "0" are always dirs.
 				if mount.SubPath == "0" {
 					if err := hostutil.SafeMakeDir(subPath, hostPath, endpoint.PodGlobalDirectoryPermissions); err != nil {
-						compute.SystemPanic(err, "failed to create dir placeholder. subpath:'%s'", subPathFile)
+						return Container{}, fmt.Errorf("failed to create dir placeholder. subpath:'%s': %w", subPathFile, err)
 					}
 				} else {
 					// A file is enough for all possible targets (symlink, device, pipe,
 					// socket, ...), bind-mounting them into a file correctly changes type
 					// of the target file.
 					if err = os.WriteFile(subPathFile, []byte{}, endpoint.PodGlobalDirectoryPermissions); err != nil {
-						compute.SystemPanic(err, "failed to create placeholder. subpath:'%s'", subPathFile)
+						return Container{}, fmt.Errorf("failed to create placeholder. subpath:'%s': %w", subPathFile, err)
 					}
 				}
 			}
@@ -144,8 +144,7 @@ func (h *PodHandler) buildContainer(container *corev1.Container, containerStatus
 	}
 
 	if err != nil {
-		compute.SystemPanic(err, "ImagePull error. Image:%s ", container.Image)
-		return Container{}, err
+		return Container{}, fmt.Errorf("ImagePull error. Image:%s: %w", container.Image, err)
 	}
 
 	// if there is no command, use the run mode, which will execute the runscript

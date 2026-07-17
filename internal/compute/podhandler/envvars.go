@@ -30,7 +30,7 @@ import (
 )
 
 // FromServicesForPod builds environment variables taking into account pod.Spec.EnableServiceLinks.
-func FromServicesForPod(ctx context.Context, pod *corev1.Pod) []corev1.EnvVar {
+func FromServicesForPod(ctx context.Context, pod *corev1.Pod) ([]corev1.EnvVar, error) {
 	enableServiceLinks := true
 	if pod.Spec.EnableServiceLinks != nil {
 		enableServiceLinks = *pod.Spec.EnableServiceLinks
@@ -40,7 +40,7 @@ func FromServicesForPod(ctx context.Context, pod *corev1.Pod) []corev1.EnvVar {
 
 // FromServices builds environment variables that a container is started with,
 // which tell the container where to find the services it may need.
-func FromServices(ctx context.Context, namespace string, enableServiceLinks ...bool) []corev1.EnvVar {
+func FromServices(ctx context.Context, namespace string, enableServiceLinks ...bool) ([]corev1.EnvVar, error) {
 	enableLinks := true
 	if len(enableServiceLinks) > 0 {
 		enableLinks = enableServiceLinks[0]
@@ -54,7 +54,7 @@ func FromServices(ctx context.Context, namespace string, enableServiceLinks ...b
 	if err := compute.K8SClient.List(ctx, &serviceList, &client.ListOptions{
 		LabelSelector: labels.Everything(),
 	}); err != nil {
-		compute.SystemPanic(err, "failed to list services when setting up env vars")
+		return nil, fmt.Errorf("failed to list services when setting up env vars: %w", err)
 	}
 
 	var services []*corev1.Service
@@ -108,7 +108,7 @@ func FromServices(ctx context.Context, namespace string, enableServiceLinks ...b
 		// Docker-compatible vars.
 		result = append(result, makeLinkVariables(service)...)
 	}
-	return result
+	return result, nil
 }
 
 func makeEnvVariableName(str string) string {

@@ -217,6 +217,17 @@ func (v *VirtualK8S) CreatePod(ctx context.Context, pod *corev1.Pod) error {
 	 * Create the pod Asynchronously.
 	 *---------------------------------------------------*/
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logger.Error(fmt.Errorf("%v", r), "Recovered panic in CreatePod goroutine", "pod", podKey)
+				compute.PodError(pod, "PanicError", "internal panic occurred during pod creation: %v", r)
+				_ = PodHandler.SavePodToFile(context.Background(), pod)
+				if v.updatedPod != nil {
+					v.updatedPod(pod)
+				}
+			}
+		}()
+
 		// acknowledge the creation request and do the creation in the background.
 		// if the creation fails, the pod should be marked as failed and returned to the provider.
 		PodHandler.CreatePod(context.Background(), pod, v.fileWatcher, v.UseTmp)
@@ -281,7 +292,8 @@ func (v *VirtualK8S) UpdatePod(ctx context.Context, pod *corev1.Pod) error {
 
 	/*-- Update the local status of Pod --*/
 	if err := PodHandler.SavePodToFile(ctx, pod); err != nil {
-		compute.SystemPanic(err, "failed to set job id for pod '%s'", podKey)
+		logger.Error(err, "failed to save updated pod to file", "pod", podKey)
+		return fmt.Errorf("failed to save updated pod '%s' to file: %w", podKey, err)
 	}
 
 	return nil

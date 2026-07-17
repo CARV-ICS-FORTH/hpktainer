@@ -16,6 +16,7 @@ package events
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -97,6 +98,11 @@ func (h *EventHandler) Listen(ctx context.Context, control PodControl) {
 		waitGroup.Add(1)
 
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					compute.DefaultLogger.Error(fmt.Errorf("%v", r), "Recovered panic in event listener worker")
+				}
+			}()
 			for {
 				select {
 				case <-ctx.Done():
@@ -147,7 +153,8 @@ func (h *EventHandler) Listen(ctx context.Context, control PodControl) {
 						// load local pod
 						pod, err := control.LoadFromDisk(podkey)
 						if err != nil {
-							compute.SystemPanic(err, "pod '%s' does not exist", podkey)
+							logger.Error(err, "pod does not exist for syserror event", "pod", podkey)
+							continue
 						}
 
 						// get failure reason
@@ -155,14 +162,15 @@ func (h *EventHandler) Listen(ctx context.Context, control PodControl) {
 
 						reason, err := os.ReadFile(sysErrFile)
 						if err != nil {
-							compute.SystemPanic(err, "failed to read file '%s'", sysErrFile)
+							logger.Error(err, "failed to read syserror file", "file", sysErrFile)
+							reason = []byte("Pod creation failed with system error")
 						}
 
 						// FIXME: print only the last few lined
 						logger.Info("[SYSERROR]", "details", string(reason))
 
 						// set the pod as failed
-						compute.PodError(pod, "SYSERROR", "Pod creation has failed")
+						compute.PodError(pod, "SYSERROR", "Pod creation has failed: %s", string(reason))
 
 						// update the remote copy
 						control.NotifyVirtualKubelet(pod)

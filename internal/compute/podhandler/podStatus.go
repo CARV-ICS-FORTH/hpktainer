@@ -374,7 +374,8 @@ func readIntFromFile(filepath string) (int, bool) {
 		if scanner.Scan() {
 			code, err := strconv.Atoi(scanner.Text())
 			if err != nil {
-				compute.SystemPanic(err, "cannot decode content to int")
+				compute.DefaultLogger.Error(err, "cannot decode content to int", "path", filepath, "content", scanner.Text())
+				return -1, false
 			}
 
 			return code, true
