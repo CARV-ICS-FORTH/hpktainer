@@ -238,16 +238,16 @@ remove_pod:
 	 *---------------------------------------------------*/
 
 	if err := os.RemoveAll(podDir.String()); err != nil {
-		// if trying to remove directory from the host fails, try to delete it using a fakeroot containera.
+		// if trying to remove directory from the host fails, try to delete it using a fakeroot container.
 		if errors.Is(err, fs.ErrPermission) {
 			compute.DefaultLogger.Info(" * Failed to remove directory from host. Try using fakeroot container.",
 				"err", err,
 			)
 
-			// try to delete directory using the fakeroot from pause container.
+			// try to delete directory contents using the fakeroot from pause container.
 			out, err := runtime.DefaultPauseImage.FakerootExec(
 				[]string{"--mount", "type=bind,src=" + podDir.String() + ",dst=/pod"}, // mount the pod directory in apptainer
-				[]string{"sh", "-c", "rm -rf /pod/* /pod"},                            // remove the pod directory contents using fakeroot
+				[]string{"find", "/pod", "-mindepth", "1", "-delete"},                  // remove the pod directory contents using fakeroot
 			)
 
 			compute.DefaultLogger.Info(" * Result",
@@ -256,7 +256,12 @@ remove_pod:
 			)
 
 			if err != nil {
-				logger.Error(err, "failed to forcibly remove pod directory", "directory", podDir)
+				logger.Error(err, "failed to forcibly remove pod directory contents using fakeroot", "directory", podDir)
+				return false
+			}
+
+			if err := os.RemoveAll(podDir.String()); err != nil {
+				logger.Error(err, "failed to remove pod directory after fakeroot cleanup", "directory", podDir)
 				return false
 			}
 		} else {
