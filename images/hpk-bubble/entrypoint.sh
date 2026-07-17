@@ -177,21 +177,25 @@ if [ "$HPK_ROLE" = "controller" ]; then
         sleep 1
     done
     
-    # Copy kubeconfig and node-token to shared directory
-    echo "Copying kubeconfig and node-token to /var/lib/hpk..."
-    cp /etc/rancher/k3s/k3s.yaml /var/lib/hpk/kubeconfig
-    # Replace 0.0.0.0 or 127.0.0.1 in kubeconfig server URL with actual HOST_IP
-    sed -i "s|https://0.0.0.0:6443|https://${HOST_IP}:6443|g" /var/lib/hpk/kubeconfig
-    sed -i "s|https://127.0.0.1:6443|https://${HOST_IP}:6443|g" /var/lib/hpk/kubeconfig
-    cp /var/lib/rancher/k3s/server/node-token /var/lib/hpk/node-token
-    chmod 644 /var/lib/hpk/kubeconfig /var/lib/hpk/node-token
-
-    # Export server-ca to shared directory for node certificates
+    # Export server-ca to shared directory for node certificates FIRST
     echo "Copying server-ca to /var/lib/hpk/tls..."
     mkdir -p /var/lib/hpk/tls
-    cp /var/lib/rancher/k3s/server/tls/server-ca.crt /var/lib/hpk/tls/
-    cp /var/lib/rancher/k3s/server/tls/server-ca.key /var/lib/hpk/tls/
-    chmod 600 /var/lib/hpk/tls/server-ca.key
+    cp /var/lib/rancher/k3s/server/tls/server-ca.crt /var/lib/hpk/tls/server-ca.crt.tmp
+    cp /var/lib/rancher/k3s/server/tls/server-ca.key /var/lib/hpk/tls/server-ca.key.tmp
+    chmod 600 /var/lib/hpk/tls/server-ca.key.tmp
+    mv /var/lib/hpk/tls/server-ca.key.tmp /var/lib/hpk/tls/server-ca.key
+    mv /var/lib/hpk/tls/server-ca.crt.tmp /var/lib/hpk/tls/server-ca.crt
+
+    # Copy kubeconfig and node-token to shared directory AFTER server-ca is ready
+    echo "Copying kubeconfig and node-token to /var/lib/hpk..."
+    cp /etc/rancher/k3s/k3s.yaml /var/lib/hpk/kubeconfig.tmp
+    # Replace 0.0.0.0 or 127.0.0.1 in kubeconfig server URL with actual HOST_IP
+    sed -i "s|https://0.0.0.0:6443|https://${HOST_IP}:6443|g" /var/lib/hpk/kubeconfig.tmp
+    sed -i "s|https://127.0.0.1:6443|https://${HOST_IP}:6443|g" /var/lib/hpk/kubeconfig.tmp
+    cp /var/lib/rancher/k3s/server/node-token /var/lib/hpk/node-token.tmp
+    chmod 644 /var/lib/hpk/kubeconfig.tmp /var/lib/hpk/node-token.tmp
+    mv /var/lib/hpk/node-token.tmp /var/lib/hpk/node-token
+    mv /var/lib/hpk/kubeconfig.tmp /var/lib/hpk/kubeconfig
 
     # Make CoreDNS inherit the bubble resolver instead of the cluster DNS service IP.
     echo "Configuring CoreDNS to use the bubble resolver..."
@@ -236,17 +240,20 @@ EOF
     fi
 fi
 
-# Wait for kubeconfig and node-token (Controller creates them, Nodes wait for them)
-echo "Waiting for /var/lib/hpk/kubeconfig and /var/lib/hpk/node-token..."
-while [ ! -f /var/lib/hpk/kubeconfig ] || [ ! -f /var/lib/hpk/node-token ]; do
+# Wait for kubeconfig, node-token, and server-ca, ensuring server-ca matches kubeconfig's cluster CA
+echo "Waiting for /var/lib/hpk/kubeconfig, /var/lib/hpk/node-token, and matching server-ca..."
+while true; do
+  if [ -f /var/lib/hpk/kubeconfig ] && [ -f /var/lib/hpk/node-token ] && \
+     [ -f /var/lib/hpk/tls/server-ca.crt ] && [ -f /var/lib/hpk/tls/server-ca.key ]; then
+    KUBECONFIG_CA_HASH=$(grep 'certificate-authority-data:' /var/lib/hpk/kubeconfig 2>/dev/null | awk '{print $2}' | base64 -d 2>/dev/null | sha256sum | awk '{print $1}')
+    SERVER_CA_HASH=$(sha256sum /var/lib/hpk/tls/server-ca.crt 2>/dev/null | awk '{print $1}')
+    if [ -n "$KUBECONFIG_CA_HASH" ] && [ -n "$SERVER_CA_HASH" ] && [ "$KUBECONFIG_CA_HASH" = "$SERVER_CA_HASH" ]; then
+      break
+    fi
+  fi
   sleep 1
 done
 
-# Wait for server-ca (Controller creates them, Nodes wait for them)
-echo "Waiting for /var/lib/hpk/tls/server-ca.crt and /var/lib/hpk/tls/server-ca.key..."
-while [ ! -f /var/lib/hpk/tls/server-ca.crt ] || [ ! -f /var/lib/hpk/tls/server-ca.key ]; do
-  sleep 1
-done
 
 # Generate per-node webhook certificate for hpk-kubelet with node IP SAN
 NODE_NAME="$(hostname)"

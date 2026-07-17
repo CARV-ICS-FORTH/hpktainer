@@ -27,7 +27,7 @@ echo "  Nodes: ${NODES[@]}"
 
 # Clean up stale config files (but keep images for dev mode)
 echo "Cleaning up stale configuration in ~/.hpk..."
-rm -f $HOME/.hpk/kubeconfig $HOME/.hpk/node-token $HOME/.hpk/kubelet.crt $HOME/.hpk/kubelet.key
+rm -rf $HOME/.hpk/kubeconfig $HOME/.hpk/node-token $HOME/.hpk/kubelet.crt $HOME/.hpk/kubelet.key $HOME/.hpk/tls $HOME/.hpk/.certs
 
 # Pre-process images
 echo "Pre-processing images..."
