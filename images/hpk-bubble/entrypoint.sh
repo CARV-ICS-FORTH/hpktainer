@@ -195,17 +195,31 @@ if [ "$HPK_ROLE" = "controller" ]; then
 
     # Make CoreDNS inherit the bubble resolver instead of the cluster DNS service IP.
     echo "Configuring CoreDNS to use the bubble resolver..."
+    COREDNS_WAIT=0
+    COREDNS_TIMEOUT=120
     while ! k3s kubectl -n kube-system get deployment coredns >/dev/null 2>&1; do
+      if [ "$COREDNS_WAIT" -ge "$COREDNS_TIMEOUT" ]; then
+        echo "ERROR: Timed out waiting for CoreDNS deployment" >&2
+        break
+      fi
       sleep 1
+      COREDNS_WAIT=$((COREDNS_WAIT + 1))
     done
-    while ! k3s kubectl -n kube-system get configmap coredns >/dev/null 2>&1; do
+    while [ "$COREDNS_WAIT" -lt "$COREDNS_TIMEOUT" ] && ! k3s kubectl -n kube-system get configmap coredns >/dev/null 2>&1; do
+      if [ "$COREDNS_WAIT" -ge "$COREDNS_TIMEOUT" ]; then
+        echo "ERROR: Timed out waiting for CoreDNS configmap" >&2
+        break
+      fi
       sleep 1
+      COREDNS_WAIT=$((COREDNS_WAIT + 1))
     done
-    k3s kubectl -n kube-system patch deployment coredns --type=merge -p '{"spec":{"template":{"spec":{"dnsPolicy":"Default"}}}}'
-    CURRENT_COREFILE="$(k3s kubectl -n kube-system get configmap coredns -o jsonpath='{.data.Corefile}')"
-    UPDATED_COREFILE="$(printf '%s\n' "$CURRENT_COREFILE" | sed -E 's|forward \. (/etc/resolv\.conf|[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)|forward . /etc/resolv.conf|g')"
-    if [ "$CURRENT_COREFILE" != "$UPDATED_COREFILE" ]; then
-      cat <<EOF | k3s kubectl apply -f -
+
+    if k3s kubectl -n kube-system get deployment coredns >/dev/null 2>&1 && k3s kubectl -n kube-system get configmap coredns >/dev/null 2>&1; then
+      k3s kubectl -n kube-system patch deployment coredns --type=merge -p '{"spec":{"template":{"spec":{"dnsPolicy":"Default"}}}}'
+      CURRENT_COREFILE="$(k3s kubectl -n kube-system get configmap coredns -o jsonpath='{.data.Corefile}')"
+      UPDATED_COREFILE="$(printf '%s\n' "$CURRENT_COREFILE" | sed -E 's#forward \. (/etc/resolv\.conf|([0-9]{1,3}\.){3}[0-9]{1,3})#forward . /etc/resolv.conf#g')"
+      if [ -n "$UPDATED_COREFILE" ] && [ "$CURRENT_COREFILE" != "$UPDATED_COREFILE" ]; then
+        cat <<EOF | k3s kubectl apply -f -
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -215,7 +229,10 @@ data:
   Corefile: |
 $(printf '%s\n' "$UPDATED_COREFILE" | sed 's/^/    /')
 EOF
-      k3s kubectl -n kube-system rollout restart deployment coredns
+        k3s kubectl -n kube-system rollout restart deployment coredns
+      fi
+    else
+      echo "Skipping CoreDNS reconfiguration due to missing deployment or configmap" >&2
     fi
 fi
 
