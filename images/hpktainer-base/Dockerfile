@@ -8,7 +8,7 @@ RUN CGO_ENABLED=0 go build -o /bin/hpk-net-daemon ./cmd/hpk-net-daemon
 
 FROM ubuntu:24.04
 RUN apt-get update && \
-    apt-get install -y iproute2 && \
+    apt-get install -y --no-install-recommends iproute2 && \
     rm -rf /var/lib/apt/lists/*
 COPY --from=builder /bin/hpk-net-daemon /usr/local/bin/hpk-net-daemon
 COPY images/hpktainer-base/entrypoint.sh /entrypoint.sh

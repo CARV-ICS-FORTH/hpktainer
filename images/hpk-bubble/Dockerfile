@@ -15,27 +15,29 @@ WORKDIR /
 
 # Basic utilities
 RUN apt-get update && \
-    apt-get install -y vim-tiny curl iproute2 net-tools iputils-ping nano socat && \
+    apt-get install -y --no-install-recommends vim-tiny curl iproute2 net-tools iputils-ping nano socat && \
     rm -rf /var/lib/apt/lists/*
 
 # Apptainer
 RUN apt-get update && \
-    apt-get install -y software-properties-common && \
-    add-apt-repository -y ppa:apptainer/ppa && \
+    apt-get install -y --no-install-recommends gpg ca-certificates && \
+    mkdir -p /etc/apt/keyrings && \
+    curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xAFE36534FC6218AE" | gpg --dearmor -o /etc/apt/keyrings/apptainer.gpg && \
+    echo "deb [signed-by=/etc/apt/keyrings/apptainer.gpg] https://ppa.launchpadcontent.net/apptainer/ppa/ubuntu noble main" > /etc/apt/sources.list.d/apptainer-ubuntu-ppa-noble.list && \
     apt-get update && \
-    apt-get install -y apptainer && \
+    apt-get install -y --no-install-recommends apptainer && \
     rm -rf /var/lib/apt/lists/*
 
-# CNI plugins
+# CNI plugins (only host-local IPAM plugin is required by hpktainer)
 ARG TARGETARCH
 RUN curl -LO https://github.com/containernetworking/plugins/releases/download/v1.9.0/cni-plugins-linux-${TARGETARCH}-v1.9.0.tgz && \
     mkdir -p /opt/cni/bin && \
-    (cd /opt/cni/bin && tar -zxvf /cni-plugins-linux-${TARGETARCH}-v1.9.0.tgz) && \
+    (cd /opt/cni/bin && tar -zxvf /cni-plugins-linux-${TARGETARCH}-v1.9.0.tgz ./host-local) && \
     rm /cni-plugins-linux-${TARGETARCH}-v1.9.0.tgz
 
 # Etcd and iptables dependencies
 RUN apt-get update && \
-    apt-get install -y iptables nscd etcd-server etcd-client && \
+    apt-get install -y --no-install-recommends iptables nscd etcd-server etcd-client && \
     rm -rf /var/lib/apt/lists/*
 
 # Calicoctl
