@@ -74,6 +74,16 @@ func main() {
 	defer stop()
 
 	var wg sync.WaitGroup
+	activeConn := netutil.NewActiveConnHolder()
+
+	// Start long-lived TAP -> Socket forwarder goroutine across sessions
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := netutil.ForwardTapToSocket(tap, activeConn); err != nil {
+			log.Printf("TAP reader stopped: %v", err)
+		}
+	}()
 
 	if *mode == "server" {
 		// Cleanup stale socket
@@ -107,6 +117,7 @@ func main() {
 				case <-ctx.Done():
 					// Clean exit
 					log.Println("Listener closed, exiting daemon")
+					wg.Wait()
 					return
 				default:
 				}
@@ -118,7 +129,7 @@ func main() {
 			log.Printf("Accepted connection")
 
 			// Handle the connection session
-			handleSession(ctx, &wg, tap, conn)
+			handleSession(ctx, activeConn, tap, conn)
 			log.Printf("Connection closed, waiting for next connection...")
 		}
 	} else if *mode == "client" {
@@ -127,6 +138,7 @@ func main() {
 		for i := 0; i < 10; i++ {
 			select {
 			case <-ctx.Done():
+				wg.Wait()
 				return
 			default:
 			}
@@ -149,14 +161,20 @@ func main() {
 			tap.Close()
 		}()
 
-		handleSession(ctx, &wg, tap, conn)
+		handleSession(ctx, activeConn, tap, conn)
+		wg.Wait()
 	} else {
 		log.Fatalf("Invalid mode: %s", *mode)
 	}
 }
 
-func handleSession(ctx context.Context, wg *sync.WaitGroup, tap *water.Interface, conn net.Conn) {
-	defer conn.Close()
+func handleSession(ctx context.Context, activeConn *netutil.ActiveConnHolder, tap *water.Interface, conn net.Conn) {
+	defer func() {
+		activeConn.Clear(conn)
+		conn.Close()
+	}()
+
+	activeConn.Set(conn)
 
 	// Ensure we close the connection if context is cancelled during the session
 	sessionCtx, sessionCancel := context.WithCancel(ctx)
@@ -167,20 +185,9 @@ func handleSession(ctx context.Context, wg *sync.WaitGroup, tap *water.Interface
 		conn.Close()
 	}()
 
-	errChan := make(chan error, 2)
-
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		err := netutil.CopyFromTapToSocket(tap, conn)
-		select {
-		case errChan <- err:
-		default:
-		}
-	}()
+	errChan := make(chan error, 1)
 
 	go func() {
-		defer wg.Done()
 		err := netutil.CopyFromSocketToTap(conn, tap)
 		select {
 		case errChan <- err:
@@ -195,7 +202,5 @@ func handleSession(ctx context.Context, wg *sync.WaitGroup, tap *water.Interface
 	case err := <-errChan:
 		log.Printf("Connection session ended: %v", err)
 	}
-
-	// Wait for goroutines to drain
-	wg.Wait()
 }
+

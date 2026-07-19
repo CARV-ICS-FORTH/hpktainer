@@ -6,31 +6,77 @@ import (
 	"io"
 	"net"
 
+	"sync"
+
 	"github.com/songgao/water"
 )
 
-// CopyFromTapToSocket reads packets from the TAP interface and writes them to the socket
-// with a 4-byte length prefix in a SINGLE system call to prevent queue overflow.
-func CopyFromTapToSocket(tap *water.Interface, conn net.Conn) error {
-	// Allocate a 64k buffer. We reserve the first 4 bytes for the length header.
+// ActiveConnHolder holds the active net.Conn in a thread-safe manner for TAP-to-socket packet forwarding across sessions.
+type ActiveConnHolder struct {
+	mu   sync.Mutex
+	conn net.Conn
+}
+
+// NewActiveConnHolder creates a new ActiveConnHolder.
+func NewActiveConnHolder() *ActiveConnHolder {
+	return &ActiveConnHolder{}
+}
+
+// Set updates the current active connection.
+func (h *ActiveConnHolder) Set(conn net.Conn) {
+	h.mu.Lock()
+	h.conn = conn
+	h.mu.Unlock()
+}
+
+// Get returns the current active connection, or nil if none is set.
+func (h *ActiveConnHolder) Get() net.Conn {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.conn
+}
+
+// Clear sets the current active connection to nil only if it currently equals target.
+func (h *ActiveConnHolder) Clear(target net.Conn) {
+	h.mu.Lock()
+	if h.conn == target {
+		h.conn = nil
+	}
+	h.mu.Unlock()
+}
+
+// ForwardTapToSocket continuously reads packets from the TAP interface and writes them to the active socket connection.
+// If no connection is active, packets are dropped. It exits when reading from tap fails (e.g. when TAP is closed).
+func ForwardTapToSocket(tap *water.Interface, activeConn *ActiveConnHolder) error {
 	buf := make([]byte, 65536)
 
 	for {
-		// Read from TAP directly into the buffer, offset by exactly 4 bytes
 		n, err := tap.Read(buf[4:])
 		if err != nil {
 			return fmt.Errorf("read from tap error: %w", err)
 		}
 
-		// Write the 4-byte length prefix at the very beginning of the buffer
-		binary.BigEndian.PutUint32(buf[:4], uint32(n))
+		conn := activeConn.Get()
+		if conn == nil {
+			// No active session; drop stray TAP packet
+			continue
+		}
 
-		// Write the header AND the payload to the UNIX socket in ONE shot
+		binary.BigEndian.PutUint32(buf[:4], uint32(n))
 		if _, err := conn.Write(buf[:4+n]); err != nil {
-			return fmt.Errorf("write to socket error: %w", err)
+			// Socket write error (e.g., connection closed); close connection to wake up socket reader if needed.
+			_ = conn.Close()
 		}
 	}
 }
+
+// CopyFromTapToSocket reads packets from the TAP interface and writes them to a specific socket connection.
+func CopyFromTapToSocket(tap *water.Interface, conn net.Conn) error {
+	holder := NewActiveConnHolder()
+	holder.Set(conn)
+	return ForwardTapToSocket(tap, holder)
+}
+
 
 // CopyFromSocketToTap reads length-prefixed packets from the socket and writes them to the TAP interface.
 func CopyFromSocketToTap(conn net.Conn, tap *water.Interface) error {
