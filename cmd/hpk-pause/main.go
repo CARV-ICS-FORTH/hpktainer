@@ -293,6 +293,57 @@ func cleanEnvironment() error {
 	return nil
 }
 
+func getHostResolvConf(kubeDNSIP string) string {
+	paths := []string{"/etc/resolv.conf", "/run/systemd/resolve/resolv.conf"}
+	var raw string
+	for _, p := range paths {
+		if b, err := os.ReadFile(p); err == nil {
+			content := string(b)
+			if strings.Contains(content, "127.0.0.53") && p == "/etc/resolv.conf" {
+				if sysb, sysErr := os.ReadFile("/run/systemd/resolve/resolv.conf"); sysErr == nil && len(strings.TrimSpace(string(sysb))) > 0 {
+					content = string(sysb)
+				}
+			}
+			if len(strings.TrimSpace(content)) > 0 {
+				raw = content
+				break
+			}
+		}
+	}
+
+	if raw == "" {
+		return "nameserver 1.1.1.1\n"
+	}
+
+	var validLines []string
+	hasNameserver := false
+	hasExternalNameserver := false
+	for _, line := range strings.Split(raw, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "nameserver") {
+			parts := strings.Fields(trimmed)
+			if len(parts) >= 2 {
+				ipStr := parts[1]
+				ip := net.ParseIP(ipStr)
+				if ip != nil && (ip.IsLoopback() || ipStr == kubeDNSIP) {
+					continue
+				}
+				hasNameserver = true
+				if !strings.HasPrefix(ipStr, "10.0.") {
+					hasExternalNameserver = true
+				}
+			}
+		}
+		validLines = append(validLines, line)
+	}
+
+	if !hasNameserver || !hasExternalNameserver {
+		validLines = append(validLines, "nameserver 1.1.1.1")
+	}
+
+	return strings.Join(validLines, "\n") + "\n"
+}
+
 func prepareDNS(pod *v1.Pod) error {
 	if err := os.MkdirAll("/scratch/etc", 0755); err != nil {
 		return fmt.Errorf("could not create /scratch/etc folder: %v", err)
@@ -303,13 +354,39 @@ func prepareDNS(pod *v1.Pod) error {
 		return fmt.Errorf("KUBEDNS_IP environment variable not set")
 	}
 
-	// Create and write to /scratch/etc/resolv.conf
-	resolvConfContent := fmt.Sprintf(
-		`
-search %s.svc.cluster.local svc.cluster.local cluster.local
-nameserver %s
-options ndots:5
-`, pod.Namespace, kubeDNSIP)
+	var resolvConfContent string
+	isCoreDNS := strings.HasPrefix(pod.Name, "coredns") || (pod.Labels != nil && pod.Labels["k8s-app"] == "kube-dns")
+	if pod.Spec.DNSPolicy == v1.DNSDefault || isCoreDNS {
+		resolvConfContent = getHostResolvConf(kubeDNSIP)
+	} else if pod.Spec.DNSPolicy == v1.DNSNone {
+		resolvConfContent = ""
+	} else {
+		resolvConfContent = fmt.Sprintf(
+			"search %s.svc.cluster.local svc.cluster.local cluster.local\nnameserver %s\noptions ndots:5\n",
+			pod.Namespace, kubeDNSIP,
+		)
+	}
+
+	if pod.Spec.DNSConfig != nil {
+		var lines []string
+		if resolvConfContent != "" {
+			lines = append(lines, strings.TrimSpace(resolvConfContent))
+		}
+		if len(pod.Spec.DNSConfig.Searches) > 0 {
+			lines = append(lines, fmt.Sprintf("search %s", strings.Join(pod.Spec.DNSConfig.Searches, " ")))
+		}
+		for _, ns := range pod.Spec.DNSConfig.Nameservers {
+			lines = append(lines, fmt.Sprintf("nameserver %s", ns))
+		}
+		for _, opt := range pod.Spec.DNSConfig.Options {
+			if opt.Value != nil {
+				lines = append(lines, fmt.Sprintf("options %s:%s", opt.Name, *opt.Value))
+			} else {
+				lines = append(lines, fmt.Sprintf("options %s", opt.Name))
+			}
+		}
+		resolvConfContent = strings.Join(lines, "\n") + "\n"
+	}
 
 	if err := os.WriteFile("/scratch/etc/resolv.conf", []byte(resolvConfContent), os.ModePerm); err != nil {
 		return fmt.Errorf("error writing to resolv.conf: %v", err)

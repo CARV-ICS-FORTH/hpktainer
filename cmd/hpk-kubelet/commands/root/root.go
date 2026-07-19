@@ -160,6 +160,10 @@ func runRootCommand(ctx context.Context, c Opts) error {
 			return fmt.Errorf("failed to extract hostname from url '%s': %w", restConfig.Host, err)
 		}
 		compute.Environment.KubeMasterHost = kubemaster.Hostname()
+		compute.Environment.KubeMasterPort = kubemaster.Port()
+		if compute.Environment.KubeMasterPort == "" {
+			compute.Environment.KubeMasterPort = "443"
+		}
 
 		DefaultLogger.Info("KubeClient is ready",
 			"Address", restConfig.Host,

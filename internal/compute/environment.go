@@ -25,6 +25,7 @@ import (
 // HostEnvironment containers information about the execution environment.
 type HostEnvironment struct {
 	KubeMasterHost    string
+	KubeMasterPort    string
 	ContainerRegistry string
 	ApptainerBin      string
 

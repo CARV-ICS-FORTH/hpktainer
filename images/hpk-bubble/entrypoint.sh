@@ -233,8 +233,8 @@ data:
   Corefile: |
 $(printf '%s\n' "$UPDATED_COREFILE" | sed 's/^/    /')
 EOF
-        k3s kubectl -n kube-system rollout restart deployment coredns
       fi
+      k3s kubectl -n kube-system rollout restart deployment coredns
     else
       echo "Skipping CoreDNS reconfiguration due to missing deployment or configmap" >&2
     fi

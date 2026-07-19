@@ -72,6 +72,10 @@ trap cleanup INT TERM
 # Namespace
 RESOLV_CONF=resolv.conf.$NAME
 echo "nameserver $DNS_ADDR" > $RESOLV_CONF
+grep -v '127\.0\.0\.' /etc/resolv.conf | grep 'nameserver' >> $RESOLV_CONF || true
+if ! grep -q 'nameserver' $RESOLV_CONF; then
+    echo "nameserver 1.1.1.1" >> $RESOLV_CONF
+fi
 
 mkdir -p $HOME/.hpk
 mkdir -p $HOME/.hpk/.apptainer/tmp

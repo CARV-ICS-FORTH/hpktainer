@@ -94,6 +94,9 @@ func FromServices(ctx context.Context, namespace string, enableServiceLinks ...b
 		// First port - give it the backwards-compatible name.
 		name = makeEnvVariableName(service.Name) + "_SERVICE_PORT"
 		portStr := strconv.Itoa(int(service.Spec.Ports[0].Port))
+		if service.GetNamespace() == metav1.NamespaceDefault && service.GetName() == "kubernetes" && compute.Environment.KubeMasterPort != "" {
+			portStr = compute.Environment.KubeMasterPort
+		}
 		result = append(result, corev1.EnvVar{Name: name, Value: portStr})
 
 		// All named ports (only the first may be unnamed, checked in validation).
