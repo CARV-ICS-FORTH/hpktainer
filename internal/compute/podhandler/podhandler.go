@@ -112,7 +112,17 @@ func parseProcessPID(raw string) (string, error) {
 }
 
 func resolveProcessPIDFromControlFiles(pod *corev1.Pod, podDir endpoint.PodPath, logger logr.Logger) (string, error) {
-	// First check main containers
+	// Primary target: pause container process (pod supervisor)
+	pauseJobIDPath := podDir.PauseJobIDPath()
+	if raw, ok := readStringFromFile(pauseJobIDPath); ok {
+		pid, err := parseProcessPID(raw)
+		if err == nil {
+			return pid, nil
+		}
+		logger.Info(" * Invalid process id in pause control file", "path", pauseJobIDPath, "value", raw, "err", err)
+	}
+
+	// Fallback to main containers
 	for _, container := range pod.Spec.Containers {
 		jobIDPath := podDir.Container(container.Name).IDPath()
 		if raw, ok := readStringFromFile(jobIDPath); ok {

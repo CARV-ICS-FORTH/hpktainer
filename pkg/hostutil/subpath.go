@@ -1,3 +1,5 @@
+//go:build linux
+
 /*
 Copyright 2023 ICS-FORTH
 Copyright 2014 The Kubernetes Authors.
@@ -13,6 +15,7 @@ limitations under the License.
 */
 
 package hostutil
+
 
 import (
 	"fmt"

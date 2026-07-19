@@ -9,7 +9,7 @@ import (
 )
 
 func TestMain(m *testing.M) {
-	tmpDir, err := os.MkdirTemp("/tmp", "randomuser")
+	tmpDir, err := os.MkdirTemp("", "randomuser")
 	if err != nil {
 		panic(err)
 	}

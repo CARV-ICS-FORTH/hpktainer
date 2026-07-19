@@ -67,6 +67,60 @@ func fileExists(filename string) bool {
 	return !info.IsDir()
 }
 
+type containerTracker struct {
+	mu        sync.Mutex
+	processes map[int]*exec.Cmd
+}
+
+func newContainerTracker() *containerTracker {
+	return &containerTracker{
+		processes: make(map[int]*exec.Cmd),
+	}
+}
+
+func (ct *containerTracker) Add(cmd *exec.Cmd) {
+	if ct == nil || cmd == nil || cmd.Process == nil {
+		return
+	}
+	ct.mu.Lock()
+	defer ct.mu.Unlock()
+	ct.processes[cmd.Process.Pid] = cmd
+}
+
+func (ct *containerTracker) Remove(cmd *exec.Cmd) {
+	if ct == nil || cmd == nil || cmd.Process == nil {
+		return
+	}
+	ct.mu.Lock()
+	defer ct.mu.Unlock()
+	delete(ct.processes, cmd.Process.Pid)
+}
+
+func (ct *containerTracker) SignalAll(sig os.Signal) {
+	if ct == nil {
+		return
+	}
+	ct.mu.Lock()
+	cmds := make([]*exec.Cmd, 0, len(ct.processes))
+	for _, cmd := range ct.processes {
+		cmds = append(cmds, cmd)
+	}
+	ct.mu.Unlock()
+
+	for _, cmd := range cmds {
+		if cmd != nil && cmd.Process != nil {
+			log.Info().Msgf("Sending signal %v to process %d", sig, cmd.Process.Pid)
+			pgid, err := syscall.Getpgid(cmd.Process.Pid)
+			if err == nil && pgid > 1 {
+				if sysSig, ok := sig.(syscall.Signal); ok {
+					_ = syscall.Kill(-pgid, sysSig)
+				}
+			}
+			_ = cmd.Process.Signal(sig)
+		}
+	}
+}
+
 func main() {
 	var podID string
 	var namespaceID string
@@ -122,22 +176,18 @@ acquire_pod_loop:
 		panic(err)
 	}
 
-	if err := prepareContainers(pod); err != nil {
-		log.Error().Err(err).Msg("Error preparing container environment")
-		return
-	}
+	podKey := client.ObjectKeyFromObject(pod)
+	hpk := endpoint.HPK(pod.Annotations["workingDirectory"])
+	podPath := hpk.Pod(podKey)
 
-	if len(pod.Spec.InitContainers) > 0 {
-		if err := handleInitContainers(pod); err != nil {
-			log.Error().Err(err).Msg("Error executing init containers")
-			return
+	pausePID := os.Getpid()
+	if err := os.MkdirAll(podPath.ControlFileDir(), 0755); err == nil {
+		if err := os.WriteFile(podPath.PauseJobIDPath(), []byte(fmt.Sprintf("pid://%d", pausePID)), 0644); err != nil {
+			log.Error().Err(err).Msg("Failed to write pause jobid file")
 		}
 	}
 
-	if err := handleContainers(pod, &wg); err != nil {
-		log.Error().Err(err).Msg("Error executing main containers")
-		return
-	}
+	tracker := newContainerTracker()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	signalChan := make(chan os.Signal, 1)
@@ -149,42 +199,63 @@ acquire_pod_loop:
 			case signo := <-signalChan:
 				switch signo {
 				case syscall.SIGINT, syscall.SIGTERM:
-					// Termination handling of the pause container by external signals
-					log.Info().Msgf("Received %v. Cleaning up...\n", signo)
+					log.Info().Msgf("Received %v. Terminating container children...", signo)
+					tracker.SignalAll(syscall.SIGTERM)
 
-					// Ensure completion of bookkeeping before handling sigchld
-					wg.Wait()
+					done := make(chan struct{})
+					go func() {
+						wg.Wait()
+						close(done)
+					}()
 
-					// Initiate cleanup
+					select {
+					case <-done:
+						log.Info().Msg("All containers terminated gracefully")
+					case <-time.After(30 * time.Second):
+						log.Warn().Msg("Grace period (30s) expired, sending SIGKILL to remaining containers")
+						tracker.SignalAll(syscall.SIGKILL)
+						<-done
+					}
+
 					cancel()
+					return
 
 				case syscall.SIGCHLD:
-					// SIGCHLD handling - reap zombie processes
-					log.Info().Msg("Received SIGCHLD. Containers have terminated. ")
-
-					// Ensure completion of bookkeeping before handling sigchld
-					wg.Wait()
+					log.Info().Msg("Received SIGCHLD.")
 					for {
 						pid, err := syscall.Wait4(-1, nil, syscall.WNOHANG, nil)
 						if pid <= 0 {
-							if err != nil {
-								log.Error().Err(err).Msg("Error stopping hpk-pause")
+							if err != nil && err != syscall.ECHILD {
+								log.Error().Err(err).Msg("Error reaping child process")
 							}
 							break
 						}
-						log.Info().Msgf("pid: %v", pid)
+						log.Info().Msgf("Reaped pid: %v", pid)
 					}
-
-					// Initiate cleanup after SIGCHLD handling
-					cancel()
 				}
 			case <-ctx.Done():
 				log.Info().Msg("Containers and context have terminated. Exiting...")
 				return
 			}
-
 		}
 	}()
+
+	if err := prepareContainers(pod); err != nil {
+		log.Error().Err(err).Msg("Error preparing container environment")
+		return
+	}
+
+	if len(pod.Spec.InitContainers) > 0 {
+		if err := handleInitContainers(pod, tracker); err != nil {
+			log.Error().Err(err).Msg("Error executing init containers")
+			return
+		}
+	}
+
+	if err := handleContainers(pod, &wg, tracker); err != nil {
+		log.Error().Err(err).Msg("Error executing main containers")
+		return
+	}
 
 	log.Info().Msg("Containers have started. Now waiting on context or signals")
 	<-ctx.Done()
@@ -428,7 +499,7 @@ func DebugDNSInfo(resolvConfContent string, hostsContent string) {
 
 }
 
-func handleInitContainers(pod *v1.Pod) error {
+func handleInitContainers(pod *v1.Pod, tracker *containerTracker) error {
 	isDebug := os.Getenv("DEBUG_MODE") == "true"
 	podKey := client.ObjectKeyFromObject(pod)
 	hpk := endpoint.HPK(pod.Annotations["workingDirectory"])
@@ -536,6 +607,7 @@ func handleInitContainers(pod *v1.Pod) error {
 		// Execute Apptainer (Blocking)
 		log.Debug().Msg(fmt.Sprintf("ApptainerArgs: %v", apptainerArgs))
 		cmd := exec.Command("apptainer", apptainerArgs...)
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		cmd.Env = os.Environ()
 
 		// Open log file
@@ -548,10 +620,19 @@ func handleInitContainers(pod *v1.Pod) error {
 		// // Redirect output to log file
 		cmd.Stdout = logFile
 		cmd.Stderr = logFile
-		if err := cmd.Run(); err != nil {
+		if err := cmd.Start(); err != nil {
+			log.Error().Err(err).Msgf("Error starting init container: %s", container.Name)
+			return fmt.Errorf("init container start failed: %v", err)
+		}
+		tracker.Add(cmd)
+
+		if err := cmd.Wait(); err != nil {
+			tracker.Remove(cmd)
 			log.Error().Err(err).Msgf("Error executing init container: %s", container.Name)
 			return fmt.Errorf("init container failed: %v", err) // Abort on failure
 		}
+		tracker.Remove(cmd)
+
 		if err := os.WriteFile(containerPath.ExitCodePath(), []byte(strconv.Itoa(cmd.ProcessState.ExitCode())), 0644); err != nil {
 			return fmt.Errorf("failed to create exitCode file") // Log the error
 		}
@@ -559,7 +640,7 @@ func handleInitContainers(pod *v1.Pod) error {
 	return nil
 }
 
-func handleContainers(pod *v1.Pod, wg *sync.WaitGroup) error {
+func handleContainers(pod *v1.Pod, wg *sync.WaitGroup, tracker *containerTracker) error {
 	isDebug := os.Getenv("DEBUG_MODE") == "true"
 	podKey := client.ObjectKeyFromObject(pod)
 	hpk := endpoint.HPK(pod.Annotations["workingDirectory"])
@@ -663,6 +744,7 @@ func handleContainers(pod *v1.Pod, wg *sync.WaitGroup) error {
 			// Execute Apptainer in Background
 			log.Debug().Msg(fmt.Sprintf("ApptainerArgs: %v", apptainerArgs))
 			cmd := exec.Command("apptainer", apptainerArgs...)
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 			cmd.Env = os.Environ()
 			// If needed, get references to stdout and stderr
 			// log.Debug().Msgf("LogPath: %s", containerPath.LogsPath())
@@ -676,11 +758,13 @@ func handleContainers(pod *v1.Pod, wg *sync.WaitGroup) error {
 			cmd.Stdout = logFile
 			cmd.Stderr = logFile
 			log.Info().Msgf("Spawning main container: %s", container.Name)
-			// Start the  container
+			// Start the container
 			if err := cmd.Start(); err != nil {
 				log.Error().Err(err).Msg("Failed to start Apptainer container")
 				return
 			}
+			tracker.Add(cmd)
+			defer tracker.Remove(cmd)
 
 			// Get the PID
 			pid := cmd.Process.Pid

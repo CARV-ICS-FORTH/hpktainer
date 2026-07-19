@@ -254,6 +254,11 @@ func (p PodPath) IPAddressPath() string {
 	return filepath.Join(p.ControlFileDir(), string(ExtensionIP))
 }
 
+// PauseJobIDPath points to $HPK/<namespace>/<podName>/controlfiles/pause.jobid
+func (p PodPath) PauseJobIDPath() string {
+	return filepath.Join(p.ControlFileDir(), "pause"+string(ExtensionJobID))
+}
+
 /*
 	Container-Related paths captured by the Event Listener.
 	They are necessary to drive the lifecycle of a Container.

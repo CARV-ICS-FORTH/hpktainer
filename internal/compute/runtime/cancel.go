@@ -16,41 +16,41 @@
 package runtime
 
 import (
-	"fmt"
-	"strings"
-
 	"errors"
-	"hpk/pkg/process"
+	"fmt"
+	"strconv"
+	"strings"
+	"syscall"
 )
 
 var ErrInvalidJob = errors.New("invalid job id")
 
-// KillProcessByPID terminates a process by its PID using kill command.
+// KillProcessByPID terminates a process by its PID using syscall.Kill.
 // Returns an error if the process cannot be terminated.
-func KillProcessByPID(pid string) (string, error) {
-	pid = strings.TrimSpace(pid)
-	if pid == "" {
+func KillProcessByPID(pidStr string) (string, error) {
+	pidStr = strings.TrimSpace(pidStr)
+	if pidStr == "" {
 		return "", ErrInvalidJob
 	}
 
-	/*
-	 Install trap for the signals INT and TERM to
-	 terminate the process and its children.
-	 Send SIGTERM using kill to the main process
-	 and wait for it to close gracefully.
-	*/
-	out, err := process.Execute("kill", "-TERM", pid)
+	pid, err := strconv.Atoi(pidStr)
 	if err != nil {
-		outStr := string(out)
-
-		// if the process does not exist, consider it as terminated
-		if strings.Contains(outStr, "No such process") || strings.Contains(outStr, "arguments must be process or job IDs") {
-			return outStr, ErrInvalidJob
-		}
-
-		// Also check if process already exited
-		return string(out), fmt.Errorf("Could not kill process '%s': %w", pid, err)
+		return "", fmt.Errorf("%w: invalid pid '%s': %v", ErrInvalidJob, pidStr, err)
 	}
 
-	return string(out), nil
+	/*
+		Send SIGTERM using syscall.Kill to the process
+		and allow it to close gracefully.
+	*/
+	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
+		// If the process does not exist (ESRCH), consider it as already terminated.
+		if errors.Is(err, syscall.ESRCH) {
+			return "", ErrInvalidJob
+		}
+
+		return "", fmt.Errorf("could not kill process '%d': %w", pid, err)
+	}
+
+	return "", nil
 }
+

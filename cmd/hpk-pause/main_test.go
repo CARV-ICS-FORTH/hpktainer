@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"sync"
 	"testing"
 
@@ -14,10 +15,13 @@ import (
 
 // Test for successful init container execution
 func TestHandleInitContainers_Success(t *testing.T) {
+	if _, err := exec.LookPath("apptainer"); err != nil {
+		t.Skip("apptainer executable not found in PATH")
+	}
 
-	// Create a test Pod
+	workDir := t.TempDir()
 	annotations := make(map[string]string)
-	annotations["workingDirectory"] = "/home/malvag"
+	annotations["workingDirectory"] = workDir
 	pod := &v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        "test-init-pod",
@@ -49,7 +53,8 @@ func TestHandleInitContainers_Success(t *testing.T) {
 		t.Errorf("create pod directory failed unexpectedly: %v", err)
 	}
 
-	if err := handleInitContainers(pod); err != nil {
+	tracker := newContainerTracker()
+	if err := handleInitContainers(pod, tracker); err != nil {
 		t.Errorf("handleInitContainers failed unexpectedly: %v", err)
 	}
 	//  Verify log file contents (adjust the path as needed based on your implementation)
@@ -72,12 +77,15 @@ func TestHandleInitContainers_Success(t *testing.T) {
 	}
 }
 
-// Test for successful init container execution
+// Test for successful main container execution
 func TestHandleContainers_Success(t *testing.T) {
+	if _, err := exec.LookPath("apptainer"); err != nil {
+		t.Skip("apptainer executable not found in PATH")
+	}
 
-	// Create a test Pod
+	workDir := t.TempDir()
 	annotations := make(map[string]string)
-	annotations["workingDirectory"] = "/home/malvag"
+	annotations["workingDirectory"] = workDir
 	pod := &v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        "test-main-pod",
@@ -110,7 +118,8 @@ func TestHandleContainers_Success(t *testing.T) {
 	}
 
 	var wg sync.WaitGroup
-	if err := handleContainers(pod, &wg); err != nil {
+	tracker := newContainerTracker()
+	if err := handleContainers(pod, &wg, tracker); err != nil {
 		t.Errorf("handleContainers failed unexpectedly: %v", err)
 	}
 
@@ -135,3 +144,18 @@ func TestHandleContainers_Success(t *testing.T) {
 		t.Errorf("Unexpected exitCode. Got: %v, Expected: %v", string(exitData), 0)
 	}
 }
+
+func TestContainerTracker(t *testing.T) {
+	tracker := newContainerTracker()
+	if tracker == nil {
+		t.Fatalf("expected non-nil containerTracker")
+	}
+
+	// Signalling nil or empty tracker should not panic
+	tracker.SignalAll(os.Interrupt)
+
+	// Test adding and removing nil cmd
+	tracker.Add(nil)
+	tracker.Remove(nil)
+}
+

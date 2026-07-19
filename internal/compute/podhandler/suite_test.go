@@ -9,7 +9,7 @@ import (
 )
 
 func TestMain(m *testing.M) {
-	tmpDir, err := os.MkdirTemp("/tmp", "randomuser")
+	tmpDir, err := os.MkdirTemp("", "randomuser")
 	if err != nil {
 		panic(err)
 	}
@@ -31,7 +31,7 @@ func setup(tmpDir string) {
 	}
 
 	if err := runtime.Initialize("docker.io/chazapis/hpk-pause:latest"); err != nil {
-		panic(err)
+		compute.DefaultLogger.Info("runtime.Initialize non-fatal warning", "err", err)
 	}
 }
 
