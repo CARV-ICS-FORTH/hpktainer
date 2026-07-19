@@ -73,13 +73,7 @@ func (h *EventHandler) Push(event fsnotify.Event) {
 		return
 	}
 
-	select {
-	case h.Queue <- event:
-	default:
-		compute.DefaultLogger.Info("drop event due to queue being full.",
-			"event", event.String(),
-		)
-	}
+	h.Queue <- event
 }
 
 type PodControl struct {

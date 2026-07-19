@@ -426,7 +426,7 @@ func (v *VirtualK8S) NotifyPods(ctx context.Context, f func(*corev1.Pod)) {
 	/*-- start event handler --*/
 	eh := events.NewEventHandler(events.Options{
 		MaxWorkers:   5,
-		MaxQueueSize: 20,
+		MaxQueueSize: 1024,
 	})
 
 	go eh.Listen(ctx, events.PodControl{
@@ -445,6 +445,21 @@ func (v *VirtualK8S) NotifyPods(ctx context.Context, f func(*corev1.Pod)) {
 			)
 		},
 	})
+
+	/*-- periodic reconcile of non-terminal pods --*/
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				v.reconcileNonTerminalPods()
+			}
+		}
+	}()
 
 	/*-- add fileWatcher events to queue to be processed asynchronously --*/
 	go func() {
@@ -468,6 +483,39 @@ func (v *VirtualK8S) NotifyPods(ctx context.Context, f func(*corev1.Pod)) {
 			}
 		}
 	}()
+}
+
+func (v *VirtualK8S) reconcileNonTerminalPods() {
+	if err := compute.HPK.WalkPodDirectories(func(path endpoint.PodPath) error {
+		podKey := client.ObjectKey{
+			Namespace: filepath.Base(filepath.Dir(string(path))),
+			Name:      filepath.Base(string(path)),
+		}
+
+		pod, err := PodHandler.LoadPodFromKey(podKey)
+		if err != nil {
+			return nil
+		}
+
+		if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+			return nil
+		}
+
+		oldPhase := pod.Status.Phase
+		PodHandler.UpdateStatusFromRuntime(pod)
+
+		if v.updatedPod != nil {
+			v.updatedPod(pod)
+			v.Logger.Info("Periodic reconcile checked pod status",
+				"pod", podKey,
+				"oldPhase", oldPhase,
+				"newPhase", pod.Status.Phase,
+			)
+		}
+		return nil
+	}); err != nil {
+		v.Logger.Error(err, "Periodic pod reconcile failed")
+	}
 }
 
 func (v *VirtualK8S) PortForward(ctx context.Context, namespace, pod string, port int32, stream io.ReadWriteCloser) error {
