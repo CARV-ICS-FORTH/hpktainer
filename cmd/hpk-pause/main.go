@@ -242,18 +242,21 @@ acquire_pod_loop:
 
 	if err := prepareContainers(pod); err != nil {
 		log.Error().Err(err).Msg("Error preparing container environment")
+		_ = os.WriteFile(podPath.SysErrorFilePath(), []byte(fmt.Sprintf("Error preparing container environment: %v", err)), 0644)
 		return
 	}
 
 	if len(pod.Spec.InitContainers) > 0 {
 		if err := handleInitContainers(pod, tracker); err != nil {
 			log.Error().Err(err).Msg("Error executing init containers")
+			_ = os.WriteFile(podPath.SysErrorFilePath(), []byte(fmt.Sprintf("Error executing init containers: %v", err)), 0644)
 			return
 		}
 	}
 
 	if err := handleContainers(pod, &wg, tracker); err != nil {
 		log.Error().Err(err).Msg("Error executing main containers")
+		_ = os.WriteFile(podPath.SysErrorFilePath(), []byte(fmt.Sprintf("Error executing main containers: %v", err)), 0644)
 		return
 	}
 
@@ -499,6 +502,22 @@ func DebugDNSInfo(resolvConfContent string, hostsContent string) {
 
 }
 
+func parseEnvVars(output []byte) []v1.EnvVar {
+	var envs []v1.EnvVar
+	lines := strings.Split(string(output), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) == 2 {
+			envs = append(envs, v1.EnvVar{Name: parts[0], Value: parts[1]})
+		}
+	}
+	return envs
+}
+
 func handleInitContainers(pod *v1.Pod, tracker *containerTracker) error {
 	isDebug := os.Getenv("DEBUG_MODE") == "true"
 	podKey := client.ObjectKeyFromObject(pod)
@@ -514,6 +533,7 @@ func handleInitContainers(pod *v1.Pod, tracker *containerTracker) error {
 		envFilePath := containerPath.EnvFilePath()
 
 		// Environment File Handling
+		var containerEnvs []v1.EnvVar
 		if fileExists(envFilePath) {
 			output, err := exec.Command("sh", "-c", envFilePath).CombinedOutput()
 			if err != nil {
@@ -523,6 +543,9 @@ func handleInitContainers(pod *v1.Pod, tracker *containerTracker) error {
 			if err := os.WriteFile(envFileName, output, 0644); err != nil {
 				return fmt.Errorf("error writing env file: %v", err)
 			}
+			containerEnvs = parseEnvVars(output)
+		} else {
+			containerEnvs = container.Env
 		}
 
 		executionMode := "exec"
@@ -538,12 +561,7 @@ func handleInitContainers(pod *v1.Pod, tracker *containerTracker) error {
 
 			subPath := mount.SubPath
 			if mount.SubPathExpr != "" {
-
-				podEnv, err := podhandler.FromServicesForPod(context.Background(), pod)
-				if err != nil {
-					compute.SystemPanic(err, "failed to get service env vars for pod '%s'", podKey)
-				}
-				path, err := kubecontainer.ExpandContainerVolumeMounts(mount, podEnv)
+				path, err := kubecontainer.ExpandContainerVolumeMounts(mount, containerEnvs)
 				if err != nil {
 					compute.SystemPanic(err, "cannot expand env variables for container '%s' of pod '%s'", container.Name, podKey)
 				}
@@ -601,6 +619,7 @@ func handleInitContainers(pod *v1.Pod, tracker *containerTracker) error {
 		// Get the PID
 		pid := os.Getpid()
 		if err := os.WriteFile(containerPath.IDPath(), []byte(fmt.Sprintf("pid://%d", pid)), 0644); err != nil {
+			_ = os.WriteFile(containerPath.ExitCodePath(), []byte("128"), 0644)
 			return fmt.Errorf("failed to create pid file") // Log the error
 		}
 
@@ -613,6 +632,7 @@ func handleInitContainers(pod *v1.Pod, tracker *containerTracker) error {
 		// Open log file
 		logFile, err := os.Create(containerPath.LogsPath())
 		if err != nil {
+			_ = os.WriteFile(containerPath.ExitCodePath(), []byte("128"), 0644)
 			return fmt.Errorf("failed to create log file: %v", err)
 		}
 		defer logFile.Close()
@@ -622,6 +642,7 @@ func handleInitContainers(pod *v1.Pod, tracker *containerTracker) error {
 		cmd.Stderr = logFile
 		if err := cmd.Start(); err != nil {
 			log.Error().Err(err).Msgf("Error starting init container: %s", container.Name)
+			_ = os.WriteFile(containerPath.ExitCodePath(), []byte("128"), 0644)
 			return fmt.Errorf("init container start failed: %v", err)
 		}
 		tracker.Add(cmd)
@@ -629,6 +650,11 @@ func handleInitContainers(pod *v1.Pod, tracker *containerTracker) error {
 		if err := cmd.Wait(); err != nil {
 			tracker.Remove(cmd)
 			log.Error().Err(err).Msgf("Error executing init container: %s", container.Name)
+			exitCode := 128
+			if cmd.ProcessState != nil && cmd.ProcessState.ExitCode() >= 0 {
+				exitCode = cmd.ProcessState.ExitCode()
+			}
+			_ = os.WriteFile(containerPath.ExitCodePath(), []byte(strconv.Itoa(exitCode)), 0644)
 			return fmt.Errorf("init container failed: %v", err) // Abort on failure
 		}
 		tracker.Remove(cmd)
@@ -654,6 +680,7 @@ func handleContainers(pod *v1.Pod, wg *sync.WaitGroup, tracker *containerTracker
 		envFilePath := containerPath.EnvFilePath()
 
 		// Environment File Handling
+		var containerEnvs []v1.EnvVar
 		if fileExists(envFilePath) {
 			output, err := exec.Command("sh", "-c", envFilePath).CombinedOutput()
 			if err != nil {
@@ -663,6 +690,9 @@ func handleContainers(pod *v1.Pod, wg *sync.WaitGroup, tracker *containerTracker
 			if err := os.WriteFile(envFileName, output, 0644); err != nil {
 				return fmt.Errorf("error writing env file: %v", err)
 			}
+			containerEnvs = parseEnvVars(output)
+		} else {
+			containerEnvs = container.Env
 		}
 
 		executionMode := "exec"
@@ -678,12 +708,7 @@ func handleContainers(pod *v1.Pod, wg *sync.WaitGroup, tracker *containerTracker
 
 			subPath := mount.SubPath
 			if mount.SubPathExpr != "" {
-
-				podEnv, err := podhandler.FromServicesForPod(context.Background(), pod)
-				if err != nil {
-					compute.SystemPanic(err, "failed to get service env vars for pod '%s'", podKey)
-				}
-				path, err := kubecontainer.ExpandContainerVolumeMounts(mount, podEnv)
+				path, err := kubecontainer.ExpandContainerVolumeMounts(mount, containerEnvs)
 				if err != nil {
 					compute.SystemPanic(err, "cannot expand env variables for container '%s' of pod '%s'", container.Name, podKey)
 				}
@@ -751,6 +776,7 @@ func handleContainers(pod *v1.Pod, wg *sync.WaitGroup, tracker *containerTracker
 			logFile, err := os.Create(containerPath.LogsPath())
 			if err != nil {
 				log.Error().Err(err).Msgf("Failed to create log file %s", containerPath.LogsPath())
+				_ = os.WriteFile(containerPath.ExitCodePath(), []byte("128"), 0644)
 				return
 			}
 			defer logFile.Close()
@@ -761,6 +787,7 @@ func handleContainers(pod *v1.Pod, wg *sync.WaitGroup, tracker *containerTracker
 			// Start the container
 			if err := cmd.Start(); err != nil {
 				log.Error().Err(err).Msg("Failed to start Apptainer container")
+				_ = os.WriteFile(containerPath.ExitCodePath(), []byte("128"), 0644)
 				return
 			}
 			tracker.Add(cmd)
@@ -770,6 +797,7 @@ func handleContainers(pod *v1.Pod, wg *sync.WaitGroup, tracker *containerTracker
 			pid := cmd.Process.Pid
 			if err := os.WriteFile(containerPath.IDPath(), []byte(fmt.Sprintf("pid://%d", pid)), 0644); err != nil {
 				log.Error().Err(err).Msg("Failed to create pid file") // Log the error
+				_ = os.WriteFile(containerPath.ExitCodePath(), []byte("128"), 0644)
 				return
 			}
 
@@ -778,7 +806,12 @@ func handleContainers(pod *v1.Pod, wg *sync.WaitGroup, tracker *containerTracker
 				log.Error().Err(err).Msgf("error executing container: %s, because of %v", container.Name, err)
 			}
 
-			if err := os.WriteFile(containerPath.ExitCodePath(), []byte(strconv.Itoa(cmd.ProcessState.ExitCode())), 0644); err != nil {
+			exitCode := 128
+			if cmd.ProcessState != nil && cmd.ProcessState.ExitCode() >= 0 {
+				exitCode = cmd.ProcessState.ExitCode()
+			}
+
+			if err := os.WriteFile(containerPath.ExitCodePath(), []byte(strconv.Itoa(exitCode)), 0644); err != nil {
 				log.Error().Err(err).Msg("Failed to create exitCode file") // Log the error
 				return
 			}

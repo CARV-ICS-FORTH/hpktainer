@@ -30,7 +30,7 @@ func SubmitJob(scriptFile string) (string, error) {
 	quotedOutput := shellescape.Quote(outputFile)
 
 	// Execute script directly via bash in background
-	commandString := fmt.Sprintf("nohup bash -l -c 'source %s' >> %s 2>&1 &", quotedScript, quotedOutput)
+	commandString := fmt.Sprintf("nohup bash -l %s >> %s 2>&1 &", quotedScript, quotedOutput)
 	out, err := process.Execute("bash", "-c", commandString)
 	fmt.Println("Submitting (Direct bash mode): ", commandString)
 

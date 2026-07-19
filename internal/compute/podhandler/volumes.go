@@ -25,6 +25,7 @@ import (
 	"errors"
 	"hpk/internal/compute/endpoint"
 	"hpk/internal/compute/volume/configmap"
+	"hpk/internal/compute/volume/downwardapi"
 	"hpk/internal/compute/volume/emptydir"
 	"hpk/internal/compute/volume/hostpath"
 	"hpk/internal/compute/volume/projected"
@@ -34,7 +35,6 @@ import (
 	mounter "k8s.io/utils/mount"
 
 	"hpk/internal/compute"
-	"hpk/pkg/fieldpath"
 
 	"github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
@@ -249,28 +249,28 @@ func (h *PodHandler) DownwardAPIVolumeSource(ctx context.Context, vol corev1.Vol
 		return fmt.Errorf("cannot create dir '%s': %w", downApiDir, err)
 	}
 
-	mode := fs.FileMode(0644)
-	if vol.DownwardAPI != nil && vol.DownwardAPI.DefaultMode != nil {
-		mode = fs.FileMode(*vol.DownwardAPI.DefaultMode)
+	if vol.DownwardAPI == nil {
+		return nil
 	}
 
-	if vol.DownwardAPI != nil {
-		for _, item := range vol.DownwardAPI.Items {
-			if item.FieldRef == nil {
-				continue
-			}
+	defaultMode := int32(0644)
+	if vol.DownwardAPI.DefaultMode != nil {
+		defaultMode = *vol.DownwardAPI.DefaultMode
+	}
 
-			itemPath := filepath.Join(downApiDir, item.Path)
-			value, err := fieldpath.ExtractFieldPathAsString(h.Pod, item.FieldRef.FieldPath)
-			if err != nil {
-				compute.PodError(h.Pod, compute.ReasonSpecError, "%v", err)
+	data, err := downwardapi.CollectData(vol.DownwardAPI.Items, h.Pod, &defaultMode)
+	if err != nil {
+		compute.PodError(h.Pod, compute.ReasonSpecError, "%v", err)
+		return err
+	}
 
-				return err
-			}
-
-			if err := os.WriteFile(itemPath, []byte(value), mode); err != nil {
-				return fmt.Errorf("cannot write config map file '%s': %w", itemPath, err)
-			}
+	for relPath, fileProj := range data {
+		itemPath := filepath.Join(downApiDir, relPath)
+		if err := os.MkdirAll(filepath.Dir(itemPath), endpoint.PodGlobalDirectoryPermissions); err != nil {
+			return fmt.Errorf("cannot create dir '%s': %w", filepath.Dir(itemPath), err)
+		}
+		if err := os.WriteFile(itemPath, fileProj.Data, fs.FileMode(fileProj.Mode)); err != nil {
+			return fmt.Errorf("cannot write downwardAPI file '%s': %w", itemPath, err)
 		}
 	}
 

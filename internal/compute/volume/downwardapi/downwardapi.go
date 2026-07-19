@@ -56,19 +56,13 @@ func CollectData(items []corev1.DownwardAPIVolumeFile, pod *corev1.Pod, defaultM
 				fileProjection.Data = []byte(values)
 			}
 		} else if fileInfo.ResourceFieldRef != nil {
-			/*
-				containerName := fileInfo.ResourceFieldRef.ContainerName
-				nodeAllocatable, err := host.GetNodeAllocatable()
-				if err != nil {
-					errlist = append(errlist, err)
-				} else if values, err := resource.ExtractResourceValueByContainerNameAndNodeAllocatable(fileInfo.ResourceFieldRef, pod, containerName, nodeAllocatable); err != nil {
-					klog.Errorf("Unable to extract field %s: %s", fileInfo.ResourceFieldRef.Resource, err.Error())
-					errlist = append(errlist, err)
-				} else {
-					fileProjection.Data = []byte(values)
-				}
-
-			*/
+			err := fmt.Errorf("resourceFieldRef is unsupported for container '%s', resource '%s' at path '%s'", fileInfo.ResourceFieldRef.ContainerName, fileInfo.ResourceFieldRef.Resource, fileInfo.Path)
+			klog.Errorf("%v", err)
+			errlist = append(errlist, err)
+		} else {
+			err := fmt.Errorf("fieldRef and resourceFieldRef are both missing for path '%s'", fileInfo.Path)
+			klog.Errorf("%v", err)
+			errlist = append(errlist, err)
 		}
 
 		data[fPath] = fileProjection
