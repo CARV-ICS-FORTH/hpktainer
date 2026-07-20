@@ -159,3 +159,41 @@ func TestContainerTracker(t *testing.T) {
 	tracker.Remove(nil)
 }
 
+func TestParseEnvVars_MultiLine(t *testing.T) {
+	output := []byte("FOO=bar\nCERT=-----BEGIN CERTIFICATE-----\nMIIF...\n-----END CERTIFICATE-----\nBAZ=qux\n")
+	knownEnvs := []v1.EnvVar{
+		{Name: "FOO"},
+		{Name: "CERT"},
+		{Name: "BAZ"},
+	}
+
+	envs := parseEnvVars(output, knownEnvs)
+	if len(envs) != 3 {
+		t.Fatalf("expected 3 env vars, got %d", len(envs))
+	}
+
+	if envs[0].Name != "FOO" || envs[0].Value != "bar" {
+		t.Errorf("unexpected env[0]: %+v", envs[0])
+	}
+
+	expectedCert := "-----BEGIN CERTIFICATE-----\nMIIF...\n-----END CERTIFICATE-----"
+	if envs[1].Name != "CERT" || envs[1].Value != expectedCert {
+		t.Errorf("unexpected env[1]: %+v (expected cert value %q)", envs[1], expectedCert)
+	}
+
+	if envs[2].Name != "BAZ" || envs[2].Value != "qux" {
+		t.Errorf("unexpected env[2]: %+v", envs[2])
+	}
+}
+
+func TestGetHostResolvConf_EnvConfig(t *testing.T) {
+	t.Setenv("SLIRP_PREFIX", "192.168.")
+	t.Setenv("FALLBACK_DNS", "8.8.8.8")
+
+	res := getHostResolvConf("10.0.0.1")
+	if res == "" {
+		t.Fatalf("expected non-empty resolv.conf output")
+	}
+}
+
+

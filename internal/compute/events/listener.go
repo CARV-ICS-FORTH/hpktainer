@@ -194,6 +194,10 @@ func (h *EventHandler) processEvent(event fsnotify.Event, control PodControl) {
 		logger.Info("[Runtime] -> Pod Started", "op", event.Op, "file", file)
 
 	case endpoint.ExtensionJobID: // Container Started
+		if file == "pause"+string(endpoint.ExtensionJobID) {
+			logger.Info("[Runtime] -> Pause Process Started", "op", event.Op, "file", file)
+			return
+		}
 		logger.Info("[Runtime] -> Container Started", "op", event.Op, "file", file)
 
 	case endpoint.ExtensionExitCode: // Container Terminated

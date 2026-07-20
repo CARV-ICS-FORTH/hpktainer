@@ -130,6 +130,8 @@ apptainer instance run \
     --env DATASTORE_TYPE=etcdv3 \
     --env ETCD_ENDPOINTS=http://${CONTROLLER_IP}:2379 \
     --env BUBBLE_ID=$BUBBLE_ID \
+    --env SLIRP_PREFIX=${SLIRP_PREFIX:-10.0.} \
+    --env FALLBACK_DNS=${FALLBACK_DNS:-1.1.1.1} \
 	$BUBBLE_IMAGE \
 	$NAME
 

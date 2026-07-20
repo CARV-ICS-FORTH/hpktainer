@@ -198,6 +198,8 @@ echo $$ > "${workdir}/.pid"
 
 
 export APPTAINERENV_KUBEDNS_IP={{.HostEnv.KubeDNS}}
+export APPTAINERENV_SLIRP_PREFIX=${SLIRP_PREFIX:-10.0.}
+export APPTAINERENV_FALLBACK_DNS=${FALLBACK_DNS:-1.1.1.1}
 
 {{$.HostEnv.ApptainerBin}} exec --nv --scratch /scratch --workdir ${workdir} \
 {{- if .HostEnv.EnableCgroupV2}}

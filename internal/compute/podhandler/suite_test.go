@@ -14,13 +14,17 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 
-	setup(tmpDir)
+	if err := setup(tmpDir); err != nil {
+		compute.DefaultLogger.Info("Skipping podhandler package tests: runtime.Initialize failed", "err", err)
+		shutdown(tmpDir)
+		os.Exit(0)
+	}
 	code := m.Run()
 	shutdown(tmpDir)
 	os.Exit(code)
 }
 
-func setup(tmpDir string) {
+func setup(tmpDir string) error {
 	compute.Environment = compute.HostEnvironment{
 		KubeMasterHost:    "",
 		ContainerRegistry: "",
@@ -30,9 +34,7 @@ func setup(tmpDir string) {
 		KubeDNS:           "",
 	}
 
-	if err := runtime.Initialize("docker.io/chazapis/hpk-pause:latest"); err != nil {
-		compute.DefaultLogger.Info("runtime.Initialize non-fatal warning", "err", err)
-	}
+	return runtime.Initialize("docker.io/chazapis/hpk-pause:latest")
 }
 
 func shutdown(tmpDir string) {

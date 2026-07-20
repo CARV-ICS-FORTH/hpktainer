@@ -29,7 +29,6 @@ import (
 	"syscall"
 	"time"
 
-	"hpk/internal/compute"
 	"hpk/internal/compute/endpoint"
 	"hpk/internal/compute/image"
 	"hpk/internal/compute/podhandler"
@@ -114,6 +113,7 @@ func (ct *containerTracker) SignalAll(sig os.Signal) {
 			if err == nil && pgid > 1 {
 				if sysSig, ok := sig.(syscall.Signal); ok {
 					_ = syscall.Kill(-pgid, sysSig)
+					continue
 				}
 			}
 			_ = cmd.Process.Signal(sig)
@@ -355,6 +355,15 @@ func cleanEnvironment() error {
 }
 
 func getHostResolvConf(kubeDNSIP string) string {
+	slirpPrefix := os.Getenv("SLIRP_PREFIX")
+	if slirpPrefix == "" {
+		slirpPrefix = "10.0."
+	}
+	fallbackDNS := os.Getenv("FALLBACK_DNS")
+	if fallbackDNS == "" {
+		fallbackDNS = "1.1.1.1"
+	}
+
 	paths := []string{"/etc/resolv.conf", "/run/systemd/resolve/resolv.conf"}
 	var raw string
 	for _, p := range paths {
@@ -373,7 +382,7 @@ func getHostResolvConf(kubeDNSIP string) string {
 	}
 
 	if raw == "" {
-		return "nameserver 1.1.1.1\n"
+		return fmt.Sprintf("nameserver %s\n", fallbackDNS)
 	}
 
 	var validLines []string
@@ -390,7 +399,7 @@ func getHostResolvConf(kubeDNSIP string) string {
 					continue
 				}
 				hasNameserver = true
-				if !strings.HasPrefix(ipStr, "10.0.") {
+				if !strings.HasPrefix(ipStr, slirpPrefix) {
 					hasExternalNameserver = true
 				}
 			}
@@ -399,7 +408,7 @@ func getHostResolvConf(kubeDNSIP string) string {
 	}
 
 	if !hasNameserver || !hasExternalNameserver {
-		validLines = append(validLines, "nameserver 1.1.1.1")
+		validLines = append(validLines, fmt.Sprintf("nameserver %s", fallbackDNS))
 	}
 
 	return strings.Join(validLines, "\n") + "\n"
@@ -449,7 +458,7 @@ func prepareDNS(pod *v1.Pod) error {
 		resolvConfContent = strings.Join(lines, "\n") + "\n"
 	}
 
-	if err := os.WriteFile("/scratch/etc/resolv.conf", []byte(resolvConfContent), os.ModePerm); err != nil {
+	if err := os.WriteFile("/scratch/etc/resolv.conf", []byte(resolvConfContent), 0644); err != nil {
 		return fmt.Errorf("error writing to resolv.conf: %v", err)
 	}
 
@@ -475,7 +484,7 @@ func prepareDNS(pod *v1.Pod) error {
 
 	hostsContent := fmt.Sprintf("127.0.0.1 localhost\n%s \n", ipString)
 
-	if err := os.WriteFile("/scratch/etc/hosts", []byte(hostsContent), os.ModePerm); err != nil {
+	if err := os.WriteFile("/scratch/etc/hosts", []byte(hostsContent), 0644); err != nil {
 		return fmt.Errorf("error writing to hosts: %v", err)
 	}
 	DebugDNSInfo(resolvConfContent, hostsContent)
@@ -489,17 +498,26 @@ func DebugDNSInfo(resolvConfContent string, hostsContent string) {
 
 }
 
-func parseEnvVars(output []byte) []v1.EnvVar {
+func parseEnvVars(output []byte, knownEnvs []v1.EnvVar) []v1.EnvVar {
 	var envs []v1.EnvVar
+	knownKeys := make(map[string]bool)
+	for _, env := range knownEnvs {
+		if env.Name != "" {
+			knownKeys[env.Name] = true
+		}
+	}
+
 	lines := strings.Split(string(output), "\n")
 	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
 			continue
 		}
 		parts := strings.SplitN(line, "=", 2)
-		if len(parts) == 2 {
+		if len(parts) == 2 && (len(knownKeys) == 0 || knownKeys[parts[0]]) {
 			envs = append(envs, v1.EnvVar{Name: parts[0], Value: parts[1]})
+		} else if len(envs) > 0 {
+			envs[len(envs)-1].Value += "\n" + line
 		}
 	}
 	return envs
@@ -530,7 +548,7 @@ func handleInitContainers(pod *v1.Pod, tracker *containerTracker) error {
 			if err := os.WriteFile(envFileName, output, 0644); err != nil {
 				return fmt.Errorf("error writing env file: %v", err)
 			}
-			containerEnvs = parseEnvVars(output)
+			containerEnvs = parseEnvVars(output, container.Env)
 		} else {
 			containerEnvs = container.Env
 		}
@@ -550,7 +568,7 @@ func handleInitContainers(pod *v1.Pod, tracker *containerTracker) error {
 			if mount.SubPathExpr != "" {
 				path, err := kubecontainer.ExpandContainerVolumeMounts(mount, containerEnvs)
 				if err != nil {
-					compute.SystemPanic(err, "cannot expand env variables for container '%s' of pod '%s'", container.Name, podKey)
+					return fmt.Errorf("cannot expand env variables for container '%s' of pod '%s': %w", container.Name, podKey, err)
 				}
 				subPath = path
 			}
@@ -677,7 +695,7 @@ func handleContainers(pod *v1.Pod, wg *sync.WaitGroup, tracker *containerTracker
 			if err := os.WriteFile(envFileName, output, 0644); err != nil {
 				return fmt.Errorf("error writing env file: %v", err)
 			}
-			containerEnvs = parseEnvVars(output)
+			containerEnvs = parseEnvVars(output, container.Env)
 		} else {
 			containerEnvs = container.Env
 		}
@@ -697,7 +715,7 @@ func handleContainers(pod *v1.Pod, wg *sync.WaitGroup, tracker *containerTracker
 			if mount.SubPathExpr != "" {
 				path, err := kubecontainer.ExpandContainerVolumeMounts(mount, containerEnvs)
 				if err != nil {
-					compute.SystemPanic(err, "cannot expand env variables for container '%s' of pod '%s'", container.Name, podKey)
+					return fmt.Errorf("cannot expand env variables for container '%s' of pod '%s': %w", container.Name, podKey, err)
 				}
 				subPath = path
 			}

@@ -215,11 +215,7 @@ func UpdateStatusFromRuntime(pod *corev1.Pod) {
 		}
 	}
 
-	panic(fmt.Errorf(`unhandled lifecycle conditions.
-			current: '%v',
-			totalJobs: '%d',
-			jobs: '%s',
-		 `, pod.Status.Phase, totalJobs, state.ListAll()))
+	compute.PodError(pod, "StatusError", "unhandled lifecycle conditions. current: '%v', totalJobs: '%d', jobs: '%s'", pod.Status.Phase, totalJobs, state.ListAll())
 }
 
 func setTerminationConditions(pod *corev1.Pod) {
