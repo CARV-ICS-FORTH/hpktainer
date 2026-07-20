@@ -45,6 +45,7 @@ import (
 	"github.com/virtual-kubelet/virtual-kubelet/errdefs"
 	vkapi "github.com/virtual-kubelet/virtual-kubelet/node/api"
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/util/json"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -466,12 +467,15 @@ func (v *VirtualK8S) NotifyPods(ctx context.Context, f func(*corev1.Pod)) {
 	go func() {
 		for {
 			select {
+			case <-ctx.Done():
+				return
+
 			case event, ok := <-v.fileWatcher.Events():
 				if !ok {
 					v.Logger.Info("Failed to push event")
 					return
 				}
-				eh.Push(event)
+				eh.Push(ctx, event)
 
 			case err, ok := <-v.fileWatcher.Errors():
 				if !ok {
@@ -502,14 +506,18 @@ func (v *VirtualK8S) reconcileNonTerminalPods() {
 			return nil
 		}
 
-		oldPhase := pod.Status.Phase
+		oldStatus := pod.Status.DeepCopy()
 		PodHandler.UpdateStatusFromRuntime(pod)
 
-		if v.updatedPod != nil {
+		changed := oldStatus.Phase != pod.Status.Phase ||
+			!apiequality.Semantic.DeepEqual(oldStatus.ContainerStatuses, pod.Status.ContainerStatuses) ||
+			!apiequality.Semantic.DeepEqual(oldStatus.InitContainerStatuses, pod.Status.InitContainerStatuses)
+
+		if changed && v.updatedPod != nil {
 			v.updatedPod(pod)
 			v.Logger.Info("Periodic reconcile checked pod status",
 				"pod", podKey,
-				"oldPhase", oldPhase,
+				"oldPhase", oldStatus.Phase,
 				"newPhase", pod.Status.Phase,
 			)
 		}
