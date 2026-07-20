@@ -38,10 +38,11 @@ if [ "${HPK_DEV:-0}" = "1" ]; then
     echo "Development mode: ensuring local .tar images are converted to .sif..."
     for img in hpk-bubble hpk-pause; do
         IMAGE_TAR="$IMAGE_DIR/${img}.tar"
-        IMAGE_SIF="$IMAGE_DIR/${img}.sif"
         if [ -f "$IMAGE_TAR" ]; then
-            echo "Converting $IMAGE_TAR to $IMAGE_SIF..."
-            apptainer build --force "$IMAGE_SIF" "docker-archive://$IMAGE_TAR"
+            if [ ! -f "$IMAGE_SIF" ] || [ "$IMAGE_TAR" -nt "$IMAGE_SIF" ]; then
+                echo "Converting $IMAGE_TAR to $IMAGE_SIF..."
+                apptainer build --force "$IMAGE_SIF" "docker-archive://$IMAGE_TAR"
+            fi
         else
             echo "Warning: $IMAGE_TAR not found!"
         fi

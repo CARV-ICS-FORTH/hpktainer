@@ -134,7 +134,6 @@ SlurmUser=slurm
 StateSaveLocation=/var/lib/slurm/slurmctld
 SwitchType=switch/none
 TaskPlugin=task/none
-FastSchedule=1
 # TIMERS
 InactiveLimit=0
 MinJobAge=300
@@ -194,8 +193,7 @@ while true; do
     
     if [ -n "\$CONTROLLER_IP" ] && [ -n "\$NODE_IP" ]; then
         # Remove existing entries
-        sed -i '/controller/d' /etc/hosts
-        sed -i '/node/d' /etc/hosts
+        sed -i -E '/^\S+\s+(controller|node)(\s|\.|$)/d' /etc/hosts
 
         # Write updated entries
         echo "\$CONTROLLER_IP controller controller.local" >> /etc/hosts

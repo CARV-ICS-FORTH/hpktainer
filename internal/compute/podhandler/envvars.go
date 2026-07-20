@@ -40,11 +40,8 @@ func FromServicesForPod(ctx context.Context, pod *corev1.Pod) ([]corev1.EnvVar, 
 
 // FromServices builds environment variables that a container is started with,
 // which tell the container where to find the services it may need.
-func FromServices(ctx context.Context, namespace string, enableServiceLinks ...bool) ([]corev1.EnvVar, error) {
-	enableLinks := true
-	if len(enableServiceLinks) > 0 {
-		enableLinks = enableServiceLinks[0]
-	}
+func FromServices(ctx context.Context, namespace string, enableServiceLinks bool) ([]corev1.EnvVar, error) {
+	enableLinks := enableServiceLinks
 
 	/*---------------------------------------------------
 	 * Get all Service resources from master

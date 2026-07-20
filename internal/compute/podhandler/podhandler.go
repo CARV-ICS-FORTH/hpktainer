@@ -281,6 +281,12 @@ remove_pod:
 	logger.Info(" * Pod directory is removed")
 
 	/*---------------------------------------------------
+	 * Clean up host script workdir (/tmp/<ns>_<pod>)
+	 *---------------------------------------------------*/
+	workdir := filepath.Join("/tmp", fmt.Sprintf("%s_%s", podKey.Namespace, podKey.Name))
+	_ = os.RemoveAll(workdir)
+
+	/*---------------------------------------------------
 	 * Garbage Collect Namespace
 	 *---------------------------------------------------*/
 	namespaceDir := filepath.Dir(podDir.String())

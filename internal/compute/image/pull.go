@@ -17,10 +17,12 @@ package image
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -42,7 +44,6 @@ func ResolveLocal(imageDir string, imageName string) (*Image, error) {
 		return &Image{Filepath: imageName}, nil
 	}
 
-	imageName = strings.Split(imageName, "@")[0]
 	img := &Image{Filepath: imageDir + ParseImageName(imageName)}
 
 	file, err := os.Stat(img.Filepath)
@@ -57,6 +58,13 @@ func ResolveLocal(imageDir string, imageName string) (*Image, error) {
 	return img, nil
 }
 
+// pullLocks protects concurrent pulls of the same image within a single process.
+// Note: across multiple processes (e.g. multiple kubelets sharing an NFS image directory),
+// concurrent pulls are safe because downloads write to unique .tmp-* files before performing
+// an atomic rename to the target SIF path. While safe, concurrent NFS pulls of the same image
+// are wasteful.
+// Note: pullLocks entries remain in the sync.Map for the lifetime of the process. Since the
+// number of unique images referenced by a node daemon is bounded in practice, this growth is harmless.
 var pullLocks sync.Map
 
 func getPullLock(targetPath string) *sync.Mutex {
@@ -69,10 +77,6 @@ func Pull(imageDir string, transport Transport, imageName string) (*Image, error
 	if err == nil {
 		return img, nil
 	}
-
-	// Remove the digest form the image, because Apptainer fails with
-	// "Docker references with both a tag and digest are currently not supported".
-	imageName = strings.Split(imageName, "@")[0]
 
 	img = &Image{Filepath: imageDir + ParseImageName(imageName)}
 
@@ -87,6 +91,10 @@ func Pull(imageDir string, transport Transport, imageName string) (*Image, error
 
 	tmpFile := img.Filepath + ".tmp-" + strconv.FormatInt(time.Now().UnixNano(), 10)
 
+	// Remove the digest from the image name passed to Apptainer, because Apptainer fails with
+	// "Docker references with both a tag and digest are currently not supported".
+	pullImageName := strings.Split(imageName, "@")[0]
+
 	// otherwise, download a fresh copy
 	compute.DefaultLogger.Info(" * Downloading image...", "image", imageName, "dir", imageDir)
 	if _, err := executePullWithProgress(
@@ -95,7 +103,7 @@ func Pull(imageDir string, transport Transport, imageName string) (*Image, error
 		"pull",
 		"--arch", runtime.GOARCH,
 		tmpFile,
-		transport.Wrap(imageName),
+		transport.Wrap(pullImageName),
 	); err != nil {
 		_ = os.Remove(tmpFile)
 		return nil, fmt.Errorf("downloading has failed: %w", err)
@@ -235,8 +243,17 @@ func ParseImageName(rawImageName string) string {
 		return "/unnamed.sif"
 	}
 
-	// Remove digest (@sha256:...)
-	nameWithoutDigest := strings.Split(rawImageName, "@")[0]
+	reg := regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
+
+	partsAt := strings.SplitN(rawImageName, "@", 2)
+	nameWithoutDigest := partsAt[0]
+	var digestSuffix string
+	if len(partsAt) > 1 && partsAt[1] != "" {
+		cleanDigest := reg.ReplaceAllString(partsAt[1], "_")
+		if cleanDigest != "" {
+			digestSuffix = "_" + cleanDigest
+		}
+	}
 
 	// Split name and tag
 	parts := strings.Split(nameWithoutDigest, ":")
@@ -247,9 +264,31 @@ func ParseImageName(rawImageName string) string {
 	}
 
 	// Clean imageRef and tag by replacing non-alphanumeric characters with underscores
-	reg := regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
 	cleanRef := reg.ReplaceAllString(imageRef, "_")
 	cleanTag := reg.ReplaceAllString(tag, "_")
 
-	return "/" + cleanRef + "_" + cleanTag + ".sif"
+	return "/" + cleanRef + "_" + cleanTag + digestSuffix + ".sif"
+}
+
+// CleanupTempFiles removes any leftover .tmp-* files in the image directory left by interrupted pulls.
+func CleanupTempFiles(imageDir string) error {
+	entries, err := os.ReadDir(imageDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("failed to read image directory: %w", err)
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.Contains(entry.Name(), ".tmp-") {
+			path := filepath.Join(imageDir, entry.Name())
+			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				compute.DefaultLogger.Error(err, "failed to remove temp image file", "path", path)
+			} else {
+				compute.DefaultLogger.Info("Cleaned up leftover temp image file", "path", path)
+			}
+		}
+	}
+	return nil
 }

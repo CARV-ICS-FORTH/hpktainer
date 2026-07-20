@@ -8,6 +8,10 @@ import (
 )
 
 func Test_ExecAsFakeroot(t *testing.T) {
+	if runtime.DefaultPauseImage == nil {
+		t.Skip("DefaultPauseImage not initialized (apptainer unavailable)")
+	}
+
 	tests := []struct {
 		name    string
 		cmd     []string

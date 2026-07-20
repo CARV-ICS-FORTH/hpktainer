@@ -174,6 +174,11 @@ export workdir=/tmp/{{.Pod.Namespace}}_{{.Pod.Name}}
 echo "[Host] Creating workdir: ${workdir} "
 mkdir -p ${workdir}
 
+cleanup() {
+    rm -rf "${workdir}"
+}
+trap cleanup EXIT
+
 echo $$ > "${workdir}/.pid"
 {{- if .UseTmp }}
   {{- range $index, $container := .Containers }}

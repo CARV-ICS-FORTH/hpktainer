@@ -434,7 +434,8 @@ func (v *VirtualK8S) NotifyPods(ctx context.Context, f func(*corev1.Pod)) {
 		LoadFromDisk: PodHandler.LoadPodFromKey,
 		NotifyVirtualKubelet: func(pod *corev1.Pod) {
 			if pod == nil {
-				panic("this should not happen")
+				v.Logger.Error(fmt.Errorf("nil pod received in NotifyVirtualKubelet"), "skipping notification")
+				return
 			}
 
 			f(pod)
@@ -538,7 +539,7 @@ func (v *VirtualK8S) GetStatsSummary(context.Context) (*statsv1alpha1.Summary, e
 	v.Logger.Info("[K8s] -> GetStatsSummary")
 	defer v.Logger.Info("[K8s] <- GetStatsSummary")
 
-	panic("not yet supported")
+	return nil, errors.New("GetStatsSummary is not supported")
 }
 
 // GetContainerLogs retrieves the logs of a container by name from the provider.

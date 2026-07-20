@@ -299,7 +299,8 @@ func run() int {
 
 	// Poll for socket path existence
 	if err := pollForSocket(socketPath); err != nil {
-		log.Printf("Warning: Socket %s not found yet: %v", socketPath, err)
+		log.Printf("Failed to wait for daemon socket %s: %v", socketPath, err)
+		return 1
 	}
 
 	// Poll for TAP creation by daemon

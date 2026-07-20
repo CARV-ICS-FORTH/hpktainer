@@ -27,6 +27,11 @@ func Initialize(pauseImage string) error {
 		return fmt.Errorf("Failed to create ImageDir '%s': %w", compute.HPK.ImageDir(), err)
 	}
 
+	// Sweep leftover temp image files from prior crashed pulls
+	if err := image.CleanupTempFiles(compute.HPK.ImageDir()); err != nil {
+		compute.DefaultLogger.Error(err, "failed to cleanup temp image files")
+	}
+
 	// create the ~/.hpk/corrupted directory, if it does not exist.
 	if err := os.MkdirAll(compute.HPK.CorruptedDir(), endpoint.PodGlobalDirectoryPermissions); err != nil {
 		return fmt.Errorf("Failed to create CorruptedDir '%s': %w", compute.HPK.CorruptedDir(), err)
