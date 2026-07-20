@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"hpk/internal/compute"
 	"hpk/internal/compute/endpoint"
@@ -214,7 +215,14 @@ func DeletePod(podKey client.ObjectKey, watcher filenotify.FileWatcher) bool {
 	}
 
 	{
-		out, err := runtime.KillProcessByPID(pid)
+		gracePeriod := 30 * time.Second
+		if localPod != nil && localPod.Spec.TerminationGracePeriodSeconds != nil && *localPod.Spec.TerminationGracePeriodSeconds > 0 {
+			gracePeriod = time.Duration(*localPod.Spec.TerminationGracePeriodSeconds) * time.Second
+		}
+		// Deadline slightly above the pause grace period (5 seconds buffer)
+		timeout := gracePeriod + 5*time.Second
+
+		out, err := runtime.KillProcessByPIDWithTimeout(pid, timeout)
 		if err != nil {
 			if errors.Is(err, runtime.ErrInvalidJob) {
 				logger.Info(" * No such process", "pid", pid, "pod", podKey)
