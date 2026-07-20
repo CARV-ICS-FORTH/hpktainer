@@ -1,6 +1,8 @@
 package endpoint
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -89,3 +91,36 @@ func TestHPKPath_ParseAbsPath(t *testing.T) {
 		})
 	}
 }
+
+func TestHPKPath_WalkPodDirectories(t *testing.T) {
+	tmpDir := t.TempDir()
+	hpk := HPK(tmpDir)
+
+	// Create structure:
+	// .hpk/default/mypod/controlfiles
+	// .hpk/.corrupted/hiddenpod/controlfiles
+	podDir := filepath.Join(tmpDir, ".hpk", "default", "mypod", "controlfiles")
+	if err := os.MkdirAll(podDir, 0755); err != nil {
+		t.Fatalf("failed to create pod dir: %v", err)
+	}
+
+	corruptedDir := filepath.Join(tmpDir, ".hpk", ".corrupted", "hiddenpod", "controlfiles")
+	if err := os.MkdirAll(corruptedDir, 0755); err != nil {
+		t.Fatalf("failed to create corrupted dir: %v", err)
+	}
+
+	var visited []string
+	err := hpk.WalkPodDirectories(func(path PodPath) error {
+		visited = append(visited, path.String())
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("WalkPodDirectories failed: %v", err)
+	}
+
+	expectedPodPath := filepath.Join(tmpDir, ".hpk", "default", "mypod")
+	if len(visited) != 1 || visited[0] != expectedPodPath {
+		t.Errorf("WalkPodDirectories visited %v, expected [%s]", visited, expectedPodPath)
+	}
+}
+

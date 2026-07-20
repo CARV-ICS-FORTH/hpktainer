@@ -112,7 +112,7 @@ func (p HPKPath) WalkPodDirectories(f WalkPodFunc) error {
 		}
 
 		// skip hidden system paths starting with . (e.g. .certs, .images, .corrupted, .apptainer, .tls)
-		if strings.HasPrefix(info.Name(), ".") {
+		if path != p.String() && strings.HasPrefix(info.Name(), ".") {
 			return filepath.SkipDir
 		}
 
