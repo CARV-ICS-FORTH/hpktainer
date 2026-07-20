@@ -1,4 +1,5 @@
-#!/bin/bash -x
+#!/bin/bash
+set -euo pipefail
 
 BUBBLE_ID=${1:-1}
 
@@ -17,6 +18,7 @@ CONTROLLER_IP=${CONTROLLER_IP:-$HOST_IP_DETECTED}
 SOCAT_PID_6443=""
 SOCAT_PID_10250=""
 SOCAT_PID_2379=""
+SLIRP_PID=""
 
 start_socat_relays() {
     if ! command -v socat >/dev/null 2>&1; then
@@ -44,30 +46,31 @@ start_socat_relays() {
 }
 
 cleanup() {
-	echo "Cleaning up..."
-    if [[ -n $SOCAT_PID_6443 ]]; then
+    trap - EXIT INT TERM
+    echo "Cleaning up..."
+    if [[ -n ${SOCAT_PID_6443:-} ]]; then
         kill $SOCAT_PID_6443 2>/dev/null || true
         wait $SOCAT_PID_6443 2>/dev/null || true
     fi
-    if [[ -n $SOCAT_PID_10250 ]]; then
+    if [[ -n ${SOCAT_PID_10250:-} ]]; then
         kill $SOCAT_PID_10250 2>/dev/null || true
         wait $SOCAT_PID_10250 2>/dev/null || true
     fi
-    if [[ -n $SOCAT_PID_2379 ]]; then
+    if [[ -n ${SOCAT_PID_2379:-} ]]; then
         kill $SOCAT_PID_2379 2>/dev/null || true
         wait $SOCAT_PID_2379 2>/dev/null || true
     fi
 
-	if [[ -n $SLIRP_PID ]]; then
-		kill $SLIRP_PID 2>/dev/null
-		wait $SLIRP_PID 2>/dev/null
-	fi
-	apptainer instance stop $NAME
-	[ -e $NAME-slirp4netns.sock ] && rm -f $NAME-slirp4netns.sock
-    [ -e resolv.conf.$NAME ] && rm -f resolv.conf.$NAME
+    if [[ -n ${SLIRP_PID:-} ]]; then
+        kill $SLIRP_PID 2>/dev/null || true
+        wait $SLIRP_PID 2>/dev/null || true
+    fi
+    apptainer instance stop $NAME 2>/dev/null || true
+    [ -e $NAME-slirp4netns.sock ] && rm -f $NAME-slirp4netns.sock || true
+    [ -e resolv.conf.$NAME ] && rm -f resolv.conf.$NAME || true
 }
 
-trap cleanup INT TERM
+trap cleanup EXIT INT TERM
 
 # Namespace
 RESOLV_CONF=resolv.conf.$NAME
@@ -129,7 +132,20 @@ apptainer instance run \
     --env BUBBLE_ID=$BUBBLE_ID \
 	$BUBBLE_IMAGE \
 	$NAME
-PID=$(apptainer instance list -j $NAME | jq -r '.instances[] | .pid')
+
+PID=""
+for i in {1..10}; do
+    PID=$(apptainer instance list -j $NAME 2>/dev/null | jq -r '.instances[]? | select(.instance=="'$NAME'") | .pid // empty')
+    if [ -n "$PID" ] && [ "$PID" != "null" ]; then
+        break
+    fi
+    sleep 0.5
+done
+
+if [ -z "$PID" ] || [ "$PID" = "null" ]; then
+    echo "Error: Failed to retrieve PID for Apptainer instance $NAME" >&2
+    exit 1
+fi
 
 # Userlevel networking
 slirp4netns --configure --cidr=$CIDR/24 --mtu=1500 --api-socket $NAME-slirp4netns.sock $PID tap0 &

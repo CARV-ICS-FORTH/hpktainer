@@ -77,9 +77,10 @@ EOF
 fi
 
 BUBBLE_ID_VAL=${BUBBLE_ID:-1}
+NODE_NAME="$(hostname)"
 
 # Start Calico Node
-echo "Starting Calico Node..."
+echo "Starting Calico Node for ${NODE_NAME}..."
 mkdir -p /var/run/calico /var/lib/calico /var/log/calico
 
 CALICO_ETCD="http://${CONTROLLER_IP}:2379"
@@ -105,12 +106,12 @@ apptainer instance run \
   --env BGP_PORT=17900 \
   --env FELIX_DEFAULTENDPOINTTOHOSTACTION=ACCEPT \
   --env FELIX_INTERFACEPREFIX=cali \
-  --env FELIX_IPTABLESBACKEND=NFT \
+  --env FELIX_IPTABLESBACKEND=Legacy \
   --env FELIX_VXLANPORT=4789 \
   --env CALICO_NETWORKING_BACKEND=bird \
   --env NO_DEFAULT_POOLS=true \
-  --env NODENAME="bubble${BUBBLE_ID_VAL}" \
-  --env FELIX_FELIXHOSTNAME="bubble${BUBBLE_ID_VAL}" \
+  --env NODENAME="${NODE_NAME}" \
+  --env FELIX_FELIXHOSTNAME="${NODE_NAME}" \
   --env IP=${HOST_IP} \
   --env KUBERNETES_SERVICE_HOST=${CONTROLLER_IP} \
   --env KUBERNETES_SERVICE_PORT=6443 \
@@ -118,7 +119,7 @@ apptainer instance run \
   calico-node
 
 # Wait for Calico Node to allocate a block affinity for this node dynamically (indicated by a blackhole route in the kernel)
-echo "Waiting for Calico to allocate an IPAM block for bubble${BUBBLE_ID_VAL}..."
+echo "Waiting for Calico to allocate an IPAM block for ${NODE_NAME}..."
 POD_SUBNET=""
 for i in {1..30}; do
     POD_SUBNET=$(ip route | awk '/blackhole/ {print $2; exit}')

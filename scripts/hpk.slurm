@@ -27,7 +27,7 @@ echo "  Nodes: ${NODES[@]}"
 
 # Clean up stale config files (but keep images for dev mode)
 echo "Cleaning up stale configuration in ~/.hpk..."
-rm -rf $HOME/.hpk/kubeconfig $HOME/.hpk/node-token $HOME/.hpk/kubelet.crt $HOME/.hpk/kubelet.key $HOME/.hpk/tls $HOME/.hpk/.certs
+rm -rf $HOME/.hpk/kubeconfig $HOME/.hpk/node-token $HOME/.hpk/tls $HOME/.hpk/.certs
 
 # Pre-process images
 echo "Pre-processing images..."
@@ -38,6 +38,7 @@ if [ "${HPK_DEV:-0}" = "1" ]; then
     echo "Development mode: ensuring local .tar images are converted to .sif..."
     for img in hpk-bubble hpk-pause; do
         IMAGE_TAR="$IMAGE_DIR/${img}.tar"
+        IMAGE_SIF="$IMAGE_DIR/${img}.sif"
         if [ -f "$IMAGE_TAR" ]; then
             if [ ! -f "$IMAGE_SIF" ] || [ "$IMAGE_TAR" -nt "$IMAGE_SIF" ]; then
                 echo "Converting $IMAGE_TAR to $IMAGE_SIF..."
@@ -69,7 +70,17 @@ srun --nodes=1 -w $CONTROLLER_NODE --exclusive ./hpk-bubble.sh 1 &
 
 # Wait for Controller initialization
 echo "Waiting for Controller initialization..."
-sleep 15
+WAIT_TIME=0
+MAX_WAIT=120
+while [ ! -f "$HOME/.hpk/kubeconfig" ] || [ ! -f "$HOME/.hpk/node-token" ] || [ ! -f "$HOME/.hpk/tls/server-ca.crt" ]; do
+    if [ $WAIT_TIME -ge $MAX_WAIT ]; then
+        echo "Error: Controller failed to initialize within ${MAX_WAIT} seconds." >&2
+        exit 1
+    fi
+    sleep 1
+    WAIT_TIME=$((WAIT_TIME + 1))
+done
+echo "Controller ready after ${WAIT_TIME}s."
 
 # Start Node (Worker) Bubbles
 BUBBLE_ID=2
