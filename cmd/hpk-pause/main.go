@@ -191,7 +191,7 @@ acquire_pod_loop:
 
 	ctx, cancel := context.WithCancel(context.Background())
 	signalChan := make(chan os.Signal, 1)
-	signal.Notify(signalChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGCHLD)
+	signal.Notify(signalChan, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
 		for {
@@ -219,19 +219,6 @@ acquire_pod_loop:
 
 					cancel()
 					return
-
-				case syscall.SIGCHLD:
-					log.Info().Msg("Received SIGCHLD.")
-					for {
-						pid, err := syscall.Wait4(-1, nil, syscall.WNOHANG, nil)
-						if pid <= 0 {
-							if err != nil && err != syscall.ECHILD {
-								log.Error().Err(err).Msg("Error reaping child process")
-							}
-							break
-						}
-						log.Info().Msgf("Reaped pid: %v", pid)
-					}
 				}
 			case <-ctx.Done():
 				log.Info().Msg("Containers and context have terminated. Exiting...")
