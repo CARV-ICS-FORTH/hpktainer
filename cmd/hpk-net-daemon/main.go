@@ -133,36 +133,60 @@ func main() {
 			log.Printf("Connection closed, waiting for next connection...")
 		}
 	} else if *mode == "client" {
-		var conn net.Conn
-		// Retries for client connection (wait for daemon on host to start/socket to appear)
-		for i := 0; i < 10; i++ {
+		// Close tap on context cancellation to wake up ForwardTapToSocket
+		go func() {
+			<-ctx.Done()
+			log.Println("Received signal, stopping client tap...")
+			tap.Close()
+		}()
+
+		dialCount := 0
+		for {
 			select {
 			case <-ctx.Done():
 				wg.Wait()
 				return
 			default:
 			}
-			conn, err = net.Dial("unix", *socketPath)
-			if err == nil {
-				break
+
+			// Retries for client connection (wait for daemon on host to start/socket to appear)
+			var conn net.Conn
+			maxRetries := 10
+			if dialCount > 0 {
+				maxRetries = 5
 			}
-			time.Sleep(500 * time.Millisecond)
-		}
-		if err != nil {
-			log.Fatalf("Failed to connect to socket %s: %v", *socketPath, err)
-		}
-		log.Printf("Connected to %s", *socketPath)
+			for i := 0; i < maxRetries; i++ {
+				select {
+				case <-ctx.Done():
+					wg.Wait()
+					return
+				default:
+				}
+				conn, err = net.Dial("unix", *socketPath)
+				if err == nil {
+					break
+				}
+				time.Sleep(500 * time.Millisecond)
+			}
 
-		// Close conn and tap on context cancellation to wake up Copy
-		go func() {
-			<-ctx.Done()
-			log.Println("Received signal, stopping client connection and tap...")
-			conn.Close()
-			tap.Close()
-		}()
+			if err != nil {
+				tap.Close()
+				wg.Wait()
+				log.Fatalf("Failed to connect to socket %s: %v", *socketPath, err)
+			}
+			dialCount++
+			log.Printf("Connected to %s", *socketPath)
 
-		handleSession(ctx, activeConn, tap, conn)
-		wg.Wait()
+			handleSession(ctx, activeConn, tap, conn)
+
+			select {
+			case <-ctx.Done():
+				wg.Wait()
+				return
+			default:
+				log.Printf("Connection lost to %s, attempting to reconnect...", *socketPath)
+			}
+		}
 	} else {
 		log.Fatalf("Invalid mode: %s", *mode)
 	}
