@@ -56,6 +56,18 @@ HPK implements a **4-level distributed architecture**.
     * These run within the **same network namespace** as the Level 3 Pod.
     * They share the Pod's IP address and can communicate over `localhost`.
 
+### Security & Trust Model
+
+HPK is designed to run in HPC environments under a **single-user trust model**:
+
+1. **Single-User Job Trust Domain**: All container instances and services (`hpk-bubble`, `hpk-kubelet`, K3s, Calico, etcd) run rootless under the requesting user's UID within a dedicated Slurm job allocation. Security isolation between different users is enforced by Slurm and host OS user isolation.
+2. **Credential & Certificate Protection**:
+   - Cluster credentials (`kubeconfig`, `node-token`) and `hpk-kubelet` private keys (`kubelet.key`) stored in the shared NFS directory (`~/.hpk`) are restricted to owner-only access (`0600` permissions).
+   - The K3s server Certificate Authority private key (`server-ca.key`) is retained exclusively in memory/local storage on the controller node and is **never exported** to shared NFS storage.
+   - Node webhook certificates (`kubelet.crt`) are issued via Certificate Signing Requests (CSRs) submitted to `~/.hpk/.certs/<node>/kubelet.csr` and signed by a background signing loop running on the controller node.
+3. **Internal Services & Network Listeners**:
+   - Etcd (supporting Calico datastore on port 2379) and Calico BGP (port 17900) run unauthenticated and bind to network interfaces managed within the Slurm job allocation. Access to these ports relies on host user boundaries and Slurm job isolation.
+
 ## Building
 
 All binaries are built and embedded in container images. The deployment script uses these images.

@@ -163,7 +163,7 @@ if [ "$HPK_ROLE" = "controller" ]; then
       --disable metrics-server \
       --disable-cloud-controller \
       --kubelet-arg=resolv-conf=/etc/resolv.conf \
-      --write-kubeconfig-mode 777 \
+      --write-kubeconfig-mode 600 \
       --egress-selector-mode=disabled \
       --kube-apiserver-arg=kubelet-certificate-authority=/var/lib/rancher/k3s/server/tls/server-ca.crt \
       --kube-apiserver-arg=kubelet-preferred-address-types=InternalIP,ExternalIP,Hostname \
@@ -178,13 +178,11 @@ if [ "$HPK_ROLE" = "controller" ]; then
         sleep 1
     done
     
-    # Export server-ca to shared directory for node certificates FIRST
-    echo "Copying server-ca to /var/lib/hpk/tls..."
+    # Export server-ca.crt to shared directory for node certificates FIRST (CA key is NOT exported)
+    echo "Copying server-ca.crt to /var/lib/hpk/tls..."
     mkdir -p /var/lib/hpk/tls
     cp /var/lib/rancher/k3s/server/tls/server-ca.crt /var/lib/hpk/tls/server-ca.crt.tmp
-    cp /var/lib/rancher/k3s/server/tls/server-ca.key /var/lib/hpk/tls/server-ca.key.tmp
-    chmod 600 /var/lib/hpk/tls/server-ca.key.tmp
-    mv /var/lib/hpk/tls/server-ca.key.tmp /var/lib/hpk/tls/server-ca.key
+    chmod 644 /var/lib/hpk/tls/server-ca.crt.tmp
     mv /var/lib/hpk/tls/server-ca.crt.tmp /var/lib/hpk/tls/server-ca.crt
 
     # Copy kubeconfig and node-token to shared directory AFTER server-ca is ready
@@ -194,7 +192,7 @@ if [ "$HPK_ROLE" = "controller" ]; then
     sed -i "s|https://0.0.0.0:6443|https://${HOST_IP}:6443|g" /var/lib/hpk/kubeconfig.tmp
     sed -i "s|https://127.0.0.1:6443|https://${HOST_IP}:6443|g" /var/lib/hpk/kubeconfig.tmp
     cp /var/lib/rancher/k3s/server/node-token /var/lib/hpk/node-token.tmp
-    chmod 644 /var/lib/hpk/kubeconfig.tmp /var/lib/hpk/node-token.tmp
+    chmod 600 /var/lib/hpk/kubeconfig.tmp /var/lib/hpk/node-token.tmp
     mv /var/lib/hpk/node-token.tmp /var/lib/hpk/node-token
     mv /var/lib/hpk/kubeconfig.tmp /var/lib/hpk/kubeconfig
 
@@ -239,13 +237,44 @@ EOF
     else
       echo "Skipping CoreDNS reconfiguration due to missing deployment or configmap" >&2
     fi
+
+    # Start background CSR signing loop on controller node
+    echo "Starting kubelet CSR signing loop..."
+    (
+        while true; do
+            shopt -s nullglob
+            for csr_file in /var/lib/hpk/.certs/*/kubelet.csr; do
+                [ -f "$csr_file" ] || continue
+                cert_dir=$(dirname "$csr_file")
+                crt_file="${cert_dir}/kubelet.crt"
+                cnf_file="${cert_dir}/kubelet.cnf"
+                
+                if [ ! -f "$crt_file" ] || [ "$csr_file" -nt "$crt_file" ]; then
+                    if [ -f "/var/lib/rancher/k3s/server/tls/server-ca.key" ] && [ -f "/var/lib/rancher/k3s/server/tls/server-ca.crt" ]; then
+                        echo "Signing kubelet CSR in ${cert_dir}..."
+                        EXT_ARGS=""
+                        if [ -f "$cnf_file" ]; then
+                            EXT_ARGS="-extfile $cnf_file -extensions v3_req"
+                        fi
+                        openssl x509 -req -days 365 -set_serial $(date +%s%N 2>/dev/null || date +%s) \
+                          -CA /var/lib/rancher/k3s/server/tls/server-ca.crt \
+                          -CAkey /var/lib/rancher/k3s/server/tls/server-ca.key \
+                          -in "$csr_file" -out "${crt_file}.tmp" $EXT_ARGS >/dev/null 2>&1
+                        chmod 600 "${crt_file}.tmp"
+                        mv "${crt_file}.tmp" "$crt_file"
+                    fi
+                fi
+            done
+            sleep 1
+        done
+    ) &
 fi
 
 # Wait for kubeconfig, node-token, and server-ca, ensuring server-ca matches kubeconfig's cluster CA
 echo "Waiting for /var/lib/hpk/kubeconfig, /var/lib/hpk/node-token, and matching server-ca..."
 while true; do
   if [ -f /var/lib/hpk/kubeconfig ] && [ -f /var/lib/hpk/node-token ] && \
-     [ -f /var/lib/hpk/tls/server-ca.crt ] && [ -f /var/lib/hpk/tls/server-ca.key ]; then
+     [ -f /var/lib/hpk/tls/server-ca.crt ]; then
     KUBECONFIG_CA_HASH=$(grep 'certificate-authority-data:' /var/lib/hpk/kubeconfig 2>/dev/null | awk '{print $2}' | base64 -d 2>/dev/null | sha256sum | awk '{print $1}')
     SERVER_CA_HASH=$(sha256sum /var/lib/hpk/tls/server-ca.crt 2>/dev/null | awk '{print $1}')
     if [ -n "$KUBECONFIG_CA_HASH" ] && [ -n "$SERVER_CA_HASH" ] && [ "$KUBECONFIG_CA_HASH" = "$SERVER_CA_HASH" ]; then
@@ -256,12 +285,12 @@ while true; do
 done
 
 
-# Generate per-node webhook certificate for hpk-kubelet with node IP SAN
+# Generate per-node webhook certificate for hpk-kubelet with node IP SAN via CSR signed by controller
 NODE_NAME="$(hostname)"
 NODE_CERT_DIR="/var/lib/hpk/.certs/${NODE_NAME}"
 mkdir -p "${NODE_CERT_DIR}"
 
-cat > /tmp/kubelet.cnf <<EOF
+cat > "${NODE_CERT_DIR}/kubelet.cnf" <<EOF
 [req]
 req_extensions = v3_req
 distinguished_name = req_distinguished_name
@@ -280,15 +309,21 @@ IP.2 = ${HOST_IP}
 EOF
 
 if [ ! -f "${NODE_CERT_DIR}/kubelet.key" ]; then
-    openssl genrsa -out "${NODE_CERT_DIR}/kubelet.key" 2048
+    openssl genrsa -out "${NODE_CERT_DIR}/kubelet.key.tmp" 2048
+    chmod 600 "${NODE_CERT_DIR}/kubelet.key.tmp"
+    mv "${NODE_CERT_DIR}/kubelet.key.tmp" "${NODE_CERT_DIR}/kubelet.key"
 fi
+chmod 600 "${NODE_CERT_DIR}/kubelet.key"
+
 openssl req -new -key "${NODE_CERT_DIR}/kubelet.key" -subj "/CN=hpk-kubelet" \
-  -out /tmp/kubelet.csr -config /tmp/kubelet.cnf
-openssl x509 -req -days 365 -set_serial 01 \
-  -CA /var/lib/hpk/tls/server-ca.crt -CAkey /var/lib/hpk/tls/server-ca.key \
-  -in /tmp/kubelet.csr -out "${NODE_CERT_DIR}/kubelet.crt" \
-  -extfile /tmp/kubelet.cnf -extensions v3_req
-chmod 644 "${NODE_CERT_DIR}/kubelet.crt" "${NODE_CERT_DIR}/kubelet.key"
+  -out "${NODE_CERT_DIR}/kubelet.csr.tmp" -config "${NODE_CERT_DIR}/kubelet.cnf"
+mv "${NODE_CERT_DIR}/kubelet.csr.tmp" "${NODE_CERT_DIR}/kubelet.csr"
+
+echo "Waiting for controller to sign kubelet certificate for ${NODE_NAME}..."
+while [ ! -f "${NODE_CERT_DIR}/kubelet.crt" ] || [ "${NODE_CERT_DIR}/kubelet.csr" -nt "${NODE_CERT_DIR}/kubelet.crt" ]; do
+    sleep 1
+done
+chmod 600 "${NODE_CERT_DIR}/kubelet.crt"
 
 # Wait for kube-dns service (Controller creates it via K3s, Nodes wait for it)
 echo "Waiting for kube-dns service..."
