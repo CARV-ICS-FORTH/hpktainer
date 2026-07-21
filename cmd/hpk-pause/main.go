@@ -523,306 +523,178 @@ func parseEnvVars(output []byte, knownEnvs []v1.EnvVar) []v1.EnvVar {
 	return envs
 }
 
-func handleInitContainers(pod *v1.Pod, tracker *containerTracker) error {
+func executeContainer(pod *v1.Pod, container *v1.Container, containerType string, tracker *containerTracker) error {
 	isDebug := os.Getenv("DEBUG_MODE") == "true"
 	podKey := client.ObjectKeyFromObject(pod)
 	hpk := endpoint.HPK(pod.Annotations["workingDirectory"])
 	podPath := hpk.Pod(podKey)
-	for _, container := range pod.Spec.InitContainers {
-		effectiSecurityContext := podhandler.DetermineEffectiveSecurityContext(pod, &container)
-		uid, gid := podhandler.DetermineEffectiveRunAsUser(effectiSecurityContext)
-		log.Info().Msgf("Spawning init container: %s", container.Name)
-		instanceName := fmt.Sprintf("%s_%s_%s", pod.GetNamespace(), pod.GetName(), container.Name)
 
-		containerPath := podPath.Container(container.Name)
-		envFilePath := containerPath.EnvFilePath()
+	effectiSecurityContext := podhandler.DetermineEffectiveSecurityContext(pod, container)
+	uid, gid := podhandler.DetermineEffectiveRunAsUser(effectiSecurityContext)
+	instanceName := fmt.Sprintf("%s_%s_%s", pod.GetNamespace(), pod.GetName(), container.Name)
 
-		// Environment File Handling
-		var containerEnvs []v1.EnvVar
-		if fileExists(envFilePath) {
-			output, err := exec.Command("sh", "-c", envFilePath).CombinedOutput()
-			if err != nil {
-				return fmt.Errorf("error executing EnvFilePath: %v, output: %s", err, output)
-			}
-			envFileName := filepath.Join("/scratch", instanceName+".env")
-			if err := os.WriteFile(envFileName, output, 0644); err != nil {
-				return fmt.Errorf("error writing env file: %v", err)
-			}
-			containerEnvs = parseEnvVars(output, container.Env)
-		} else {
-			containerEnvs = container.Env
-		}
+	containerPath := podPath.Container(container.Name)
+	envFilePath := containerPath.EnvFilePath()
 
-		executionMode := "exec"
-		if container.Command == nil {
-			executionMode = "run"
-		}
-
-		binds := make([]string, len(container.VolumeMounts))
-
-		// check the code from https://github.com/kubernetes/kubernetes/blob/master/pkg/kubelet/kubelet_pods.go#L196
-		for i, mount := range container.VolumeMounts {
-			hostPath := filepath.Join(podPath.VolumeDir(), mount.Name)
-
-			subPath := mount.SubPath
-			if mount.SubPathExpr != "" {
-				path, err := kubecontainer.ExpandContainerVolumeMounts(mount, containerEnvs)
-				if err != nil {
-					return fmt.Errorf("cannot expand env variables for container '%s' of pod '%s': %w", container.Name, podKey, err)
-				}
-				subPath = path
-			}
-
-			if subPath != "" {
-				if filepath.IsAbs(subPath) {
-					return fmt.Errorf("error SubPath '%s' must not be an absolute path", subPath)
-				}
-
-				subPathFile := filepath.Join(hostPath, subPath)
-
-				// mount the subpath
-				hostPath = subPathFile
-			}
-
-			accessMode := "rw"
-			if mount.ReadOnly {
-				accessMode = "ro"
-			}
-
-			binds[i] = hostPath + ":" + mount.MountPath + ":" + accessMode
-		}
-
-		// Apptainer Command Construction
-		apptainerVerbosity := "--quiet"
-		if isDebug {
-			apptainerVerbosity = "--debug"
-		}
-		apptainerArgs := []string{
-			apptainerVerbosity, executionMode, "--nv", "--cleanenv", "--writable-tmpfs", "--no-mount", "home,bind-paths", "--unsquash",
-		}
-		var allBinds []string
-		if fileExists("/scratch/etc/resolv.conf") {
-			allBinds = append(allBinds, "/scratch/etc/resolv.conf:/etc/resolv.conf", "/scratch/etc/hosts:/etc/hosts")
-		}
-		allBinds = append(allBinds, binds...)
-
-		if len(allBinds) > 0 {
-			apptainerArgs = append(apptainerArgs, "--bind", strings.Join(allBinds, ","))
-		}
-		if uid != 0 || gid != 0 {
-			apptainerArgs = append(apptainerArgs, "--security", fmt.Sprintf("uid:%d,gid:%d", uid, gid), "--userns")
-		}
-
-		if fileExists(envFilePath) {
-			apptainerArgs = append(apptainerArgs, "--env-file", filepath.Join("/scratch", instanceName+".env"))
-		}
-
-		apptainerArgs = append(apptainerArgs, hpk.ImageDir()+image.ParseImageName(container.Image))
-		apptainerArgs = append(apptainerArgs, kubecontainer.ExpandContainerCommandOnlyStatic(container.Command, container.Env)...)
-		apptainerArgs = append(apptainerArgs, kubecontainer.ExpandContainerCommandOnlyStatic(container.Args, container.Env)...)
-
-		// Get the PID
-		pid := os.Getpid()
-		if err := os.WriteFile(containerPath.IDPath(), []byte(fmt.Sprintf("pid://%d", pid)), 0644); err != nil {
-			_ = os.WriteFile(containerPath.ExitCodePath(), []byte("128"), 0644)
-			return fmt.Errorf("failed to create pid file") // Log the error
-		}
-
-		// Execute Apptainer (Blocking)
-		log.Debug().Msg(fmt.Sprintf("ApptainerArgs: %v", apptainerArgs))
-		cmd := exec.Command("apptainer", apptainerArgs...)
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		cmd.Env = os.Environ()
-
-		// Open log file
-		logFile, err := os.Create(containerPath.LogsPath())
+	// Environment File Handling
+	var containerEnvs []v1.EnvVar
+	if fileExists(envFilePath) {
+		output, err := exec.Command("sh", "-c", envFilePath).CombinedOutput()
 		if err != nil {
 			_ = os.WriteFile(containerPath.ExitCodePath(), []byte("128"), 0644)
-			return fmt.Errorf("failed to create log file: %v", err)
+			return fmt.Errorf("error executing EnvFilePath: %v, output: %s", err, output)
 		}
-		defer logFile.Close()
-
-		// // Redirect output to log file
-		cmd.Stdout = logFile
-		cmd.Stderr = logFile
-		if err := cmd.Start(); err != nil {
-			log.Error().Err(err).Msgf("Error starting init container: %s", container.Name)
+		envFileName := filepath.Join("/scratch", instanceName+".env")
+		if err := os.WriteFile(envFileName, output, 0644); err != nil {
 			_ = os.WriteFile(containerPath.ExitCodePath(), []byte("128"), 0644)
-			return fmt.Errorf("init container start failed: %v", err)
+			return fmt.Errorf("error writing env file: %v", err)
 		}
-		tracker.Add(cmd)
+		containerEnvs = parseEnvVars(output, container.Env)
+	} else {
+		containerEnvs = container.Env
+	}
 
-		if err := cmd.Wait(); err != nil {
-			tracker.Remove(cmd)
-			log.Error().Err(err).Msgf("Error executing init container: %s", container.Name)
-			exitCode := 128
-			if cmd.ProcessState != nil && cmd.ProcessState.ExitCode() >= 0 {
-				exitCode = cmd.ProcessState.ExitCode()
+	executionMode := "exec"
+	if container.Command == nil {
+		executionMode = "run"
+	}
+
+	binds := make([]string, len(container.VolumeMounts))
+
+	// check the code from https://github.com/kubernetes/kubernetes/blob/master/pkg/kubelet/kubelet_pods.go#L196
+	for i, mount := range container.VolumeMounts {
+		hostPath := filepath.Join(podPath.VolumeDir(), mount.Name)
+
+		subPath := mount.SubPath
+		if mount.SubPathExpr != "" {
+			path, err := kubecontainer.ExpandContainerVolumeMounts(mount, containerEnvs)
+			if err != nil {
+				_ = os.WriteFile(containerPath.ExitCodePath(), []byte("128"), 0644)
+				return fmt.Errorf("cannot expand env variables for container '%s' of pod '%s': %w", container.Name, podKey, err)
 			}
-			_ = os.WriteFile(containerPath.ExitCodePath(), []byte(strconv.Itoa(exitCode)), 0644)
-			return fmt.Errorf("init container failed: %v", err) // Abort on failure
+			subPath = path
 		}
-		tracker.Remove(cmd)
 
-		if err := os.WriteFile(containerPath.ExitCodePath(), []byte(strconv.Itoa(cmd.ProcessState.ExitCode())), 0644); err != nil {
-			return fmt.Errorf("failed to create exitCode file") // Log the error
+		if subPath != "" {
+			if filepath.IsAbs(subPath) {
+				_ = os.WriteFile(containerPath.ExitCodePath(), []byte("128"), 0644)
+				return fmt.Errorf("error SubPath '%s' must not be an absolute path", subPath)
+			}
+
+			subPathFile := filepath.Join(hostPath, subPath)
+
+			// mount the subpath
+			hostPath = subPathFile
+		}
+
+		accessMode := "rw"
+		if mount.ReadOnly {
+			accessMode = "ro"
+		}
+
+		binds[i] = hostPath + ":" + mount.MountPath + ":" + accessMode
+	}
+
+	// Apptainer Command Construction
+	apptainerVerbosity := "--quiet"
+	if isDebug {
+		apptainerVerbosity = "--debug"
+	}
+	apptainerArgs := []string{
+		apptainerVerbosity, executionMode, "--nv", "--cleanenv", "--writable-tmpfs", "--no-mount", "home,bind-paths", "--unsquash",
+	}
+	var allBinds []string
+	if fileExists("/scratch/etc/resolv.conf") {
+		allBinds = append(allBinds, "/scratch/etc/resolv.conf:/etc/resolv.conf", "/scratch/etc/hosts:/etc/hosts")
+	}
+	allBinds = append(allBinds, binds...)
+
+	if len(allBinds) > 0 {
+		apptainerArgs = append(apptainerArgs, "--bind", strings.Join(allBinds, ","))
+	}
+	if uid != 0 || gid != 0 {
+		apptainerArgs = append(apptainerArgs, "--security", fmt.Sprintf("uid:%d,gid:%d", uid, gid), "--userns")
+	}
+
+	if fileExists(envFilePath) {
+		apptainerArgs = append(apptainerArgs, "--env-file", filepath.Join("/scratch", instanceName+".env"))
+	}
+
+	apptainerArgs = append(apptainerArgs, hpk.ImageDir()+image.ParseImageName(container.Image))
+	apptainerArgs = append(apptainerArgs, kubecontainer.ExpandContainerCommandOnlyStatic(container.Command, container.Env)...)
+	apptainerArgs = append(apptainerArgs, kubecontainer.ExpandContainerCommandOnlyStatic(container.Args, container.Env)...)
+
+	log.Info().Msgf("Spawning %s: %s", containerType, container.Name)
+	log.Debug().Msg(fmt.Sprintf("ApptainerArgs: %v", apptainerArgs))
+
+	cmd := exec.Command("apptainer", apptainerArgs...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Env = os.Environ()
+
+	logFile, err := os.Create(containerPath.LogsPath())
+	if err != nil {
+		_ = os.WriteFile(containerPath.ExitCodePath(), []byte("128"), 0644)
+		return fmt.Errorf("failed to create log file: %v", err)
+	}
+	defer logFile.Close()
+
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+
+	if err := cmd.Start(); err != nil {
+		log.Error().Err(err).Msgf("Error starting %s: %s", containerType, container.Name)
+		_ = os.WriteFile(containerPath.ExitCodePath(), []byte("128"), 0644)
+		return fmt.Errorf("%s start failed: %w", containerType, err)
+	}
+
+	tracker.Add(cmd)
+	defer tracker.Remove(cmd)
+
+	pid := cmd.Process.Pid
+	if err := os.WriteFile(containerPath.IDPath(), []byte(fmt.Sprintf("pid://%d", pid)), 0644); err != nil {
+		log.Error().Err(err).Msgf("Failed to create pid file for %s: %s", containerType, container.Name)
+		_ = os.WriteFile(containerPath.ExitCodePath(), []byte("128"), 0644)
+		return fmt.Errorf("failed to create pid file: %w", err)
+	}
+
+	waitErr := cmd.Wait()
+
+	exitCode := 128
+	if cmd.ProcessState != nil && cmd.ProcessState.ExitCode() >= 0 {
+		exitCode = cmd.ProcessState.ExitCode()
+	}
+
+	if err := os.WriteFile(containerPath.ExitCodePath(), []byte(strconv.Itoa(exitCode)), 0644); err != nil {
+		log.Error().Err(err).Msgf("Failed to create exitCode file for %s: %s", containerType, container.Name)
+		return fmt.Errorf("failed to create exitCode file: %w", err)
+	}
+
+	if waitErr != nil {
+		log.Error().Err(waitErr).Msgf("Error executing %s: %s", containerType, container.Name)
+		return fmt.Errorf("%s failed: %w", containerType, waitErr)
+	}
+
+	return nil
+}
+
+func handleInitContainers(pod *v1.Pod, tracker *containerTracker) error {
+	for i := range pod.Spec.InitContainers {
+		if err := executeContainer(pod, &pod.Spec.InitContainers[i], "init container", tracker); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
 func handleContainers(pod *v1.Pod, wg *sync.WaitGroup, tracker *containerTracker) error {
-	isDebug := os.Getenv("DEBUG_MODE") == "true"
-	podKey := client.ObjectKeyFromObject(pod)
-	hpk := endpoint.HPK(pod.Annotations["workingDirectory"])
-	podPath := hpk.Pod(podKey)
-	for _, container := range pod.Spec.Containers {
-		effectiSecurityContext := podhandler.DetermineEffectiveSecurityContext(pod, &container)
-		uid, gid := podhandler.DetermineEffectiveRunAsUser(effectiSecurityContext)
-		instanceName := fmt.Sprintf("%s_%s_%s", pod.GetNamespace(), pod.GetName(), container.Name)
-
-		containerPath := podPath.Container(container.Name)
-		envFilePath := containerPath.EnvFilePath()
-
-		// Environment File Handling
-		var containerEnvs []v1.EnvVar
-		if fileExists(envFilePath) {
-			output, err := exec.Command("sh", "-c", envFilePath).CombinedOutput()
-			if err != nil {
-				return fmt.Errorf("error executing EnvFilePath: %v, output: %s", err, output)
-			}
-			envFileName := filepath.Join("/scratch", instanceName+".env")
-			if err := os.WriteFile(envFileName, output, 0644); err != nil {
-				return fmt.Errorf("error writing env file: %v", err)
-			}
-			containerEnvs = parseEnvVars(output, container.Env)
-		} else {
-			containerEnvs = container.Env
-		}
-
-		executionMode := "exec"
-		if container.Command == nil {
-			executionMode = "run"
-		}
-
-		binds := make([]string, len(container.VolumeMounts))
-
-		// check the code from https://github.com/kubernetes/kubernetes/blob/master/pkg/kubelet/kubelet_pods.go#L196
-		for i, mount := range container.VolumeMounts {
-			hostPath := filepath.Join(podPath.VolumeDir(), mount.Name)
-
-			subPath := mount.SubPath
-			if mount.SubPathExpr != "" {
-				path, err := kubecontainer.ExpandContainerVolumeMounts(mount, containerEnvs)
-				if err != nil {
-					return fmt.Errorf("cannot expand env variables for container '%s' of pod '%s': %w", container.Name, podKey, err)
-				}
-				subPath = path
-			}
-
-			if subPath != "" {
-				if filepath.IsAbs(subPath) {
-					return fmt.Errorf("error SubPath '%s' must not be an absolute path", subPath)
-				}
-
-				subPathFile := filepath.Join(hostPath, subPath)
-
-				// mount the subpath
-				hostPath = subPathFile
-			}
-
-			accessMode := "rw"
-			if mount.ReadOnly {
-				accessMode = "ro"
-			}
-
-			binds[i] = hostPath + ":" + mount.MountPath + ":" + accessMode
-		}
-
-		// Apptainer Command Construction
-		apptainerVerbosity := "--quiet"
-		if isDebug {
-			apptainerVerbosity = "--debug"
-		}
-		apptainerArgs := []string{
-			apptainerVerbosity, executionMode, "--nv", "--cleanenv", "--writable-tmpfs", "--no-mount", "home,bind-paths", "--unsquash",
-		}
-		var allBinds []string
-		if fileExists("/scratch/etc/resolv.conf") {
-			allBinds = append(allBinds, "/scratch/etc/resolv.conf:/etc/resolv.conf", "/scratch/etc/hosts:/etc/hosts")
-		}
-		allBinds = append(allBinds, binds...)
-
-		if len(allBinds) > 0 {
-			apptainerArgs = append(apptainerArgs, "--bind", strings.Join(allBinds, ","))
-		}
-		if uid != 0 || gid != 0 {
-			apptainerArgs = append(apptainerArgs, "--security", fmt.Sprintf("uid:%d,gid:%d", uid, gid), "--userns")
-		}
-
-		if fileExists(envFilePath) {
-			apptainerArgs = append(apptainerArgs, "--env-file", filepath.Join("/scratch", instanceName+".env"))
-		}
-
-		apptainerArgs = append(apptainerArgs, hpk.ImageDir()+image.ParseImageName(container.Image))
-		apptainerArgs = append(apptainerArgs, kubecontainer.ExpandContainerCommandOnlyStatic(container.Command, container.Env)...)
-		apptainerArgs = append(apptainerArgs, kubecontainer.ExpandContainerCommandOnlyStatic(container.Args, container.Env)...)
-
+	for i := range pod.Spec.Containers {
 		wg.Add(1)
-		go func(container v1.Container) { // Ensure container cleanup
+		go func(container v1.Container) {
 			defer wg.Done()
-			// Execute Apptainer in Background
-			log.Debug().Msg(fmt.Sprintf("ApptainerArgs: %v", apptainerArgs))
-			cmd := exec.Command("apptainer", apptainerArgs...)
-			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-			cmd.Env = os.Environ()
-			// If needed, get references to stdout and stderr
-			// log.Debug().Msgf("LogPath: %s", containerPath.LogsPath())
-			logFile, err := os.Create(containerPath.LogsPath())
-			if err != nil {
-				log.Error().Err(err).Msgf("Failed to create log file %s", containerPath.LogsPath())
-				_ = os.WriteFile(containerPath.ExitCodePath(), []byte("128"), 0644)
-				return
-			}
-			defer logFile.Close()
-
-			cmd.Stdout = logFile
-			cmd.Stderr = logFile
-			log.Info().Msgf("Spawning main container: %s", container.Name)
-			// Start the container
-			if err := cmd.Start(); err != nil {
-				log.Error().Err(err).Msg("Failed to start Apptainer container")
-				_ = os.WriteFile(containerPath.ExitCodePath(), []byte("128"), 0644)
-				return
-			}
-			tracker.Add(cmd)
-			defer tracker.Remove(cmd)
-
-			// Get the PID
-			pid := cmd.Process.Pid
-			if err := os.WriteFile(containerPath.IDPath(), []byte(fmt.Sprintf("pid://%d", pid)), 0644); err != nil {
-				log.Error().Err(err).Msg("Failed to create pid file") // Log the error
-				_ = os.WriteFile(containerPath.ExitCodePath(), []byte("128"), 0644)
-				return
-			}
-
-			// Handle Exit (consider moving output writing or using cmd.Wait)
-			if err := cmd.Wait(); err != nil {
+			if err := executeContainer(pod, &container, "main container", tracker); err != nil {
 				log.Error().Err(err).Msgf("error executing container: %s, because of %v", container.Name, err)
 			}
-
-			exitCode := 128
-			if cmd.ProcessState != nil && cmd.ProcessState.ExitCode() >= 0 {
-				exitCode = cmd.ProcessState.ExitCode()
-			}
-
-			if err := os.WriteFile(containerPath.ExitCodePath(), []byte(strconv.Itoa(exitCode)), 0644); err != nil {
-				log.Error().Err(err).Msg("Failed to create exitCode file") // Log the error
-				return
-			}
-
-		}(container)
-
+		}(pod.Spec.Containers[i])
 	}
 	return nil
 }
