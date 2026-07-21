@@ -122,4 +122,3 @@ func KillProcessByPIDWithTimeout(pidStr string, timeout time.Duration) (string, 
 		<-ticker.C
 	}
 }
-

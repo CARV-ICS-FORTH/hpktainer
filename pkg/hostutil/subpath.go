@@ -16,7 +16,6 @@ limitations under the License.
 
 package hostutil
 
-
 import (
 	"fmt"
 	"os"

@@ -123,4 +123,3 @@ func TestHPKPath_WalkPodDirectories(t *testing.T) {
 		t.Errorf("WalkPodDirectories visited %v, expected [%s]", visited, expectedPodPath)
 	}
 }
-

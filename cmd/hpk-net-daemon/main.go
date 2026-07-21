@@ -227,4 +227,3 @@ func handleSession(ctx context.Context, activeConn *netutil.ActiveConnHolder, ta
 		log.Printf("Connection session ended: %v", err)
 	}
 }
-

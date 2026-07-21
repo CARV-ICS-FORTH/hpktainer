@@ -9,15 +9,33 @@ K8S_VERSION := $(subst v0.,v1.,$(K8S_LIB_VERSION))
 
 # Binary output directory
 BIN_DIR = bin
+export GOFLAGS ?= -buildvcs=false
 
 # Inject version and build time
 LDFLAGS := -X 'hpk/pkg/version.Version=$(VERSION)' \
            -X 'hpk/pkg/version.BuildTime=$(shell date)' \
            -X 'hpk/pkg/version.K8sVersion=$(K8S_VERSION)'
 
-.PHONY: all builder binaries binaries-linux-amd64 binaries-linux-arm64 images develop clean
+.PHONY: all builder binaries binaries-linux-amd64 binaries-linux-arm64 images develop clean fmt fmt-check vet test check-shell ci
 
 all: builder images
+
+fmt:
+	gofmt -w .
+
+fmt-check:
+	@test -z "$$(gofmt -l .)" || (echo "Unformatted Go files found:" && gofmt -l . && exit 1)
+
+vet:
+	go vet ./...
+
+test:
+	go test ./...
+
+check-shell:
+	@command -v shellcheck >/dev/null 2>&1 && shellcheck $$(find . -name "*.sh" -not -path "*/.*") || echo "shellcheck not installed, skipping"
+
+ci: fmt-check vet binaries-linux-amd64 test check-shell
 
 builder:
 	@echo "Building and pushing hpk-builder image..."

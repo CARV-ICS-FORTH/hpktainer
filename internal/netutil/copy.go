@@ -77,7 +77,6 @@ func CopyFromTapToSocket(tap *water.Interface, conn net.Conn) error {
 	return ForwardTapToSocket(tap, holder)
 }
 
-
 // CopyFromSocketToTap reads length-prefixed packets from the socket and writes them to the TAP interface.
 func CopyFromSocketToTap(conn net.Conn, tap *water.Interface) error {
 	lenBuf := make([]byte, 4)

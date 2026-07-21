@@ -195,5 +195,3 @@ func TestGetHostResolvConf_EnvConfig(t *testing.T) {
 		t.Fatalf("expected non-empty resolv.conf output")
 	}
 }
-
-

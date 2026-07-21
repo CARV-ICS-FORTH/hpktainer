@@ -161,4 +161,3 @@ func TestEventHandlerPushCancelledByContext(t *testing.T) {
 		t.Fatal("Push failed to unblock after context cancellation")
 	}
 }
-
