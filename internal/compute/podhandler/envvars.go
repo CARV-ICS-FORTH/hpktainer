@@ -82,6 +82,11 @@ func FromServices(ctx context.Context, namespace string, enableServiceLinks bool
 		if service.GetNamespace() == metav1.NamespaceDefault && service.GetName() == "kubernetes" {
 			// because kubernetes is not managed by HPK, we must create the entry manually.
 			service.Spec.ClusterIP = compute.Environment.KubeMasterHost
+			if compute.Environment.KubeMasterPort != "" {
+				if port, err := strconv.Atoi(compute.Environment.KubeMasterPort); err == nil && len(service.Spec.Ports) > 0 {
+					service.Spec.Ports[0].Port = int32(port)
+				}
+			}
 		} else {
 			// Look it up by DNS name.
 			service.Spec.ClusterIP = service.GetName()
@@ -91,9 +96,6 @@ func FromServices(ctx context.Context, namespace string, enableServiceLinks bool
 		// First port - give it the backwards-compatible name.
 		name = makeEnvVariableName(service.Name) + "_SERVICE_PORT"
 		portStr := strconv.Itoa(int(service.Spec.Ports[0].Port))
-		if service.GetNamespace() == metav1.NamespaceDefault && service.GetName() == "kubernetes" && compute.Environment.KubeMasterPort != "" {
-			portStr = compute.Environment.KubeMasterPort
-		}
 		result = append(result, corev1.EnvVar{Name: name, Value: portStr})
 
 		// All named ports (only the first may be unnamed, checked in validation).

@@ -15,9 +15,7 @@ func TestMain(m *testing.M) {
 	}
 
 	if err := setup(tmpDir); err != nil {
-		compute.DefaultLogger.Info("Skipping podhandler package tests: runtime.Initialize failed", "err", err)
-		shutdown(tmpDir)
-		os.Exit(0)
+		compute.DefaultLogger.Info("runtime.Initialize failed (apptainer missing?), continuing unit tests", "err", err)
 	}
 	code := m.Run()
 	shutdown(tmpDir)
