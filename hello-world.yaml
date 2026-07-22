@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: hello-world-node
+spec:
+  nodeSelector:
+    kubernetes.io/hostname: node
+  containers:
+  - name: hello-world-container
+    image: alpine:latest
+    command: ["/bin/sh", "-c", "echo 'hello world2' && sleep 3600"]
+  restartPolicy: Never

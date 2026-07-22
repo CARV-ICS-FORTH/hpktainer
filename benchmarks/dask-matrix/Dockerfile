@@ -3,8 +3,8 @@ FROM python:3.10.12-slim
 RUN pip install \
     beautifulsoup4 \
     bokeh==3.3.4 \
-    dask==2024.1.0 \
-    distributed==2024.1.0 \
+    dask==2026.7.1 \
+    distributed==2026.7.1 \
     numpy==1.26.3 \
     cloudpickle==3.0.0 \
     tornado==6.3.3 \

@@ -1,0 +1,8 @@
+FROM dask-matrix-dask:2024.1.0-arm64-r1
+
+RUN pip install beautifulsoup4 bokeh
+
+WORKDIR /app
+COPY benchmark.py /app/benchmark.py
+
+ENTRYPOINT ["python", "benchmark.py"]

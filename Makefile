@@ -1,6 +1,6 @@
 # Makefile for hpktainer project
 
-REGISTRY ?= docker.io/chazapis
+REGISTRY ?= docker.io/giannispetsis
 VERSION ?= $(shell cat VERSION)
 
 # Extract K8s version from go.mod and map v0.x.y to v1.x.y

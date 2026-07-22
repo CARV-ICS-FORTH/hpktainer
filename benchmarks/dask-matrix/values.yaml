@@ -2,7 +2,7 @@ scheduler:
   image:
     repository: "dask-matrix-dask"
     tag: "2024.1.0-arm64-r1"
-    pullPolicy: Never
+    pullPolicy: Always
   resources:
     limits:
       memory: "1Gi"
@@ -13,7 +13,7 @@ worker:
   image:
     repository: "dask-matrix-dask"
     tag: "2024.1.0-arm64-r1"
-    pullPolicy: Never
+    pullPolicy: Always
   replicas: 2  
   env:
     - name: DASK_DISTRIBUTED__WORKER__USE_NANNY
