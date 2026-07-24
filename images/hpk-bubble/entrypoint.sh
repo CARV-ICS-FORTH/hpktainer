@@ -220,7 +220,16 @@ if [ "$HPK_ROLE" = "controller" ]; then
     if k3s kubectl -n kube-system get deployment coredns >/dev/null 2>&1 && k3s kubectl -n kube-system get configmap coredns >/dev/null 2>&1; then
       k3s kubectl -n kube-system patch deployment coredns --type=merge -p '{"spec":{"template":{"spec":{"dnsPolicy":"Default"}}}}'
       CURRENT_COREFILE="$(k3s kubectl -n kube-system get configmap coredns -o jsonpath='{.data.Corefile}')"
-      UPDATED_COREFILE="$(printf '%s\n' "$CURRENT_COREFILE" | sed -E 's#forward \. (/etc/resolv\.conf|([0-9]{1,3}\.){3}[0-9]{1,3})#forward . /etc/resolv.conf#g')"
+      UPDATED_COREFILE="$(printf '%s\n' "$CURRENT_COREFILE" | awk '{
+        if ($0 ~ /^[[:space:]]*loop[[:space:]]*$/) {
+          next
+        }
+        if ($0 ~ /forward \. (\/etc\/resolv\.conf|([0-9]{1,3}\.){3}[0-9]{1,3})/) {
+          print "    forward . /etc/resolv.conf {\n        max_fails 0\n        health_check 0s\n    }"
+        } else {
+          print $0
+        }
+      }')"
       if [ -n "$UPDATED_COREFILE" ] && [ "$CURRENT_COREFILE" != "$UPDATED_COREFILE" ]; then
         cat <<EOF | k3s kubectl apply -f -
 apiVersion: v1

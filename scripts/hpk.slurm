@@ -71,7 +71,7 @@ srun --nodes=1 -w $CONTROLLER_NODE --exclusive ./hpk-bubble.sh 1 &
 # Wait for Controller initialization
 echo "Waiting for Controller initialization..."
 WAIT_TIME=0
-MAX_WAIT=120
+MAX_WAIT=300
 while [ ! -f "$HOME/.hpk/kubeconfig" ] || [ ! -f "$HOME/.hpk/node-token" ] || [ ! -f "$HOME/.hpk/tls/server-ca.crt" ]; do
     if [ $WAIT_TIME -ge $MAX_WAIT ]; then
         echo "Error: Controller failed to initialize within ${MAX_WAIT} seconds." >&2

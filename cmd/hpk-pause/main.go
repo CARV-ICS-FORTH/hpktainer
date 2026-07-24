@@ -387,7 +387,6 @@ func getHostResolvConf(kubeDNSIP string) string {
 
 	var validLines []string
 	hasNameserver := false
-	hasExternalNameserver := false
 	for _, line := range strings.Split(raw, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "nameserver") {
@@ -399,15 +398,12 @@ func getHostResolvConf(kubeDNSIP string) string {
 					continue
 				}
 				hasNameserver = true
-				if !strings.HasPrefix(ipStr, slirpPrefix) {
-					hasExternalNameserver = true
-				}
 			}
 		}
 		validLines = append(validLines, line)
 	}
 
-	if !hasNameserver || !hasExternalNameserver {
+	if !hasNameserver {
 		validLines = append(validLines, fmt.Sprintf("nameserver %s", fallbackDNS))
 	}
 
