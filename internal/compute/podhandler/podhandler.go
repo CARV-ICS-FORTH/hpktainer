@@ -118,50 +118,64 @@ func resolveProcessPIDFromControlFiles(pod *corev1.Pod, podDir endpoint.PodPath,
 	if raw, ok := readStringFromFile(pauseJobIDPath); ok {
 		pid, err := parseProcessPID(raw)
 		if err == nil {
+			logger.Info(" * Resolved PID from pause control file", "path", pauseJobIDPath, "pid", pid)
 			return pid, nil
 		}
 		logger.Info(" * Invalid process id in pause control file", "path", pauseJobIDPath, "value", raw, "err", err)
+	} else {
+		logger.Info(" * Pause control file missing/unreadable", "path", pauseJobIDPath)
 	}
 
 	// Fallback to main containers
-	for _, container := range pod.Spec.Containers {
-		jobIDPath := podDir.Container(container.Name).IDPath()
-		if raw, ok := readStringFromFile(jobIDPath); ok {
-			pid, err := parseProcessPID(raw)
-			if err != nil {
-				logger.Info(" * Invalid process id in control file", "path", jobIDPath, "value", raw, "err", err)
+	if pod != nil {
+		for _, container := range pod.Spec.Containers {
+			jobIDPath := podDir.Container(container.Name).IDPath()
+			if raw, ok := readStringFromFile(jobIDPath); ok {
+				pid, err := parseProcessPID(raw)
+				if err != nil {
+					logger.Info(" * Invalid process id in container control file", "container", container.Name, "path", jobIDPath, "value", raw, "err", err)
+					continue
+				}
 
-				continue
+				logger.Info(" * Resolved PID from container control file", "container", container.Name, "path", jobIDPath, "pid", pid)
+				return pid, nil
+			} else {
+				logger.Info(" * Container control file missing/unreadable", "container", container.Name, "path", jobIDPath)
 			}
-
-			return pid, nil
 		}
-	}
 
-	// Fallback to init containers
-	for _, container := range pod.Spec.InitContainers {
-		jobIDPath := podDir.Container(container.Name).IDPath()
-		if raw, ok := readStringFromFile(jobIDPath); ok {
-			pid, err := parseProcessPID(raw)
-			if err != nil {
-				logger.Info(" * Invalid process id in control file", "path", jobIDPath, "value", raw, "err", err)
+		// Fallback to init containers
+		for _, container := range pod.Spec.InitContainers {
+			jobIDPath := podDir.Container(container.Name).IDPath()
+			if raw, ok := readStringFromFile(jobIDPath); ok {
+				pid, err := parseProcessPID(raw)
+				if err != nil {
+					logger.Info(" * Invalid process id in init container control file", "container", container.Name, "path", jobIDPath, "value", raw, "err", err)
+					continue
+				}
 
-				continue
+				logger.Info(" * Resolved PID from init container control file", "container", container.Name, "path", jobIDPath, "pid", pid)
+				return pid, nil
+			} else {
+				logger.Info(" * Init container control file missing/unreadable", "container", container.Name, "path", jobIDPath)
 			}
+		}
 
-			return pid, nil
+		// Fallback to wrapper process pid file if written
+		wrapperPIDPath := filepath.Join("/tmp", fmt.Sprintf("%s_%s", pod.Namespace, pod.Name), ".pid")
+		if raw, ok := readStringFromFile(wrapperPIDPath); ok {
+			pid, err := parseProcessPID(raw)
+			if err == nil {
+				logger.Info(" * Resolved PID from wrapper pid file", "path", wrapperPIDPath, "pid", pid)
+				return pid, nil
+			}
+			logger.Info(" * Invalid process id in wrapper pid file", "path", wrapperPIDPath, "value", raw, "err", err)
+		} else {
+			logger.Info(" * Wrapper pid file missing/unreadable", "path", wrapperPIDPath)
 		}
 	}
 
-	// Fallback to wrapper process pid file if written
-	wrapperPIDPath := filepath.Join("/tmp", fmt.Sprintf("%s_%s", pod.Namespace, pod.Name), ".pid")
-	if raw, ok := readStringFromFile(wrapperPIDPath); ok {
-		pid, err := parseProcessPID(raw)
-		if err == nil {
-			return pid, nil
-		}
-	}
-
+	logger.Info(" * Failed to resolve process PID from any control file or wrapper PID file")
 	return "", ErrNoProcessIDInControlFiles
 }
 
@@ -176,9 +190,14 @@ Notice that by using the reference, we operate on the local copy instead of the 
 func DeletePod(podKey client.ObjectKey, watcher filenotify.FileWatcher) bool {
 	logger := compute.DefaultLogger.WithValues("pod", podKey)
 
+	podDir := compute.HPK.Pod(podKey)
+	_, statErr := os.Stat(podDir.String())
+	logger.Info(" * DeletePod invoked", "podDir", podDir.String(), "dirExists", statErr == nil)
+
 	localPod, err := LoadPodFromKey(podKey)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
+			logger.Info(" * Local pod file does not exist, skipping deletion", "podDir", podDir.String())
 			// This behavior may raise when trying to delete a deleted pod.
 			// However, deleting a pod from the fs does not guarantee deletion.
 			// For this reason, we just need to continue.
@@ -189,8 +208,6 @@ func DeletePod(podKey client.ObjectKey, watcher filenotify.FileWatcher) bool {
 		return false
 	}
 
-	podDir := compute.HPK.Pod(podKey)
-
 	/*---------------------------------------------------
 	 * Kill Direct Process
 	 *---------------------------------------------------*/
@@ -198,18 +215,18 @@ func DeletePod(podKey client.ObjectKey, watcher filenotify.FileWatcher) bool {
 	pid, err := resolveProcessPIDFromControlFiles(localPod, podDir, logger)
 	if err != nil {
 		if errors.Is(err, ErrNoProcessIDInControlFiles) {
-			logger.Info(" * No process id found in control files; assuming process already exited", "pod", podKey)
+			logger.Info("WARNING: No process id found in control files; proceeding to remove pod directory without PID confirmation", "pod", podKey)
 
 			goto remove_pod
 		}
 
-		logger.Error(err, "failed to resolve process id from control files", "pod", podKey)
+		logger.Info("WARNING: Failed to resolve process id from control files; proceeding to remove pod directory", "pod", podKey, "err", err)
 		goto remove_pod
 	}
 
 	logger.Info(" * Resolved process id from control files", "pid", pid)
 	if strings.TrimSpace(pid) == "" {
-		logger.Info(" * Empty process id resolved from control files; assuming process already exited", "pod", podKey)
+		logger.Info("WARNING: Empty process id resolved from control files; proceeding to remove pod directory", "pod", podKey)
 
 		goto remove_pod
 	}
@@ -230,7 +247,7 @@ func DeletePod(podKey client.ObjectKey, watcher filenotify.FileWatcher) bool {
 				goto remove_pod
 			}
 
-			logger.Error(err, "failed to kill process", "pid", pid, "pod", podKey, "out", out)
+			logger.Info("WARNING: Failed to kill process by PID, proceeding to remove pod directory", "pid", pid, "pod", podKey, "err", err, "out", out)
 			goto remove_pod
 		}
 
@@ -295,13 +312,16 @@ remove_pod:
 	_ = os.RemoveAll(workdir)
 
 	/*---------------------------------------------------
-	 * Garbage Collect Namespace
+	 * Garbage Collect Namespace Safely
 	 *---------------------------------------------------*/
 	namespaceDir := filepath.Dir(podDir.String())
 	if empty, _ := endpoint.IsEmpty(namespaceDir); empty {
-		_ = os.RemoveAll(namespaceDir)
-
-		logger.Info(" * Namespace directory is removed")
+		// Use os.Remove instead of os.RemoveAll to safely prevent recursive deletion of co-located pods
+		if err := os.Remove(namespaceDir); err == nil {
+			logger.Info(" * Namespace directory is removed")
+		} else {
+			logger.Info(" * Namespace directory cleanup skipped (not empty or error)", "err", err)
+		}
 	}
 
 	return true
@@ -340,14 +360,14 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, watcher filenotify.FileWatc
 		podEnvVariables: podEnvVars,
 	}
 
-	for _, env := range h.podEnvVariables {
-		logger.Info("env", "name", env.Name)
-	}
-	for _, container := range pod.Spec.Containers {
-		for _, env := range container.Env {
-			logger.Info("container env", "name", env.Name)
-		}
-	}
+	// for _, env := range h.podEnvVariables {
+	// 	logger.Info("env", "name", env.Name)
+	// }
+	// for _, container := range pod.Spec.Containers {
+	// 	for _, env := range container.Env {
+	// 		logger.Info("container env", "name", env.Name)
+	// 	}
+	// }
 	// create directory for the job environment.
 	if err := os.MkdirAll(h.podDirectory.JobDir(), endpoint.PodGlobalDirectoryPermissions); err != nil {
 		compute.PodError(pod, "PodDirectoryError", "Cant create pod directory '%s': %v", h.podDirectory.JobDir(), err)
@@ -498,7 +518,7 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, watcher filenotify.FileWatc
 	pod.Annotations["containerRegistry"] = compute.Environment.ContainerRegistry
 	pod.Annotations["apptainerBin"] = compute.Environment.ApptainerBin
 	pod.Annotations["enableCgroupV2"] = fmt.Sprintf("%t", compute.Environment.EnableCgroupV2)
-	pod.Annotations["workingDirectory"] = compute.Environment.WorkingDirectory
+	pod.Annotations["workingDirectory"] = "/var/lib/hpk"
 	pod.Annotations["kubeDNS"] = compute.Environment.KubeDNS
 
 	// Set annotations from VirtualEnvironment

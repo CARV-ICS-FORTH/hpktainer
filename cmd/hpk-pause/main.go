@@ -140,7 +140,7 @@ func main() {
 		log.Fatal().Msg("Please provide both the pod and namespace.")
 	}
 
-	config, err := clientcmd.BuildConfigFromFlags("", filepath.Join("/k8s-data", "kubeconfig"))
+	config, err := clientcmd.BuildConfigFromFlags("", filepath.Join("/var/lib/hpk", "kubeconfig"))
 	if err != nil {
 		log.Fatal().Err(err).Msg("Error building kubeconfig")
 	}

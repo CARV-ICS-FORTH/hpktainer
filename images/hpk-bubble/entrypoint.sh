@@ -218,7 +218,6 @@ if [ "$HPK_ROLE" = "controller" ]; then
     done
 
     if k3s kubectl -n kube-system get deployment coredns >/dev/null 2>&1 && k3s kubectl -n kube-system get configmap coredns >/dev/null 2>&1; then
-      k3s kubectl -n kube-system patch deployment coredns --type=merge -p '{"spec":{"template":{"spec":{"dnsPolicy":"Default"}}}}'
       CURRENT_COREFILE="$(k3s kubectl -n kube-system get configmap coredns -o jsonpath='{.data.Corefile}')"
       UPDATED_COREFILE="$(printf '%s\n' "$CURRENT_COREFILE" | awk '{
         if ($0 ~ /^[[:space:]]*loop[[:space:]]*$/) {
@@ -231,6 +230,7 @@ if [ "$HPK_ROLE" = "controller" ]; then
         }
       }')"
       if [ -n "$UPDATED_COREFILE" ] && [ "$CURRENT_COREFILE" != "$UPDATED_COREFILE" ]; then
+        echo "$(date -u +'%Y-%m-%dT%H:%M:%SZ') Updating CoreDNS ConfigMap..."
         cat <<EOF | k3s kubectl apply -f -
 apiVersion: v1
 kind: ConfigMap
@@ -242,7 +242,9 @@ data:
 $(printf '%s\n' "$UPDATED_COREFILE" | sed 's/^/    /')
 EOF
       fi
-      k3s kubectl -n kube-system rollout restart deployment coredns
+
+      echo "$(date -u +'%Y-%m-%dT%H:%M:%SZ') Patching CoreDNS deployment spec..."
+      k3s kubectl -n kube-system patch deployment coredns --type=merge -p '{"spec":{"template":{"spec":{"dnsPolicy":"Default"}}}}'
     else
       echo "Skipping CoreDNS reconfiguration due to missing deployment or configmap" >&2
     fi
