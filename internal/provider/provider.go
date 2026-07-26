@@ -64,8 +64,6 @@ type InitConfig struct {
 
 	RestConfig *rest.Config
 
-	UseTmp bool
-
 	PauseImage string
 }
 
@@ -258,7 +256,7 @@ func (v *VirtualK8S) CreatePod(ctx context.Context, pod *corev1.Pod) error {
 
 		// acknowledge the creation request and do the creation in the background.
 		// if the creation fails, the pod should be marked as failed and returned to the provider.
-		PodHandler.CreatePod(context.Background(), pod, v.fileWatcher, v.UseTmp)
+		PodHandler.CreatePod(context.Background(), pod, v.fileWatcher)
 
 		if v.updatedPod != nil {
 			v.updatedPod(pod)

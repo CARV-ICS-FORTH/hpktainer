@@ -206,7 +206,6 @@ func runRootCommand(ctx context.Context, c Opts) error {
 		BuildVersion:      commands.BuildVersion,
 		FSPollingInterval: c.FSPollingInterval,
 		RestConfig:        restConfig,
-		UseTmp:            c.UseTmp,
 		PauseImage:        c.PauseImage,
 	})
 	if err != nil {

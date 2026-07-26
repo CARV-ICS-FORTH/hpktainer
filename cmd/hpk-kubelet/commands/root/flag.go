@@ -61,9 +61,6 @@ type Opts struct {
 	TaintValue   string
 	TaintEffect  string
 
-	// Use tmp for the volume directories of the pods
-	UseTmp bool
-
 	// PauseImage is the image used for the pause container
 	PauseImage string
 }
@@ -102,6 +99,5 @@ func installFlags(flags *pflag.FlagSet, c *Opts) {
 	flags.StringVar(&c.TaintValue, "taint-value", "hpk", "Set node taint value")
 	flags.StringVar(&c.TaintEffect, "taint-effect", string(corev1.TaintEffectNoSchedule), "Set node taint effect")
 
-	flags.BoolVar(&c.UseTmp, "use-tmp", false, "symlink the pods' volume directories under tmp")
 	flags.StringVar(&c.PauseImage, "pause-image", "docker.io/chazapis/hpk-pause:latest", "image for the pause container")
 }

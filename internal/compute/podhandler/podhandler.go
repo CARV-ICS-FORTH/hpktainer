@@ -366,7 +366,7 @@ type PodHandler struct {
 	logger logr.Logger
 }
 
-func CreatePod(ctx context.Context, pod *corev1.Pod, watcher filenotify.FileWatcher, useTmp bool) {
+func CreatePod(ctx context.Context, pod *corev1.Pod, watcher filenotify.FileWatcher) {
 	/*---------------------------------------------------
 	 * Prepare the Pod Execution Environment
 	 *---------------------------------------------------*/
@@ -563,7 +563,6 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, watcher filenotify.FileWatc
 			SysErrorFilePath: h.podDirectory.SysErrorFilePath(),
 		},
 		Containers: containers,
-		UseTmp:     useTmp,
 	}); err != nil {
 		compute.PodError(pod, "TemplateError", "failed to evaluate container execution template: %v", err)
 		_ = SavePodToFile(ctx, h.Pod)

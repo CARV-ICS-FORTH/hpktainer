@@ -15,11 +15,7 @@
 package podhandler
 
 import (
-	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
-	"strconv"
 	"strings"
 	"text/template"
 
@@ -32,14 +28,8 @@ import (
 )
 
 var genericMap = map[string]interface{}{
-	"param":               EscapeSingleQuote,
-	"truncate":            truncate,
-	"generateTmpCommands": generateTmpCommands,
-}
-
-type TmpCommandsResult struct {
-	Cmds []string
-	Err  error
+	"param":    EscapeSingleQuote,
+	"truncate": truncate,
 }
 
 // ParseTemplate returns a custom 'text/template' enhanced with functions for processing HPK templates.
@@ -85,81 +75,6 @@ func strval(v interface{}) string {
 	}
 }
 
-func makeTmpPath(binds []string) (oldPath string, newPath string, err error) {
-	oldPath, err = findVolumesBind(binds)
-	if err != nil {
-		return "", "", err
-	}
-
-	tmpBase := os.TempDir()
-	tmpBase = strings.TrimRight(tmpBase, string(os.PathSeparator))
-
-	parts := strings.Split(oldPath, string(os.PathSeparator))
-
-	hpkIndex := -1
-	for i, p := range parts {
-		if p == ".hpk" {
-			hpkIndex = i
-			break
-		}
-	}
-	if hpkIndex == -1 {
-		return "", "", errors.New(".hpk directory not found in path")
-	}
-
-	remainder := parts[hpkIndex+1:]
-
-	newPath = filepath.Join(tmpBase, filepath.Join(remainder...))
-
-	return oldPath, newPath, nil
-}
-
-func findVolumesBind(binds []string) (string, error) {
-	foundPath := ""
-
-	for _, b := range binds {
-		hostPath := b
-		if i := strings.Index(b, ":"); i != -1 {
-			hostPath = b[:i]
-		}
-
-		idx := strings.Index(hostPath, "volumes")
-		if idx != -1 {
-			foundPath = hostPath[:idx+len("volumes")]
-			break
-		}
-	}
-
-	if foundPath == "" {
-		return "", errors.New("no bind contains 'volumes'")
-	}
-
-	return foundPath, nil
-}
-
-func generateTmpCommands(binds []string) TmpCommandsResult {
-	oldPath, newPath, err := makeTmpPath(binds)
-	if err != nil {
-		return TmpCommandsResult{Err: err}
-	}
-
-	mkdirCmd := fmt.Sprintf("mkdir -p %s || { echo 'mkdir failed'; exit 1; }", strconv.Quote(newPath))
-
-	moveContentsCmd := fmt.Sprintf(
-		`if [ -d "%s" ] && [ ! -L "%s" ]; then ( shopt -s dotglob nullglob; mv "%s/"* "%s/" ); fi`,
-		oldPath, oldPath, oldPath, newPath,
-	)
-
-	rmIfDirCmd := fmt.Sprintf(
-		"[ -e %s ] && [ ! -L %s ] && rm -rf %s || true",
-		strconv.Quote(oldPath), strconv.Quote(oldPath), strconv.Quote(oldPath),
-	)
-
-	lnCmd := fmt.Sprintf("ln -sfn %s %s || { echo 'ln failed'; exit 1; }", strconv.Quote(newPath), strconv.Quote(oldPath))
-
-	return TmpCommandsResult{Cmds: []string{mkdirCmd, moveContentsCmd, rmIfDirCmd, lnCmd}}
-}
-
 const HostScriptTemplate = `#!/bin/bash
 
 #### BEGIN SECTION: Host Environment ####
@@ -180,22 +95,6 @@ cleanup() {
 trap cleanup EXIT
 
 echo $$ > "${workdir}/.pid"
-{{- if .UseTmp }}
-  {{- range $index, $container := .Containers }}
-    {{- $result := generateTmpCommands $container.Binds }}
-    {{- if $result.Err }}
-      echo "Error generating tmp commands for container {{$index}}: {{ $result.Err }}" >&2
-      exit 1
-    {{- else }}
-      {{- range $cmd := $result.Cmds }}
-      {{ $cmd }}
-      {{- end }}
-    {{ end }}
-  {{- end }}
-{{- end }}
-
-
-
 
 export APPTAINERENV_KUBEDNS_IP={{.HostEnv.KubeDNS}}
 export APPTAINERENV_FALLBACK_DNS=${FALLBACK_DNS:-1.1.1.1}
@@ -232,9 +131,6 @@ type JobFields struct {
 
 	// Containers is a list of container requests to be executed.
 	Containers []Container
-
-	// UseTmp is a flag that shows if tmp directories should be used.
-	UseTmp bool
 }
 
 // The Container creates new within the Pod and resemble the "Container" semantics.
