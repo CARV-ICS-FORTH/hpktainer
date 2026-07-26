@@ -321,7 +321,7 @@ func announceIP(pod *v1.Pod) error {
 	}
 	ipString := strings.Join(ipAddresses, " ")
 
-	if err := os.WriteFile(podPath.IPAddressPath(), []byte(ipString), os.ModePerm); err != nil {
+	if err := os.WriteFile(podPath.IPAddressPath(), []byte(ipString), 0644); err != nil {
 		return fmt.Errorf("error writing to .ip file: %v", err)
 	}
 	return nil
@@ -357,10 +357,6 @@ func cleanEnvironment() error {
 }
 
 func getHostResolvConf(kubeDNSIP string) string {
-	slirpPrefix := os.Getenv("SLIRP_PREFIX")
-	if slirpPrefix == "" {
-		slirpPrefix = "10.0."
-	}
 	fallbackDNS := os.Getenv("FALLBACK_DNS")
 	if fallbackDNS == "" {
 		fallbackDNS = "1.1.1.1"

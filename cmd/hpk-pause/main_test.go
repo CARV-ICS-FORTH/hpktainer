@@ -196,12 +196,43 @@ func TestParseEnvVars_MultiLine(t *testing.T) {
 }
 
 func TestGetHostResolvConf_EnvConfig(t *testing.T) {
-	t.Setenv("SLIRP_PREFIX", "192.168.")
 	t.Setenv("FALLBACK_DNS", "8.8.8.8")
 
 	res := getHostResolvConf("10.0.0.1")
 	if res == "" {
 		t.Fatalf("expected non-empty resolv.conf output")
+	}
+}
+
+func TestAnnounceIP_Permissions(t *testing.T) {
+	workDir := t.TempDir()
+	annotations := map[string]string{"workingDirectory": workDir}
+	pod := &v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "test-ip-pod",
+			Namespace:   "default",
+			Annotations: annotations,
+		},
+	}
+	podKey := client.ObjectKeyFromObject(pod)
+	hpk := endpoint.HPK(workDir)
+	podPath := hpk.Pod(podKey)
+
+	if err := os.MkdirAll(string(podPath.ControlFileDir()), 0750); err != nil {
+		t.Fatalf("failed to create control file dir: %v", err)
+	}
+
+	if err := announceIP(pod); err != nil {
+		t.Fatalf("announceIP failed: %v", err)
+	}
+
+	info, err := os.Stat(podPath.IPAddressPath())
+	if err != nil {
+		t.Fatalf("failed to stat IP file: %v", err)
+	}
+
+	if perm := info.Mode().Perm(); perm != 0644 {
+		t.Errorf("expected IP file perm 0644, got %o", perm)
 	}
 }
 
