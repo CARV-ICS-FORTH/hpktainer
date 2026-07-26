@@ -179,6 +179,33 @@ func resolveProcessPIDFromControlFiles(pod *corev1.Pod, podDir endpoint.PodPath,
 	return "", ErrNoProcessIDInControlFiles
 }
 
+func resolveSecondaryContainerPIDs(pod *corev1.Pod, podDir endpoint.PodPath, primaryPID string) []string {
+	if pod == nil {
+		return nil
+	}
+	var secondary []string
+	seen := make(map[string]bool)
+	if primaryPID != "" {
+		seen[primaryPID] = true
+	}
+
+	collect := func(containers []corev1.Container) {
+		for _, c := range containers {
+			jobIDPath := podDir.Container(c.Name).IDPath()
+			if raw, ok := readStringFromFile(jobIDPath); ok {
+				if pid, err := parseProcessPID(raw); err == nil && pid != "" && !seen[pid] {
+					seen[pid] = true
+					secondary = append(secondary, pid)
+				}
+			}
+		}
+	}
+
+	collect(pod.Spec.Containers)
+	collect(pod.Spec.InitContainers)
+	return secondary
+}
+
 /*
 DeletePod takes a Pod Reference and deletes the Pod from the provider.
 DeletePod may be called multiple times for the same pod.
@@ -239,11 +266,12 @@ func DeletePod(podKey client.ObjectKey, watcher filenotify.FileWatcher) bool {
 		// Deadline slightly above the pause grace period (5 seconds buffer)
 		timeout := gracePeriod + 5*time.Second
 
-		out, err := runtime.KillProcessByPIDWithTimeout(pid, timeout)
+		secondaryPIDs := resolveSecondaryContainerPIDs(localPod, podDir, pid)
+		out, err := runtime.KillPodProcessesWithTimeout(pid, secondaryPIDs, timeout)
 		if err != nil {
 			if errors.Is(err, runtime.ErrInvalidJob) {
-				logger.Info(" * No such process", "pid", pid, "pod", podKey)
-				// the process does not exist, so it can be considered as deleted.
+				logger.Info(" * No such process or invalid PID", "pid", pid, "pod", podKey)
+				// the process does not exist or is not valid, so it can be considered as deleted.
 				goto remove_pod
 			}
 

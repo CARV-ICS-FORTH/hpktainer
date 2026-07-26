@@ -75,3 +75,42 @@ func TestPauseJobIDPath(t *testing.T) {
 		t.Errorf("expected %s, got %s", expected, podDir.PauseJobIDPath())
 	}
 }
+
+func TestResolveSecondaryContainerPIDs(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "hpk-podhandler-secondary-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-pod",
+			Namespace: "default",
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{Name: "c1"},
+				{Name: "c2"},
+			},
+		},
+	}
+
+	podDir := endpoint.HPK(tmpDir).Pod(client.ObjectKeyFromObject(pod))
+	if err := os.MkdirAll(podDir.ControlFileDir(), 0755); err != nil {
+		t.Fatalf("failed to create control file dir: %v", err)
+	}
+
+	_ = os.WriteFile(podDir.PauseJobIDPath(), []byte("pid://200"), 0644)
+	_ = os.WriteFile(podDir.Container("c1").IDPath(), []byte("pid://301"), 0644)
+	_ = os.WriteFile(podDir.Container("c2").IDPath(), []byte("pid://302"), 0644)
+
+	secondary := resolveSecondaryContainerPIDs(pod, podDir, "200")
+	if len(secondary) != 2 {
+		t.Fatalf("expected 2 secondary PIDs, got %d (%v)", len(secondary), secondary)
+	}
+	if secondary[0] != "301" || secondary[1] != "302" {
+		t.Errorf("expected [301 302], got %v", secondary)
+	}
+}
+
