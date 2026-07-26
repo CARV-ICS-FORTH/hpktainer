@@ -64,7 +64,7 @@ HPK is designed to run in HPC environments under a **single-user trust model**:
 2. **Credential & Certificate Protection**:
    - Cluster credentials (`kubeconfig`, `node-token`) and `hpk-kubelet` private keys (`kubelet.key`) stored in the shared NFS directory (`~/.hpk`) are restricted to owner-only access (`0600` permissions).
    - The K3s server Certificate Authority private key (`server-ca.key`) is retained exclusively in memory/local storage on the controller node and is **never exported** to shared NFS storage.
-   - Node webhook certificates (`kubelet.crt`) are issued via Certificate Signing Requests (CSRs) submitted to `~/.hpk/.certs/<node>/kubelet.csr` and signed by a background signing loop running on the controller node.
+   - Node webhook certificates (`kubelet.crt`) are issued via Certificate Signing Requests (CSRs) submitted to `~/.hpk/.certs/<node>/kubelet.csr` and signed by a background signing loop running on the controller node. Under the single-user trust model, any CSR appearing in `~/.hpk/.certs/` is signed without additional verification, as write access to the user's NFS directory implies full access to all job credentials and node tokens.
 3. **Internal Services & Network Listeners**:
    - Etcd (supporting Calico datastore on port 2379) and Calico BGP (port 17900) run unauthenticated and bind to network interfaces managed within the Slurm job allocation. Access to these ports relies on host user boundaries and Slurm job isolation.
 

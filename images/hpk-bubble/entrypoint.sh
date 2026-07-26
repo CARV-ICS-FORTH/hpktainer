@@ -249,7 +249,7 @@ EOF
                 crt_file="${cert_dir}/kubelet.crt"
                 cnf_file="${cert_dir}/kubelet.cnf"
                 
-                if [ ! -f "$crt_file" ] || [ "$csr_file" -nt "$crt_file" ]; then
+                if [ ! -f "$crt_file" ]; then
                     if [ -f "/var/lib/rancher/k3s/server/tls/server-ca.key" ] && [ -f "/var/lib/rancher/k3s/server/tls/server-ca.crt" ]; then
                         echo "Signing kubelet CSR in ${cert_dir}..."
                         EXT_ARGS=""
@@ -257,12 +257,16 @@ EOF
                             EXT_ARGS="-extfile $cnf_file -extensions v3_req"
                         fi
                         # shellcheck disable=SC2086
-                        openssl x509 -req -days 365 -set_serial $(date +%s%N 2>/dev/null || date +%s) \
+                        if openssl x509 -req -days 365 -set_serial $(date +%s%N 2>/dev/null || date +%s) \
                           -CA /var/lib/rancher/k3s/server/tls/server-ca.crt \
                           -CAkey /var/lib/rancher/k3s/server/tls/server-ca.key \
-                          -in "$csr_file" -out "${crt_file}.tmp" $EXT_ARGS >/dev/null 2>&1
-                        chmod 600 "${crt_file}.tmp"
-                        mv "${crt_file}.tmp" "$crt_file"
+                          -in "$csr_file" -out "${crt_file}.tmp" $EXT_ARGS; then
+                            chmod 600 "${crt_file}.tmp"
+                            mv "${crt_file}.tmp" "$crt_file"
+                        else
+                            echo "ERROR: Failed to sign kubelet CSR in ${cert_dir}" >&2
+                            rm -f "${crt_file}.tmp"
+                        fi
                     fi
                 fi
             done
@@ -316,13 +320,21 @@ if [ ! -f "${NODE_CERT_DIR}/kubelet.key" ]; then
 fi
 chmod 600 "${NODE_CERT_DIR}/kubelet.key"
 
+rm -f "${NODE_CERT_DIR}/kubelet.crt"
 openssl req -new -key "${NODE_CERT_DIR}/kubelet.key" -subj "/CN=hpk-kubelet" \
   -out "${NODE_CERT_DIR}/kubelet.csr.tmp" -config "${NODE_CERT_DIR}/kubelet.cnf"
 mv "${NODE_CERT_DIR}/kubelet.csr.tmp" "${NODE_CERT_DIR}/kubelet.csr"
 
 echo "Waiting for controller to sign kubelet certificate for ${NODE_NAME}..."
-while [ ! -f "${NODE_CERT_DIR}/kubelet.crt" ] || [ "${NODE_CERT_DIR}/kubelet.csr" -nt "${NODE_CERT_DIR}/kubelet.crt" ]; do
+CSR_WAIT=0
+CSR_TIMEOUT=120
+while [ ! -f "${NODE_CERT_DIR}/kubelet.crt" ]; do
+    if [ "$CSR_WAIT" -ge "$CSR_TIMEOUT" ]; then
+        echo "ERROR: Timed out waiting for controller to sign kubelet certificate for ${NODE_NAME}" >&2
+        exit 1
+    fi
     sleep 1
+    CSR_WAIT=$((CSR_WAIT + 1))
 done
 chmod 600 "${NODE_CERT_DIR}/kubelet.crt"
 
