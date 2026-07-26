@@ -494,6 +494,24 @@ func DebugDNSInfo(resolvConfContent string, hostsContent string) {
 
 }
 
+func isValidEnvVarName(name string) bool {
+	if len(name) == 0 {
+		return false
+	}
+	for i, r := range name {
+		if i == 0 {
+			if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r == '_') {
+				return false
+			}
+		} else {
+			if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-' || r == '.') {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func parseEnvVars(output []byte, knownEnvs []v1.EnvVar) []v1.EnvVar {
 	var envs []v1.EnvVar
 	knownKeys := make(map[string]bool)
@@ -510,7 +528,7 @@ func parseEnvVars(output []byte, knownEnvs []v1.EnvVar) []v1.EnvVar {
 			continue
 		}
 		parts := strings.SplitN(line, "=", 2)
-		if len(parts) == 2 && (len(knownKeys) == 0 || knownKeys[parts[0]]) {
+		if len(parts) == 2 && (len(knownKeys) == 0 || knownKeys[parts[0]] || isValidEnvVarName(parts[0])) {
 			envs = append(envs, v1.EnvVar{Name: parts[0], Value: parts[1]})
 		} else if len(envs) > 0 {
 			envs[len(envs)-1].Value += "\n" + line
