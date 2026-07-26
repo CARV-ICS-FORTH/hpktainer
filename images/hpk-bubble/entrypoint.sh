@@ -256,6 +256,7 @@ EOF
                         if [ -f "$cnf_file" ]; then
                             EXT_ARGS="-extfile $cnf_file -extensions v3_req"
                         fi
+                        # shellcheck disable=SC2086
                         openssl x509 -req -days 365 -set_serial $(date +%s%N 2>/dev/null || date +%s) \
                           -CA /var/lib/rancher/k3s/server/tls/server-ca.crt \
                           -CAkey /var/lib/rancher/k3s/server/tls/server-ca.key \

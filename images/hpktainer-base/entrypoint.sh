@@ -44,6 +44,6 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-echo "Network ready. Executing command: $@"
+echo "Network ready. Executing command: $*"
 "$@"
 

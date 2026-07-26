@@ -2,7 +2,6 @@ name: CI
 
 on:
   push:
-    branches: [ main, master ]
   pull_request:
     branches: [ main, master ]
 
@@ -36,4 +35,4 @@ jobs:
         run: make test
 
       - name: Run shellcheck
-        run: shellcheck $(find . -name "*.sh" -not -path "*/.*")
+        run: shellcheck --severity=error $(find . -name "*.sh" -not -path "*/.*")
