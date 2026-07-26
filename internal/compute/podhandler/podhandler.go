@@ -360,14 +360,14 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, watcher filenotify.FileWatc
 		podEnvVariables: podEnvVars,
 	}
 
-	// for _, env := range h.podEnvVariables {
-	// 	logger.Info("env", "name", env.Name)
-	// }
-	// for _, container := range pod.Spec.Containers {
-	// 	for _, env := range container.Env {
-	// 		logger.Info("container env", "name", env.Name)
-	// 	}
-	// }
+	for _, env := range h.podEnvVariables {
+		logger.Info("env", "name", env.Name)
+	}
+	for _, container := range pod.Spec.Containers {
+		for _, env := range container.Env {
+			logger.Info("container env", "name", env.Name)
+		}
+	}
 	// create directory for the job environment.
 	if err := os.MkdirAll(h.podDirectory.JobDir(), endpoint.PodGlobalDirectoryPermissions); err != nil {
 		compute.PodError(pod, "PodDirectoryError", "Cant create pod directory '%s': %v", h.podDirectory.JobDir(), err)
@@ -518,7 +518,7 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, watcher filenotify.FileWatc
 	pod.Annotations["containerRegistry"] = compute.Environment.ContainerRegistry
 	pod.Annotations["apptainerBin"] = compute.Environment.ApptainerBin
 	pod.Annotations["enableCgroupV2"] = fmt.Sprintf("%t", compute.Environment.EnableCgroupV2)
-	pod.Annotations["workingDirectory"] = "/var/lib/hpk"
+	pod.Annotations["workingDirectory"] = compute.Environment.WorkingDirectory
 	pod.Annotations["kubeDNS"] = compute.Environment.KubeDNS
 
 	// Set annotations from VirtualEnvironment

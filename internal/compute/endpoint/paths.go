@@ -72,9 +72,6 @@ const (
 type HPKPath string
 
 func HPK(rootPath string) HPKPath {
-	if strings.HasSuffix(rootPath, ".hpk") || strings.HasSuffix(rootPath, "/hpk") {
-		return HPKPath(rootPath)
-	}
 	return HPKPath(filepath.Join(rootPath, ".hpk"))
 }
 

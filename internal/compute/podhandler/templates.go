@@ -174,6 +174,11 @@ export workdir=/tmp/{{.Pod.Namespace}}_{{.Pod.Name}}
 echo "[Host] Creating workdir: ${workdir} "
 mkdir -p ${workdir}
 
+cleanup() {
+    rm -rf "${workdir}"
+}
+trap cleanup EXIT
+
 echo $$ > "${workdir}/.pid"
 {{- if .UseTmp }}
   {{- range $index, $container := .Containers }}
@@ -196,14 +201,14 @@ export APPTAINERENV_KUBEDNS_IP={{.HostEnv.KubeDNS}}
 export APPTAINERENV_SLIRP_PREFIX=${SLIRP_PREFIX:-10.0.}
 export APPTAINERENV_FALLBACK_DNS=${FALLBACK_DNS:-1.1.1.1}
 
-{{$.HostEnv.ApptainerBin}} exec --nv --no-mount home --scratch /scratch --workdir ${workdir} \
+{{$.HostEnv.ApptainerBin}} exec --nv --scratch /scratch --workdir ${workdir} \
 {{- if .HostEnv.EnableCgroupV2}}
 --apply-cgroups {{.VirtualEnv.CgroupFilePath}} 		\
 {{- end}}
 --env PARENT=${PPID}								\
---bind /var/lib/hpk:/var/lib/hpk			\
+--bind /var/lib/hpk:/k8s-data			\
 --bind /etc/apptainer/apptainer.conf				\
---bind /tmp									\
+--bind $HOME,/tmp									\
 --hostname {{truncate .Pod.Name 63}}							\
 {{$.PauseImageFilePath}} /entrypoint.sh /usr/local/bin/hpk-pause -namespace {{.Pod.Namespace}} -pod {{.Pod.Name}} ||
 echo "[HOST] **SYSTEMERROR** hpk-pause exited with code $?" | tee {{.VirtualEnv.SysErrorFilePath}}
