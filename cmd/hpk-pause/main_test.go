@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"sync"
 	"testing"
+	"time"
 
 	"hpk/internal/compute/endpoint"
 	v1 "k8s.io/api/core/v1"
@@ -202,4 +203,46 @@ func TestGetHostResolvConf_EnvConfig(t *testing.T) {
 	if res == "" {
 		t.Fatalf("expected non-empty resolv.conf output")
 	}
+}
+
+func TestResolveGracePeriod(t *testing.T) {
+	t.Run("Default", func(t *testing.T) {
+		pod := &v1.Pod{}
+		if got := resolveGracePeriod(pod); got != 30*time.Second {
+			t.Errorf("expected 30s default, got %v", got)
+		}
+	})
+
+	t.Run("EnvVar", func(t *testing.T) {
+		t.Setenv("TERMINATION_GRACE_PERIOD_SECONDS", "15")
+		pod := &v1.Pod{}
+		if got := resolveGracePeriod(pod); got != 15*time.Second {
+			t.Errorf("expected 15s from env var, got %v", got)
+		}
+	})
+
+	t.Run("PodSpecOverride", func(t *testing.T) {
+		t.Setenv("TERMINATION_GRACE_PERIOD_SECONDS", "15")
+		grace := int64(45)
+		pod := &v1.Pod{
+			Spec: v1.PodSpec{
+				TerminationGracePeriodSeconds: &grace,
+			},
+		}
+		if got := resolveGracePeriod(pod); got != 45*time.Second {
+			t.Errorf("expected 45s from pod spec, got %v", got)
+		}
+	})
+
+	t.Run("ZeroGracePeriod", func(t *testing.T) {
+		grace := int64(0)
+		pod := &v1.Pod{
+			Spec: v1.PodSpec{
+				TerminationGracePeriodSeconds: &grace,
+			},
+		}
+		if got := resolveGracePeriod(pod); got != 0 {
+			t.Errorf("expected 0s grace period, got %v", got)
+		}
+	})
 }

@@ -233,7 +233,7 @@ func DeletePod(podKey client.ObjectKey, watcher filenotify.FileWatcher) bool {
 
 	{
 		gracePeriod := 30 * time.Second
-		if localPod != nil && localPod.Spec.TerminationGracePeriodSeconds != nil && *localPod.Spec.TerminationGracePeriodSeconds > 0 {
+		if localPod != nil && localPod.Spec.TerminationGracePeriodSeconds != nil && *localPod.Spec.TerminationGracePeriodSeconds >= 0 {
 			gracePeriod = time.Duration(*localPod.Spec.TerminationGracePeriodSeconds) * time.Second
 		}
 		// Deadline slightly above the pause grace period (5 seconds buffer)

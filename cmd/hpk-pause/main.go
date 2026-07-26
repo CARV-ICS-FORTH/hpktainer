@@ -187,6 +187,8 @@ acquire_pod_loop:
 		}
 	}
 
+	gracePeriod := resolveGracePeriod(pod)
+
 	tracker := newContainerTracker()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -211,8 +213,8 @@ acquire_pod_loop:
 					select {
 					case <-done:
 						log.Info().Msg("All containers terminated gracefully")
-					case <-time.After(30 * time.Second):
-						log.Warn().Msg("Grace period (30s) expired, sending SIGKILL to remaining containers")
+					case <-time.After(gracePeriod):
+						log.Warn().Msgf("Grace period (%v) expired, sending SIGKILL to remaining containers", gracePeriod)
 						tracker.SignalAll(syscall.SIGKILL)
 						<-done
 					}
@@ -711,4 +713,17 @@ func handleContainers(pod *v1.Pod, wg *sync.WaitGroup, tracker *containerTracker
 		}(pod.Spec.Containers[i])
 	}
 	return nil
+}
+
+func resolveGracePeriod(pod *v1.Pod) time.Duration {
+	gracePeriod := 30 * time.Second
+	if envGrace := os.Getenv("TERMINATION_GRACE_PERIOD_SECONDS"); envGrace != "" {
+		if g, err := strconv.ParseInt(envGrace, 10, 64); err == nil && g >= 0 {
+			gracePeriod = time.Duration(g) * time.Second
+		}
+	}
+	if pod != nil && pod.Spec.TerminationGracePeriodSeconds != nil && *pod.Spec.TerminationGracePeriodSeconds >= 0 {
+		gracePeriod = time.Duration(*pod.Spec.TerminationGracePeriodSeconds) * time.Second
+	}
+	return gracePeriod
 }
