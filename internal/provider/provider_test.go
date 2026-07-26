@@ -61,16 +61,7 @@ func TestReconcileNonTerminalPodsNotifiesOnlyOnChange(t *testing.T) {
 	// First call - PodHandler.UpdateStatusFromRuntime will calculate status from runtime
 	vk.reconcileNonTerminalPods()
 
-	// Save current pod status to disk so next reconcile has matching status
-	podReloaded, err := PodHandler.LoadPodFromKey(podKey)
-	if err != nil {
-		t.Fatalf("failed to load pod: %v", err)
-	}
-	PodHandler.UpdateStatusFromRuntime(podReloaded)
-	if err := PodHandler.SavePodToFile(nil, podReloaded); err != nil {
-		t.Fatalf("failed to save updated pod: %v", err)
-	}
-
+	// Reconcile automatically persisted the updated status to disk, so next reconcile has matching status.
 	notifyCount = 0
 
 	// Second reconcile without any runtime changes should NOT trigger updatedPod

@@ -560,13 +560,18 @@ func (v *VirtualK8S) reconcileNonTerminalPods() {
 			!apiequality.Semantic.DeepEqual(oldStatus.ContainerStatuses, pod.Status.ContainerStatuses) ||
 			!apiequality.Semantic.DeepEqual(oldStatus.InitContainerStatuses, pod.Status.InitContainerStatuses)
 
-		if changed && v.updatedPod != nil {
-			v.updatedPod(pod)
-			v.Logger.Info("Periodic reconcile checked pod status",
-				"pod", podKey,
-				"oldPhase", oldStatus.Phase,
-				"newPhase", pod.Status.Phase,
-			)
+		if changed {
+			if err := PodHandler.SavePodToFile(context.Background(), pod); err != nil {
+				v.Logger.Error(err, "Failed to persist updated pod status during reconciliation", "pod", podKey)
+			}
+			if v.updatedPod != nil {
+				v.updatedPod(pod)
+				v.Logger.Info("Periodic reconcile checked pod status",
+					"pod", podKey,
+					"oldPhase", oldStatus.Phase,
+					"newPhase", pod.Status.Phase,
+				)
+			}
 		}
 		return nil
 	}); err != nil {

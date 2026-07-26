@@ -151,11 +151,11 @@ func main() {
 
 			// Retries for client connection (wait for daemon on host to start/socket to appear)
 			var conn net.Conn
-			maxRetries := 10
-			if dialCount > 0 {
-				maxRetries = 5
-			}
-			for i := 0; i < maxRetries; i++ {
+			backoff := 500 * time.Millisecond
+			maxBackoff := 5 * time.Second
+			deadline := time.Now().Add(30 * time.Second)
+
+			for {
 				select {
 				case <-ctx.Done():
 					wg.Wait()
@@ -166,7 +166,14 @@ func main() {
 				if err == nil {
 					break
 				}
-				time.Sleep(500 * time.Millisecond)
+				if time.Now().After(deadline) {
+					break
+				}
+				time.Sleep(backoff)
+				backoff *= 2
+				if backoff > maxBackoff {
+					backoff = maxBackoff
+				}
 			}
 
 			if err != nil {
