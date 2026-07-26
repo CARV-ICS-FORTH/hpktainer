@@ -52,7 +52,9 @@ import (
 )
 
 // InitConfig is the config passed to initialize a registered provider.
+// TODO(future): Move to a per-node cache/subtree structure (.hpk/<node>/<ns>/<pod>) to remove cross-node pod path ambiguity entirely across all path helpers.
 type InitConfig struct {
+	NodeName   string
 	InternalIP string
 	DaemonPort int32
 
@@ -66,6 +68,14 @@ type InitConfig struct {
 
 	PauseImage string
 }
+
+func isPodOwnedByNode(pod *corev1.Pod, ownNode string) bool {
+	if ownNode == "" || pod == nil || pod.Spec.NodeName == "" {
+		return true
+	}
+	return pod.Spec.NodeName == ownNode
+}
+
 
 // VirtualK8S implements the virtual-kubelet provider interface and stores pods in memory.
 type VirtualK8S struct {
@@ -109,6 +119,15 @@ func NewVirtualK8S(config InitConfig) (*VirtualK8S, error) {
 	// move corrupted pods to a centralized dir for inspection.
 	// Valid are considered the pods with a Pod description.
 	if err := compute.HPK.WalkPodDirectories(func(podpath endpoint.PodPath) error {
+		if encodedPod, err := os.ReadFile(podpath.EncodedJSONPath()); err == nil {
+			var pod corev1.Pod
+			if err := json.Unmarshal(encodedPod, &pod); err == nil {
+				if !isPodOwnedByNode(&pod, config.NodeName) {
+					return nil
+				}
+			}
+		}
+
 		ok, info := podpath.PodEnvironmentIsOK()
 		if !ok {
 			corruptedPods = append(corruptedPods, podpath)
@@ -166,6 +185,14 @@ func NewVirtualK8S(config InitConfig) (*VirtualK8S, error) {
 	 * Set fsnotify watchers for Pods
 	 *---------------------------------------------------*/
 	if err := compute.HPK.WalkPodDirectories(func(path endpoint.PodPath) error {
+		if encodedPod, err := os.ReadFile(path.EncodedJSONPath()); err == nil {
+			var pod corev1.Pod
+			if err := json.Unmarshal(encodedPod, &pod); err == nil {
+				if !isPodOwnedByNode(&pod, config.NodeName) {
+					return nil
+				}
+			}
+		}
 		// register the watcher
 		return watcher.Add(path.ControlFileDir())
 	}); err != nil {
@@ -307,6 +334,18 @@ func (v *VirtualK8S) DeletePod(ctx context.Context, pod *corev1.Pod) error {
 
 	logger.Info("[K8s] -> DeletePod")
 
+	if !isPodOwnedByNode(pod, v.NodeName) {
+		logger.Info("[K8s] <- DeletePod (SKIPPED - pod owned by another node)", "podNode", pod.Spec.NodeName, "ownNode", v.NodeName)
+		return nil
+	}
+
+	if localPod, err := PodHandler.LoadPodFromKey(podKey); err == nil {
+		if !isPodOwnedByNode(localPod, v.NodeName) {
+			logger.Info("[K8s] <- DeletePod (SKIPPED - local pod file owned by another node)", "podNode", localPod.Spec.NodeName, "ownNode", v.NodeName)
+			return nil
+		}
+	}
+
 	if !PodHandler.DeletePod(podKey, v.fileWatcher) {
 		logger.Info("[K8s] <- DeletePod (POD NOT FOUND)")
 
@@ -393,6 +432,10 @@ func (v *VirtualK8S) GetPods(ctx context.Context) ([]*corev1.Pod, error) {
 
 		if err := json.Unmarshal(encodedPod, &pod); err != nil {
 			return fmt.Errorf("cannot decode pod description file '%s': %w", path, err)
+		}
+
+		if !isPodOwnedByNode(&pod, v.NodeName) {
+			return nil
 		}
 
 		/*-- return all pods managed by this provider --*/
@@ -499,6 +542,10 @@ func (v *VirtualK8S) reconcileNonTerminalPods() {
 
 		pod, err := PodHandler.LoadPodFromKey(podKey)
 		if err != nil {
+			return nil
+		}
+
+		if !isPodOwnedByNode(pod, v.NodeName) {
 			return nil
 		}
 

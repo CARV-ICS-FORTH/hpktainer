@@ -200,6 +200,7 @@ func runRootCommand(ctx context.Context, c Opts) error {
 	 * Register the Provisioner of Virtual Nodes
 	 *---------------------------------------------------*/
 	virtualk8s, err := provider.NewVirtualK8S(provider.InitConfig{
+		NodeName:          c.NodeName,
 		InternalIP:        c.KubeletAddress,
 		DaemonPort:        c.KubeletPort,
 		BuildVersion:      commands.BuildVersion,
