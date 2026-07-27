@@ -74,7 +74,6 @@ func isPodOwnedByNode(pod *corev1.Pod, ownNode string) bool {
 	return pod.Spec.NodeName == ownNode
 }
 
-
 // VirtualK8S implements the virtual-kubelet provider interface and stores pods in memory.
 type VirtualK8S struct {
 	InitConfig

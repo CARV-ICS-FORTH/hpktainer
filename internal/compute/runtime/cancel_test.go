@@ -30,7 +30,6 @@ func createHelperProcess(t *testing.T) *exec.Cmd {
 	return cmd
 }
 
-
 func TestKillProcessByPID_InvalidInputs(t *testing.T) {
 	_, err := KillProcessByPID("")
 	if !errors.Is(err, ErrInvalidJob) {
@@ -129,12 +128,3 @@ func TestKillPodProcessesWithTimeout_GroupEscalation(t *testing.T) {
 		t.Fatal("secondary process did not exit within timeout after SIGKILL")
 	}
 }
-
-
-
-
-
-
-
-
-

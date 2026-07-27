@@ -61,7 +61,6 @@ func isProcessDead(pid int) bool {
 	return false
 }
 
-
 // isExpectedProcess checks whether a process's /proc/<pid>/comm or /proc/<pid>/cmdline
 // matches expected container or helper process names. This prevents signaling unrelated host processes
 // if a PID has been recycled after a crash.
@@ -93,7 +92,6 @@ func isExpectedProcess(pid int) bool {
 
 	return false
 }
-
 
 // KillProcessByPID terminates a process by its PID using syscall.Kill with a default timeout of 35 seconds.
 func KillProcessByPID(pidStr string) (string, error) {
@@ -197,4 +195,3 @@ func KillPodProcessesWithTimeout(primaryPIDStr string, secondaryPIDStrs []string
 		time.Sleep(250 * time.Millisecond)
 	}
 }
-

@@ -1,3 +1,4 @@
+#!/bin/sh
 TEST_NAMESPACE=minio
 
 # Install Minio

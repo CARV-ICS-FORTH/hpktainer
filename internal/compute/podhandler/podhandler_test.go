@@ -113,4 +113,3 @@ func TestResolveSecondaryContainerPIDs(t *testing.T) {
 		t.Errorf("expected [301 302], got %v", secondary)
 	}
 }
-
