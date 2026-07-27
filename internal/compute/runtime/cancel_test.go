@@ -189,3 +189,33 @@ func TestProcessIdentityVerification_StartTimeMismatch(t *testing.T) {
 		t.Fatalf("unexpected error killing process with matching start time: %v", err)
 	}
 }
+
+func TestKillPodProcessesWithTimeout_PrimaryDeadSweepsSecondary(t *testing.T) {
+	primary := createHelperProcess(t)
+	secondary := createHelperProcess(t)
+	time.Sleep(100 * time.Millisecond)
+
+	// Terminate primary process first to simulate crashed pause process (ESRCH)
+	_ = primary.Process.Kill()
+	_ = primary.Wait()
+
+	doneS := make(chan struct{})
+	go func() {
+		_ = secondary.Wait()
+		close(doneS)
+	}()
+
+	primaryPIDStr := strconv.Itoa(primary.Process.Pid)
+	secondaryPIDStr := strconv.Itoa(secondary.Process.Pid)
+
+	_, err := KillPodProcessesWithTimeout(primaryPIDStr, []string{secondaryPIDStr}, 200*time.Millisecond)
+	if !errors.Is(err, ErrInvalidJob) {
+		t.Fatalf("expected ErrInvalidJob when primary process is dead, got %v", err)
+	}
+
+	select {
+	case <-doneS:
+	case <-time.After(3 * time.Second):
+		t.Fatal("secondary container process was not terminated when primary pause process was already dead")
+	}
+}

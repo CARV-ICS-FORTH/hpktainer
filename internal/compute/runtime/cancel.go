@@ -118,36 +118,62 @@ func KillProcessByPIDWithTimeout(pidStr string, timeout time.Duration) (string, 
 	return KillPodProcessesWithTimeout(pidStr, nil, timeout)
 }
 
+// sweepSecondaryPIDs sends SIGTERM to secondary container process groups (-pgid) and PIDs,
+// waits briefly, and then sends SIGKILL to clean up any orphaned container processes.
+func sweepSecondaryPIDs(secondaryPIDs []int) {
+	if len(secondaryPIDs) == 0 {
+		return
+	}
+	for _, secPID := range secondaryPIDs {
+		if secPID > 1 {
+			_ = syscall.Kill(-secPID, syscall.SIGTERM)
+			_ = syscall.Kill(secPID, syscall.SIGTERM)
+		}
+	}
+
+	time.Sleep(200 * time.Millisecond)
+
+	for _, secPID := range secondaryPIDs {
+		if secPID > 1 {
+			_ = syscall.Kill(-secPID, syscall.SIGKILL)
+			_ = syscall.Kill(secPID, syscall.SIGKILL)
+		}
+	}
+}
+
 // KillPodProcessesWithTimeout sends SIGTERM to primaryPIDStr and polls for process exit until timeout.
 // It uses adaptive polling (50 ms for the first second, then 250 ms) to reduce CPU overhead during grace periods.
 // If timeout is reached, SIGKILL is sent to primaryPIDStr AND to all process groups (-pgid) and PIDs in secondaryPIDStrs.
 func KillPodProcessesWithTimeout(primaryPIDStr string, secondaryPIDStrs []string, timeout time.Duration) (string, error) {
-	primaryPIDStr = strings.TrimSpace(primaryPIDStr)
-	if primaryPIDStr == "" {
-		return "", ErrInvalidJob
-	}
-
-	primaryPID, primaryStartTime, err := ParseProcessJobID(primaryPIDStr)
-	if err != nil {
-		return "", fmt.Errorf("%w: invalid pid '%s': %v", ErrInvalidJob, primaryPIDStr, err)
-	}
-
-	// Verify PID is the expected process by start time identity to prevent stale PID signaling on recycled host PIDs
-	if !verifyProcessIdentity(primaryPID, primaryStartTime) {
-		return "", fmt.Errorf("%w: process '%d' start time does not match recorded identity", ErrInvalidJob, primaryPID)
-	}
-
 	var secondaryPIDs []int
 	for _, s := range secondaryPIDStrs {
 		s = strings.TrimSpace(s)
 		if s == "" {
 			continue
 		}
-		if p, secStartTime, err := ParseProcessJobID(s); err == nil && p > 0 {
+		if p, secStartTime, err := ParseProcessJobID(s); err == nil && p > 1 {
 			if verifyProcessIdentity(p, secStartTime) {
 				secondaryPIDs = append(secondaryPIDs, p)
 			}
 		}
+	}
+
+	primaryPIDStr = strings.TrimSpace(primaryPIDStr)
+	if primaryPIDStr == "" {
+		sweepSecondaryPIDs(secondaryPIDs)
+		return "", ErrInvalidJob
+	}
+
+	primaryPID, primaryStartTime, err := ParseProcessJobID(primaryPIDStr)
+	if err != nil {
+		sweepSecondaryPIDs(secondaryPIDs)
+		return "", fmt.Errorf("%w: invalid pid '%s': %v", ErrInvalidJob, primaryPIDStr, err)
+	}
+
+	// Verify PID is the expected process by start time identity to prevent stale PID signaling on recycled host PIDs
+	if !verifyProcessIdentity(primaryPID, primaryStartTime) {
+		sweepSecondaryPIDs(secondaryPIDs)
+		return "", fmt.Errorf("%w: process '%d' start time does not match recorded identity", ErrInvalidJob, primaryPID)
 	}
 
 	/*
@@ -157,9 +183,11 @@ func KillPodProcessesWithTimeout(primaryPIDStr string, secondaryPIDStrs []string
 	if err := syscall.Kill(primaryPID, syscall.SIGTERM); err != nil {
 		// If the process does not exist (ESRCH), consider it as already terminated.
 		if errors.Is(err, syscall.ESRCH) {
+			sweepSecondaryPIDs(secondaryPIDs)
 			return "", ErrInvalidJob
 		}
 
+		sweepSecondaryPIDs(secondaryPIDs)
 		return "", fmt.Errorf("could not kill process '%d': %w", primaryPID, err)
 	}
 
@@ -189,10 +217,12 @@ func KillPodProcessesWithTimeout(primaryPIDStr string, secondaryPIDStrs []string
 
 	// Escalate SIGKILL to secondary container process groups (-pgid) and PIDs as second-tier fallback
 	for _, secPID := range secondaryPIDs {
-		// Signal process group leadership first (-secPID)
-		_ = syscall.Kill(-secPID, syscall.SIGKILL)
-		// Signal container PID directly
-		_ = syscall.Kill(secPID, syscall.SIGKILL)
+		if secPID > 1 {
+			// Signal process group leadership first (-secPID)
+			_ = syscall.Kill(-secPID, syscall.SIGKILL)
+			// Signal container PID directly
+			_ = syscall.Kill(secPID, syscall.SIGKILL)
+		}
 	}
 
 	killDeadline := time.Now().Add(5 * time.Second)
