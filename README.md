@@ -86,6 +86,21 @@ REGISTRY=myregistry.io/user make
 
 *Note for developers: You can also build the binaries locally for testing purposes using `make binaries`. These will be placed in `bin/`.*
 
+### Development & CI Checks
+
+Before pushing commits, run local verification checks to ensure CI pipeline succeeds:
+
+```bash
+make ci
+```
+
+This runs the same steps enforced by GitHub Actions:
+- **Code formatting check**: `make fmt-check` (auto-fix with `make fmt`)
+- **Go vet**: `make vet`
+- **Binary builds**: `make binaries-linux-amd64`
+- **Unit tests**: `make test`
+- **ShellCheck**: `shellcheck --severity=error $(find . -name "*.sh" -not -path "*/.*")`
+
 ## Evaluating Locally
 
 You can test the setup locally using the provided Vagrant environment, which simulates a multi-node cluster using VMs.
