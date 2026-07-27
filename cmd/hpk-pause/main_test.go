@@ -198,17 +198,71 @@ func TestParseEnvVars_MultiLine(t *testing.T) {
 	}
 }
 
-func TestGetHostResolvConf_EnvConfig(t *testing.T) {
+func TestGetHostResolvConf(t *testing.T) {
 	fallbackIP := "8.8.8.8"
 	t.Setenv("FALLBACK_DNS", fallbackIP)
+	kubeDNS := "10.96.0.10"
 
-	res := getHostResolvConf("10.0.0.1")
-	if res == "" {
-		t.Fatalf("expected non-empty resolv.conf output")
-	}
-	if !strings.Contains(res, fallbackIP) {
-		t.Fatalf("expected fallback nameserver %s in resolv.conf output:\n%s", fallbackIP, res)
-	}
+	t.Run("LoopbackOnly_FallbackAppears", func(t *testing.T) {
+		dir := t.TempDir()
+		resolvFile := filepath.Join(dir, "resolv.conf")
+		content := "nameserver 127.0.0.1\nnameserver 127.0.0.53\nsearch default.svc.cluster.local\n"
+		if err := os.WriteFile(resolvFile, []byte(content), 0644); err != nil {
+			t.Fatalf("failed to write fixture: %v", err)
+		}
+
+		res := getHostResolvConf(kubeDNS, resolvFile)
+		if !strings.Contains(res, "nameserver "+fallbackIP) {
+			t.Errorf("expected fallback nameserver %s in resolv.conf output, got:\n%s", fallbackIP, res)
+		}
+		if strings.Contains(res, "nameserver 127.0.0.1") || strings.Contains(res, "nameserver 127.0.0.53") {
+			t.Errorf("expected loopback nameservers to be filtered out, got:\n%s", res)
+		}
+		if !strings.Contains(res, "search default.svc.cluster.local") {
+			t.Errorf("expected search directive to be preserved, got:\n%s", res)
+		}
+	})
+
+	t.Run("RealNameserver_FallbackAbsent", func(t *testing.T) {
+		dir := t.TempDir()
+		resolvFile := filepath.Join(dir, "resolv.conf")
+		content := "nameserver 192.168.1.1\nsearch example.com\n"
+		if err := os.WriteFile(resolvFile, []byte(content), 0644); err != nil {
+			t.Fatalf("failed to write fixture: %v", err)
+		}
+
+		res := getHostResolvConf(kubeDNS, resolvFile)
+		if strings.Contains(res, fallbackIP) {
+			t.Errorf("expected fallback nameserver %s to be absent, got:\n%s", fallbackIP, res)
+		}
+		if !strings.Contains(res, "nameserver 192.168.1.1") {
+			t.Errorf("expected real nameserver 192.168.1.1 in resolv.conf output, got:\n%s", res)
+		}
+		if !strings.Contains(res, "search example.com") {
+			t.Errorf("expected search directive to be preserved, got:\n%s", res)
+		}
+	})
+
+	t.Run("KubeDNSIP_FilteredOut", func(t *testing.T) {
+		dir := t.TempDir()
+		resolvFile := filepath.Join(dir, "resolv.conf")
+		content := fmt.Sprintf("nameserver %s\n", kubeDNS)
+		if err := os.WriteFile(resolvFile, []byte(content), 0644); err != nil {
+			t.Fatalf("failed to write fixture: %v", err)
+		}
+
+		res := getHostResolvConf(kubeDNS, resolvFile)
+		if !strings.Contains(res, "nameserver "+fallbackIP) {
+			t.Errorf("expected fallback nameserver when only kubeDNS IP is present, got:\n%s", res)
+		}
+	})
+
+	t.Run("NonExistentFile_FallbackAppears", func(t *testing.T) {
+		res := getHostResolvConf(kubeDNS, filepath.Join(t.TempDir(), "nonexistent.conf"))
+		if !strings.Contains(res, "nameserver "+fallbackIP) {
+			t.Errorf("expected fallback nameserver for nonexistent file, got:\n%s", res)
+		}
+	})
 }
 
 func TestAnnounceIP_Permissions(t *testing.T) {

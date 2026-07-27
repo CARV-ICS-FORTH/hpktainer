@@ -359,13 +359,20 @@ func cleanEnvironment() error {
 	return nil
 }
 
-func getHostResolvConf(kubeDNSIP string) string {
+func getHostResolvConf(kubeDNSIP string, resolvConfPath string) string {
 	fallbackDNS := os.Getenv("FALLBACK_DNS")
 	if fallbackDNS == "" {
 		fallbackDNS = "1.1.1.1"
 	}
 
-	paths := []string{"/etc/resolv.conf", "/run/systemd/resolve/resolv.conf"}
+	if resolvConfPath == "" {
+		resolvConfPath = "/etc/resolv.conf"
+	}
+
+	paths := []string{resolvConfPath}
+	if resolvConfPath == "/etc/resolv.conf" {
+		paths = append(paths, "/run/systemd/resolve/resolv.conf")
+	}
 	var raw string
 	for _, p := range paths {
 		if b, err := os.ReadFile(p); err == nil {
@@ -424,7 +431,7 @@ func prepareDNS(pod *v1.Pod) error {
 	var resolvConfContent string
 	isCoreDNS := strings.HasPrefix(pod.Name, "coredns") || (pod.Labels != nil && pod.Labels["k8s-app"] == "kube-dns")
 	if pod.Spec.DNSPolicy == v1.DNSDefault || isCoreDNS {
-		resolvConfContent = getHostResolvConf(kubeDNSIP)
+		resolvConfContent = getHostResolvConf(kubeDNSIP, "/etc/resolv.conf")
 	} else if pod.Spec.DNSPolicy == v1.DNSNone {
 		resolvConfContent = ""
 	} else {
