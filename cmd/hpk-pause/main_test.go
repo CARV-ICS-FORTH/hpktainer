@@ -161,16 +161,11 @@ func TestContainerTracker(t *testing.T) {
 }
 
 func TestParseEnvVars_MultiLine(t *testing.T) {
-	output := []byte("FOO=bar\nCERT=-----BEGIN CERTIFICATE-----\nMIIF...\n-----END CERTIFICATE-----\nBAZ=qux\nKUBERNETES_SERVICE_HOST=10.0.0.1\nKUBERNETES_SERVICE_PORT=6443\n")
-	knownEnvs := []v1.EnvVar{
-		{Name: "FOO"},
-		{Name: "CERT"},
-		{Name: "BAZ"},
-	}
+	output := []byte("FOO=bar\x00CERT=-----BEGIN CERTIFICATE-----\nMIIF...\n-----END CERTIFICATE-----\x00TOKEN=first-line\nQUJDREVGRw==\x00BAR=baz\x00KUBERNETES_SERVICE_HOST=10.0.0.1\x00KUBERNETES_SERVICE_PORT=6443\x00")
 
-	envs := parseEnvVars(output, knownEnvs)
-	if len(envs) != 5 {
-		t.Fatalf("expected 5 env vars, got %d", len(envs))
+	envs := parseEnvVars(output)
+	if len(envs) != 6 {
+		t.Fatalf("expected 6 env vars, got %d", len(envs))
 	}
 
 	if envs[0].Name != "FOO" || envs[0].Value != "bar" {
@@ -182,16 +177,21 @@ func TestParseEnvVars_MultiLine(t *testing.T) {
 		t.Errorf("unexpected env[1]: %+v (expected cert value %q)", envs[1], expectedCert)
 	}
 
-	if envs[2].Name != "BAZ" || envs[2].Value != "qux" {
-		t.Errorf("unexpected env[2]: %+v (expected qux without service var pollution)", envs[2])
+	expectedToken := "first-line\nQUJDREVGRw=="
+	if envs[2].Name != "TOKEN" || envs[2].Value != expectedToken {
+		t.Errorf("unexpected env[2]: %+v (expected token value %q)", envs[2], expectedToken)
 	}
 
-	if envs[3].Name != "KUBERNETES_SERVICE_HOST" || envs[3].Value != "10.0.0.1" {
-		t.Errorf("unexpected env[3]: %+v", envs[3])
+	if envs[3].Name != "BAR" || envs[3].Value != "baz" {
+		t.Errorf("unexpected env[3]: %+v (expected baz)", envs[3])
 	}
 
-	if envs[4].Name != "KUBERNETES_SERVICE_PORT" || envs[4].Value != "6443" {
+	if envs[4].Name != "KUBERNETES_SERVICE_HOST" || envs[4].Value != "10.0.0.1" {
 		t.Errorf("unexpected env[4]: %+v", envs[4])
+	}
+
+	if envs[5].Name != "KUBERNETES_SERVICE_PORT" || envs[5].Value != "6443" {
+		t.Errorf("unexpected env[5]: %+v", envs[5])
 	}
 }
 

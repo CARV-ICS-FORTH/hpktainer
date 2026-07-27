@@ -177,9 +177,9 @@ const GenerateEnvTemplate = `#!/bin/bash
 
 {{- range $index, $variable := .Variables}}
 {{- if eq $variable.Value ".status.podIP"}}
-echo {{$variable.Name}}=$(ip route get 1 | sed -n 's/.*src \([0-9.]\+\).*/\1/p')
+printf '%s=%s\0' {{$variable.Name | param}} "$(ip route get 1 | sed -n 's/.*src \([0-9.]\+\).*/\1/p')"
 {{ else }}
-echo {{$variable.Name}}={{$variable.Value | param}}
+printf '%s=%s\0' {{$variable.Name | param}} {{$variable.Value | param}}
 {{- end}}
 {{- end}}
 `
