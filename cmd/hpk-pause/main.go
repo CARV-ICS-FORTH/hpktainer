@@ -33,6 +33,7 @@ import (
 	"hpk/internal/compute/endpoint"
 	"hpk/internal/compute/image"
 	"hpk/internal/compute/podhandler"
+	"hpk/internal/compute/runtime"
 	kubecontainer "hpk/pkg/container"
 	"hpk/pkg/version"
 
@@ -182,8 +183,9 @@ acquire_pod_loop:
 	podPath := hpk.Pod(podKey)
 
 	pausePID := os.Getpid()
+	pauseStartTime, _ := runtime.GetProcessStartTime(pausePID)
 	if err := os.MkdirAll(podPath.ControlFileDir(), 0755); err == nil {
-		if err := os.WriteFile(podPath.PauseJobIDPath(), []byte(fmt.Sprintf("pid://%d", pausePID)), 0644); err != nil {
+		if err := os.WriteFile(podPath.PauseJobIDPath(), []byte(runtime.FormatProcessJobID(pausePID, pauseStartTime)), 0644); err != nil {
 			log.Error().Err(err).Msg("Failed to write pause jobid file")
 		}
 	}
@@ -636,7 +638,8 @@ func executeContainer(pod *v1.Pod, container *v1.Container, containerType string
 	defer tracker.Remove(cmd)
 
 	pid := cmd.Process.Pid
-	if err := os.WriteFile(containerPath.IDPath(), []byte(fmt.Sprintf("pid://%d", pid)), 0644); err != nil {
+	cmdStartTime, _ := runtime.GetProcessStartTime(pid)
+	if err := os.WriteFile(containerPath.IDPath(), []byte(runtime.FormatProcessJobID(pid, cmdStartTime)), 0644); err != nil {
 		log.Error().Err(err).Msgf("Failed to create pid file for %s: %s", containerType, container.Name)
 		_ = os.WriteFile(containerPath.ExitCodePath(), []byte("128"), 0644)
 		return fmt.Errorf("failed to create pid file: %w", err)

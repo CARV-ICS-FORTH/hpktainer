@@ -61,36 +61,50 @@ func isProcessDead(pid int) bool {
 	return false
 }
 
-// isExpectedProcess checks whether a process's /proc/<pid>/comm or /proc/<pid>/cmdline
-// matches expected container or helper process names. This prevents signaling unrelated host processes
-// if a PID has been recycled after a crash.
-func isExpectedProcess(pid int) bool {
+// GetProcessStartTime returns the process start time (field 22 of /proc/<pid>/stat) in clock ticks since boot.
+func GetProcessStartTime(pid int) (uint64, error) {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return 0, err
+	}
+
+	idx := bytes.LastIndexByte(data, ')')
+	if idx == -1 || idx+1 >= len(data) {
+		return 0, fmt.Errorf("invalid stat format for pid %d", pid)
+	}
+
+	fields := strings.Fields(string(data[idx+1:]))
+	if len(fields) <= 19 {
+		return 0, fmt.Errorf("stat format for pid %d has insufficient fields", pid)
+	}
+
+	startTime, err := strconv.ParseUint(fields[19], 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("failed to parse starttime for pid %d: %w", pid, err)
+	}
+
+	return startTime, nil
+}
+
+// verifyProcessIdentity checks whether a process with the given PID matches the recorded process identity.
+// If /proc is present and recordedStartTime > 0, it verifies that current start time matches recordedStartTime.
+func verifyProcessIdentity(pid int, recordedStartTime uint64) bool {
 	// If /proc is not present (e.g. non-Linux systems), skip check
 	if _, err := os.Stat("/proc"); os.IsNotExist(err) {
 		return true
 	}
 
-	commBytes, commErr := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid))
-	cmdlineBytes, cmdErr := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
-	if commErr != nil && cmdErr != nil {
-		// Cannot inspect proc entry; process may be exiting or inaccessible
-		return true
+	currStartTime, err := GetProcessStartTime(pid)
+	if err != nil {
+		// Process may be dead or inaccessible
+		return false
 	}
 
-	comm := strings.ToLower(string(commBytes))
-	cmdline := strings.ToLower(string(cmdlineBytes))
-
-	expectedKeywords := []string{
-		"apptainer", "hpk-pause", "singularity", "starter", "hpk",
-		"sleep", "sh", "bash", "python", "node", "ruby", "perl", "go", "test",
-	}
-	for _, kw := range expectedKeywords {
-		if strings.Contains(comm, kw) || strings.Contains(cmdline, kw) {
-			return true
-		}
+	if recordedStartTime > 0 {
+		return currStartTime == recordedStartTime
 	}
 
-	return false
+	return true
 }
 
 // KillProcessByPID terminates a process by its PID using syscall.Kill with a default timeout of 35 seconds.
@@ -113,14 +127,14 @@ func KillPodProcessesWithTimeout(primaryPIDStr string, secondaryPIDStrs []string
 		return "", ErrInvalidJob
 	}
 
-	primaryPID, err := strconv.Atoi(primaryPIDStr)
+	primaryPID, primaryStartTime, err := ParseProcessJobID(primaryPIDStr)
 	if err != nil {
 		return "", fmt.Errorf("%w: invalid pid '%s': %v", ErrInvalidJob, primaryPIDStr, err)
 	}
 
-	// Verify PID is an expected process to prevent stale PID signaling on recycled host PIDs
-	if !isExpectedProcess(primaryPID) {
-		return "", fmt.Errorf("%w: process '%d' does not match expected container process signature", ErrInvalidJob, primaryPID)
+	// Verify PID is the expected process by start time identity to prevent stale PID signaling on recycled host PIDs
+	if !verifyProcessIdentity(primaryPID, primaryStartTime) {
+		return "", fmt.Errorf("%w: process '%d' start time does not match recorded identity", ErrInvalidJob, primaryPID)
 	}
 
 	var secondaryPIDs []int
@@ -129,8 +143,8 @@ func KillPodProcessesWithTimeout(primaryPIDStr string, secondaryPIDStrs []string
 		if s == "" {
 			continue
 		}
-		if p, err := strconv.Atoi(s); err == nil && p > 0 {
-			if isExpectedProcess(p) {
+		if p, secStartTime, err := ParseProcessJobID(s); err == nil && p > 0 {
+			if verifyProcessIdentity(p, secStartTime) {
 				secondaryPIDs = append(secondaryPIDs, p)
 			}
 		}

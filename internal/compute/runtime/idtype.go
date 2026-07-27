@@ -15,6 +15,9 @@
 package runtime
 
 import (
+	"errors"
+	"fmt"
+	"strconv"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -55,18 +58,49 @@ func parseIDType(raw string) string {
 	return strings.TrimSpace(raw)
 }
 
-// IsProcessJobID checks if the given job ID represents a direct process PID.
-// A job ID that consists only of digits is considered a process PID.
-func IsProcessJobID(jobID string) bool {
-	if strings.TrimSpace(jobID) == "" {
-		return false
+// FormatProcessJobID formats a PID and start time into a typed job ID string "pid://<pid>:<starttime>" or "pid://<pid>".
+func FormatProcessJobID(pid int, startTime uint64) string {
+	if startTime > 0 {
+		return fmt.Sprintf("%s%d:%d", JobIDTypeProcess, pid, startTime)
+	}
+	return fmt.Sprintf("%s%d", JobIDTypeProcess, pid)
+}
+
+// ParseProcessJobID parses a process job ID string (e.g. "pid://12345:67890", "12345:67890", "pid://12345", or "12345")
+// into a PID and optional start time.
+func ParseProcessJobID(raw string) (pid int, startTime uint64, err error) {
+	val := strings.TrimSpace(raw)
+	if strings.HasPrefix(val, string(JobIDTypeProcess)) {
+		val = strings.TrimPrefix(val, string(JobIDTypeProcess))
+		val = strings.TrimSpace(val)
+	}
+	if val == "" {
+		return 0, 0, errors.New("empty process id")
 	}
 
-	// If it's all digits, it's a process PID.
-	for _, ch := range jobID {
-		if ch < '0' || ch > '9' {
-			return false
+	parts := strings.Split(val, ":")
+	if len(parts) > 2 {
+		return 0, 0, fmt.Errorf("invalid job id format '%s'", raw)
+	}
+
+	p, err := strconv.Atoi(parts[0])
+	if err != nil || p <= 0 {
+		return 0, 0, fmt.Errorf("invalid pid '%s'", parts[0])
+	}
+
+	var st uint64
+	if len(parts) == 2 {
+		st, err = strconv.ParseUint(parts[1], 10, 64)
+		if err != nil {
+			return 0, 0, fmt.Errorf("invalid starttime '%s'", parts[1])
 		}
 	}
-	return true
+
+	return p, st, nil
+}
+
+// IsProcessJobID checks if the given job ID represents a direct process PID (optionally with start time).
+func IsProcessJobID(jobID string) bool {
+	_, _, err := ParseProcessJobID(jobID)
+	return err == nil
 }

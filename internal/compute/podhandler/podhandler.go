@@ -31,6 +31,7 @@ import (
 	"hpk/pkg/filenotify"
 
 	"errors"
+	"strconv"
 
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
@@ -92,24 +93,14 @@ func SavePodToFile(_ context.Context, pod *corev1.Pod) error {
 }
 
 func parseProcessPID(raw string) (string, error) {
-	value := strings.TrimSpace(raw)
-	if value == "" {
-		return "", fmt.Errorf("empty process id")
+	pid, startTime, err := runtime.ParseProcessJobID(raw)
+	if err != nil {
+		return "", fmt.Errorf("invalid process id '%s': %w", raw, err)
 	}
-
-	if strings.HasPrefix(value, string(runtime.JobIDTypeProcess)) {
-		value = strings.TrimPrefix(value, string(runtime.JobIDTypeProcess))
-		value = strings.TrimSpace(value)
-		if value == "" {
-			return "", fmt.Errorf("empty process id")
-		}
+	if startTime > 0 {
+		return fmt.Sprintf("%d:%d", pid, startTime), nil
 	}
-
-	if !runtime.IsProcessJobID(value) {
-		return "", fmt.Errorf("invalid process id '%s'", raw)
-	}
-
-	return value, nil
+	return strconv.Itoa(pid), nil
 }
 
 func resolveProcessPIDFromControlFiles(pod *corev1.Pod, podDir endpoint.PodPath, logger logr.Logger) (string, error) {

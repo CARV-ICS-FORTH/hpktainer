@@ -113,3 +113,51 @@ func TestResolveSecondaryContainerPIDs(t *testing.T) {
 		t.Errorf("expected [301 302], got %v", secondary)
 	}
 }
+
+func TestResolveProcessPIDFromControlFiles_WithStartTime(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "hpk-podhandler-starttime-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-pod",
+			Namespace: "default",
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{Name: "c1"},
+			},
+		},
+	}
+
+	podDir := endpoint.HPK(tmpDir).Pod(client.ObjectKeyFromObject(pod))
+	if err := os.MkdirAll(podDir.ControlFileDir(), 0755); err != nil {
+		t.Fatalf("failed to create control file dir: %v", err)
+	}
+
+	pauseJobIDPath := podDir.PauseJobIDPath()
+	if err := os.WriteFile(pauseJobIDPath, []byte("pid://200:1234567"), 0644); err != nil {
+		t.Fatalf("failed to write pause jobid: %v", err)
+	}
+
+	pid, err := resolveProcessPIDFromControlFiles(pod, podDir, compute.DefaultLogger)
+	if err != nil {
+		t.Fatalf("expected resolution from pause jobid, got err: %v", err)
+	}
+	if pid != "200:1234567" {
+		t.Errorf("expected PID '200:1234567', got %s", pid)
+	}
+
+	mainJobIDPath := podDir.Container("c1").IDPath()
+	if err := os.WriteFile(mainJobIDPath, []byte("pid://301:7654321"), 0644); err != nil {
+		t.Fatalf("failed to write main container jobid: %v", err)
+	}
+
+	secondary := resolveSecondaryContainerPIDs(pod, podDir, pid)
+	if len(secondary) != 1 || secondary[0] != "301:7654321" {
+		t.Errorf("expected secondary PID ['301:7654321'], got %v", secondary)
+	}
+}

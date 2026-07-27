@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -126,5 +127,65 @@ func TestKillPodProcessesWithTimeout_GroupEscalation(t *testing.T) {
 	case <-doneS:
 	case <-time.After(3 * time.Second):
 		t.Fatal("secondary process did not exit within timeout after SIGKILL")
+	}
+}
+
+func TestParseAndFormatProcessJobID(t *testing.T) {
+	formatted := FormatProcessJobID(1234, 56789)
+	if formatted != "pid://1234:56789" {
+		t.Errorf("expected pid://1234:56789, got %s", formatted)
+	}
+
+	formattedNoTime := FormatProcessJobID(1234, 0)
+	if formattedNoTime != "pid://1234" {
+		t.Errorf("expected pid://1234, got %s", formattedNoTime)
+	}
+
+	pid, st, err := ParseProcessJobID("pid://12345:99999")
+	if err != nil || pid != 12345 || st != 99999 {
+		t.Errorf("expected pid 12345, st 99999, got pid %d, st %d, err %v", pid, st, err)
+	}
+
+	pid, st, err = ParseProcessJobID("12345")
+	if err != nil || pid != 12345 || st != 0 {
+		t.Errorf("expected pid 12345, st 0, got pid %d, st %d, err %v", pid, st, err)
+	}
+
+	if IsProcessJobID("invalid") {
+		t.Errorf("expected IsProcessJobID('invalid') to be false")
+	}
+	if !IsProcessJobID("pid://100:200") {
+		t.Errorf("expected IsProcessJobID('pid://100:200') to be true")
+	}
+}
+
+func TestProcessIdentityVerification_StartTimeMismatch(t *testing.T) {
+	cmd := exec.Command("sleep", "10")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("failed to start sleep process: %v", err)
+	}
+	defer func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	}()
+
+	realSt, err := GetProcessStartTime(cmd.Process.Pid)
+	if err != nil {
+		// Non-linux environment without /proc
+		t.Skip("skipping starttime mismatch test on system without /proc")
+	}
+
+	// Supply a mismatched start time (realSt + 999999)
+	mismatchedPIDStr := fmt.Sprintf("%d:%d", cmd.Process.Pid, realSt+999999)
+	_, err = KillProcessByPIDWithTimeout(mismatchedPIDStr, 1*time.Second)
+	if !errors.Is(err, ErrInvalidJob) {
+		t.Fatalf("expected ErrInvalidJob for start time mismatch, got %v", err)
+	}
+
+	// Now supply correct start time
+	correctPIDStr := fmt.Sprintf("%d:%d", cmd.Process.Pid, realSt)
+	_, err = KillProcessByPIDWithTimeout(correctPIDStr, 2*time.Second)
+	if err != nil {
+		t.Fatalf("unexpected error killing process with matching start time: %v", err)
 	}
 }
