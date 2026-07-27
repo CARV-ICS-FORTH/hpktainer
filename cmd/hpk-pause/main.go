@@ -531,12 +531,16 @@ func executeContainer(pod *v1.Pod, container *v1.Container, containerType string
 			_ = os.WriteFile(containerPath.ExitCodePath(), []byte("128"), 0644)
 			return fmt.Errorf("error executing EnvFilePath: %v, output: %s", err, output)
 		}
+		containerEnvs = parseEnvVars(output)
+		var b strings.Builder
+		for _, e := range containerEnvs {
+			fmt.Fprintf(&b, "%s=%s\n", e.Name, podhandler.EscapeSingleQuote(e.Value))
+		}
 		envFileName := filepath.Join("/scratch", instanceName+".env")
-		if err := os.WriteFile(envFileName, output, 0644); err != nil {
+		if err := os.WriteFile(envFileName, []byte(b.String()), 0644); err != nil {
 			_ = os.WriteFile(containerPath.ExitCodePath(), []byte("128"), 0644)
 			return fmt.Errorf("error writing env file: %v", err)
 		}
-		containerEnvs = parseEnvVars(output)
 	} else {
 		containerEnvs = container.Env
 	}

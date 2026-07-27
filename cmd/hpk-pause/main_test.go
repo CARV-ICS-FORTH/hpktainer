@@ -4,12 +4,14 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"hpk/internal/compute/endpoint"
+	"hpk/internal/compute/podhandler"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -272,4 +274,46 @@ func TestResolveGracePeriod(t *testing.T) {
 			t.Errorf("expected 0s grace period, got %v", got)
 		}
 	})
+}
+
+func TestApptainerEnvFile_ShellEvaluation(t *testing.T) {
+	testEnvs := []v1.EnvVar{
+		{Name: "SIMPLE", Value: "hello"},
+		{Name: "BASE64_PAD", Value: "first-line\nQUJDREVGRw=="},
+		{Name: "MULTILINE_CERT", Value: "-----BEGIN CERTIFICATE-----\nMIIF...\n-----END CERTIFICATE-----"},
+		{Name: "KUBERNETES_SERVICE_HOST", Value: "10.0.0.1"},
+		{Name: "KUBERNETES_SERVICE_PORT", Value: "6443"},
+		{Name: "QUOTED", Value: "foo'bar\"baz"},
+	}
+
+	var b strings.Builder
+	for _, e := range testEnvs {
+		fmt.Fprintf(&b, "%s=%s\n", e.Name, podhandler.EscapeSingleQuote(e.Value))
+	}
+
+	tmpFile := filepath.Join(t.TempDir(), "container.env")
+	if err := os.WriteFile(tmpFile, []byte(b.String()), 0644); err != nil {
+		t.Fatalf("failed to write tmp env file: %v", err)
+	}
+
+	// Evaluate the file with bash (representing apptainer's embedded shell interpreter)
+	// and print each variable separated by NUL.
+	script := fmt.Sprintf(`. %s; printf 'SIMPLE=%%s\0BASE64_PAD=%%s\0MULTILINE_CERT=%%s\0KUBERNETES_SERVICE_HOST=%%s\0KUBERNETES_SERVICE_PORT=%%s\0QUOTED=%%s\0' "$SIMPLE" "$BASE64_PAD" "$MULTILINE_CERT" "$KUBERNETES_SERVICE_HOST" "$KUBERNETES_SERVICE_PORT" "$QUOTED"`, tmpFile)
+
+	output, err := exec.Command("bash", "-c", script).CombinedOutput()
+	if err != nil {
+		t.Fatalf("failed to evaluate env file with bash: %v, output: %s", err, output)
+	}
+
+	evalEnvs := parseEnvVars(output)
+	if len(evalEnvs) != len(testEnvs) {
+		t.Fatalf("expected %d evaluated env vars, got %d", len(testEnvs), len(evalEnvs))
+	}
+
+	for i, expected := range testEnvs {
+		if evalEnvs[i].Name != expected.Name || evalEnvs[i].Value != expected.Value {
+			t.Errorf("env[%d] mismatch: got name=%q val=%q, expected name=%q val=%q",
+				i, evalEnvs[i].Name, evalEnvs[i].Value, expected.Name, expected.Value)
+		}
+	}
 }
