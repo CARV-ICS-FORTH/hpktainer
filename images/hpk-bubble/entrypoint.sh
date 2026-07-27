@@ -200,22 +200,21 @@ if [ "$HPK_ROLE" = "controller" ]; then
     echo "Configuring CoreDNS to use the bubble resolver..."
     COREDNS_WAIT=0
     COREDNS_TIMEOUT=120
-    while ! k3s kubectl -n kube-system get deployment coredns >/dev/null 2>&1; do
-      if [ "$COREDNS_WAIT" -ge "$COREDNS_TIMEOUT" ]; then
-        echo "ERROR: Timed out waiting for CoreDNS deployment" >&2
-        break
-      fi
+    while [ "$COREDNS_WAIT" -lt "$COREDNS_TIMEOUT" ] && ! k3s kubectl -n kube-system get deployment coredns >/dev/null 2>&1; do
       sleep 1
       COREDNS_WAIT=$((COREDNS_WAIT + 1))
     done
+    if ! k3s kubectl -n kube-system get deployment coredns >/dev/null 2>&1; then
+      echo "ERROR: Timed out waiting for CoreDNS deployment" >&2
+    fi
+
     while [ "$COREDNS_WAIT" -lt "$COREDNS_TIMEOUT" ] && ! k3s kubectl -n kube-system get configmap coredns >/dev/null 2>&1; do
-      if [ "$COREDNS_WAIT" -ge "$COREDNS_TIMEOUT" ]; then
-        echo "ERROR: Timed out waiting for CoreDNS configmap" >&2
-        break
-      fi
       sleep 1
       COREDNS_WAIT=$((COREDNS_WAIT + 1))
     done
+    if ! k3s kubectl -n kube-system get configmap coredns >/dev/null 2>&1; then
+      echo "ERROR: Timed out waiting for CoreDNS configmap" >&2
+    fi
 
     if k3s kubectl -n kube-system get deployment coredns >/dev/null 2>&1 && k3s kubectl -n kube-system get configmap coredns >/dev/null 2>&1; then
       k3s kubectl -n kube-system patch deployment coredns --type=merge -p '{"spec":{"template":{"spec":{"dnsPolicy":"Default"}}}}'

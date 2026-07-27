@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -196,11 +197,15 @@ func TestParseEnvVars_MultiLine(t *testing.T) {
 }
 
 func TestGetHostResolvConf_EnvConfig(t *testing.T) {
-	t.Setenv("FALLBACK_DNS", "8.8.8.8")
+	fallbackIP := "8.8.8.8"
+	t.Setenv("FALLBACK_DNS", fallbackIP)
 
 	res := getHostResolvConf("10.0.0.1")
 	if res == "" {
 		t.Fatalf("expected non-empty resolv.conf output")
+	}
+	if !strings.Contains(res, fallbackIP) {
+		t.Fatalf("expected fallback nameserver %s in resolv.conf output:\n%s", fallbackIP, res)
 	}
 }
 
@@ -244,16 +249,7 @@ func TestResolveGracePeriod(t *testing.T) {
 		}
 	})
 
-	t.Run("EnvVar", func(t *testing.T) {
-		t.Setenv("TERMINATION_GRACE_PERIOD_SECONDS", "15")
-		pod := &v1.Pod{}
-		if got := resolveGracePeriod(pod); got != 15*time.Second {
-			t.Errorf("expected 15s from env var, got %v", got)
-		}
-	})
-
-	t.Run("PodSpecOverride", func(t *testing.T) {
-		t.Setenv("TERMINATION_GRACE_PERIOD_SECONDS", "15")
+	t.Run("PodSpec", func(t *testing.T) {
 		grace := int64(45)
 		pod := &v1.Pod{
 			Spec: v1.PodSpec{

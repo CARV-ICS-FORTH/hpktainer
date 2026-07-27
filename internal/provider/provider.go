@@ -46,7 +46,6 @@ import (
 	vkapi "github.com/virtual-kubelet/virtual-kubelet/node/api"
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
-	"k8s.io/apimachinery/pkg/util/json"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 )
@@ -72,6 +71,17 @@ func isPodOwnedByNode(pod *corev1.Pod, ownNode string) bool {
 		return true
 	}
 	return pod.Spec.NodeName == ownNode
+}
+
+func loadPodIfOwned(path endpoint.PodPath, ownNode string) (*corev1.Pod, error) {
+	pod, err := PodHandler.LoadPodFromFile(path.EncodedJSONPath())
+	if err != nil {
+		return nil, err
+	}
+	if !isPodOwnedByNode(pod, ownNode) {
+		return nil, nil
+	}
+	return pod, nil
 }
 
 // VirtualK8S implements the virtual-kubelet provider interface and stores pods in memory.
@@ -116,13 +126,8 @@ func NewVirtualK8S(config InitConfig) (*VirtualK8S, error) {
 	// move corrupted pods to a centralized dir for inspection.
 	// Valid are considered the pods with a Pod description.
 	if err := compute.HPK.WalkPodDirectories(func(podpath endpoint.PodPath) error {
-		if encodedPod, err := os.ReadFile(podpath.EncodedJSONPath()); err == nil {
-			var pod corev1.Pod
-			if err := json.Unmarshal(encodedPod, &pod); err == nil {
-				if !isPodOwnedByNode(&pod, config.NodeName) {
-					return nil
-				}
-			}
+		if pod, err := loadPodIfOwned(podpath, config.NodeName); err == nil && pod == nil {
+			return nil
 		}
 
 		ok, info := podpath.PodEnvironmentIsOK()
@@ -182,13 +187,8 @@ func NewVirtualK8S(config InitConfig) (*VirtualK8S, error) {
 	 * Set fsnotify watchers for Pods
 	 *---------------------------------------------------*/
 	if err := compute.HPK.WalkPodDirectories(func(path endpoint.PodPath) error {
-		if encodedPod, err := os.ReadFile(path.EncodedJSONPath()); err == nil {
-			var pod corev1.Pod
-			if err := json.Unmarshal(encodedPod, &pod); err == nil {
-				if !isPodOwnedByNode(&pod, config.NodeName) {
-					return nil
-				}
-			}
+		if pod, err := loadPodIfOwned(path, config.NodeName); err == nil && pod == nil {
+			return nil
 		}
 		// register the watcher
 		return watcher.Add(path.ControlFileDir())
@@ -417,7 +417,7 @@ func (v *VirtualK8S) GetPods(ctx context.Context) ([]*corev1.Pod, error) {
 	var pods []*corev1.Pod
 
 	if err := compute.HPK.WalkPodDirectories(func(path endpoint.PodPath) error {
-		encodedPod, err := os.ReadFile(path.EncodedJSONPath())
+		pod, err := loadPodIfOwned(path, v.NodeName)
 		if err != nil {
 			v.Logger.Info("Ignore Corrupted Pod Dir", "path", path, "error", err)
 
@@ -425,18 +425,12 @@ func (v *VirtualK8S) GetPods(ctx context.Context) ([]*corev1.Pod, error) {
 			return nil
 		}
 
-		var pod corev1.Pod
-
-		if err := json.Unmarshal(encodedPod, &pod); err != nil {
-			return fmt.Errorf("cannot decode pod description file '%s': %w", path, err)
-		}
-
-		if !isPodOwnedByNode(&pod, v.NodeName) {
+		if pod == nil {
 			return nil
 		}
 
 		/*-- return all pods managed by this provider --*/
-		pods = append(pods, &pod)
+		pods = append(pods, pod)
 
 		return nil
 	}); err != nil {
@@ -540,17 +534,8 @@ func (v *VirtualK8S) saveAndNotifyPod(pod *corev1.Pod) {
 
 func (v *VirtualK8S) reconcileNonTerminalPods() {
 	if err := compute.HPK.WalkPodDirectories(func(path endpoint.PodPath) error {
-		podKey := client.ObjectKey{
-			Namespace: filepath.Base(filepath.Dir(string(path))),
-			Name:      filepath.Base(string(path)),
-		}
-
-		pod, err := PodHandler.LoadPodFromKey(podKey)
-		if err != nil {
-			return nil
-		}
-
-		if !isPodOwnedByNode(pod, v.NodeName) {
+		pod, err := loadPodIfOwned(path, v.NodeName)
+		if err != nil || pod == nil {
 			return nil
 		}
 
