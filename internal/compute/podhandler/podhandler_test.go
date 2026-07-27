@@ -1,6 +1,7 @@
 package podhandler
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -159,5 +160,53 @@ func TestResolveProcessPIDFromControlFiles_WithStartTime(t *testing.T) {
 	secondary := resolveSecondaryContainerPIDs(pod, podDir, pid)
 	if len(secondary) != 1 || secondary[0] != "301:7654321" {
 		t.Errorf("expected secondary PID ['301:7654321'], got %v", secondary)
+	}
+}
+
+func TestSavePodToFile_AtomicWrite(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "hpk-save-pod-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	compute.HPK = endpoint.HPK(tmpDir)
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-pod",
+			Namespace: "default",
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "test-c"}},
+		},
+	}
+
+	podDir := compute.HPK.Pod(client.ObjectKeyFromObject(pod))
+	if err := os.MkdirAll(podDir.JobDir(), 0755); err != nil {
+		t.Fatalf("failed to create job dir: %v", err)
+	}
+
+	ctx := context.Background()
+	if err := SavePodToFile(ctx, pod); err != nil {
+		t.Fatalf("SavePodToFile failed: %v", err)
+	}
+
+	crdPath := podDir.EncodedJSONPath()
+	if _, err := os.Stat(crdPath); err != nil {
+		t.Fatalf("expected crd file at %s, got error: %v", crdPath, err)
+	}
+
+	tmpPath := crdPath + ".tmp"
+	if _, err := os.Stat(tmpPath); !os.IsNotExist(err) {
+		t.Fatalf("expected tmp file %s to be removed, but it exists", tmpPath)
+	}
+
+	loadedPod, err := LoadPodFromFile(crdPath)
+	if err != nil {
+		t.Fatalf("LoadPodFromFile failed: %v", err)
+	}
+	if loadedPod.Name != pod.Name || loadedPod.Namespace != pod.Namespace {
+		t.Errorf("loaded pod mismatch: got %s/%s, want %s/%s", loadedPod.Namespace, loadedPod.Name, pod.Namespace, pod.Name)
 	}
 }

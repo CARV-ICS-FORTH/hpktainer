@@ -85,8 +85,17 @@ func SavePodToFile(_ context.Context, pod *corev1.Pod) error {
 		return fmt.Errorf("failed encoding pod: %w", err)
 	}
 
-	if err := os.WriteFile(filePath, podDef, endpoint.PodSpecJsonFilePermissions); err != nil {
-		return fmt.Errorf("failed to write file path '%s': %w", filePath, err)
+	tmpFile := filePath + ".tmp"
+	if err := os.WriteFile(tmpFile, podDef, endpoint.PodSpecJsonFilePermissions); err != nil {
+		return fmt.Errorf("failed to write tmp file path '%s': %w", tmpFile, err)
+	}
+	if err := os.Chmod(tmpFile, endpoint.PodSpecJsonFilePermissions); err != nil {
+		_ = os.Remove(tmpFile)
+		return fmt.Errorf("failed to chmod tmp file path '%s': %w", tmpFile, err)
+	}
+	if err := os.Rename(tmpFile, filePath); err != nil {
+		_ = os.Remove(tmpFile)
+		return fmt.Errorf("failed to rename tmp file path '%s' to '%s': %w", tmpFile, filePath, err)
 	}
 
 	return nil

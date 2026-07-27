@@ -471,21 +471,9 @@ func (v *VirtualK8S) NotifyPods(ctx context.Context, f func(*corev1.Pod)) {
 	})
 
 	go eh.Listen(ctx, events.PodControl{
-		UpdateStatus: PodHandler.UpdateStatusFromRuntime,
-		LoadFromDisk: PodHandler.LoadPodFromKey,
-		NotifyVirtualKubelet: func(pod *corev1.Pod) {
-			if pod == nil {
-				v.Logger.Error(fmt.Errorf("nil pod received in NotifyVirtualKubelet"), "skipping notification")
-				return
-			}
-
-			f(pod)
-
-			v.Logger.Info(" * K8s status is synchronized",
-				"version", pod.ResourceVersion,
-				"phase", pod.Status.Phase,
-			)
-		},
+		UpdateStatus:         PodHandler.UpdateStatusFromRuntime,
+		LoadFromDisk:         PodHandler.LoadPodFromKey,
+		NotifyVirtualKubelet: v.saveAndNotifyPod,
 	})
 
 	/*-- periodic reconcile of non-terminal pods --*/
@@ -530,6 +518,26 @@ func (v *VirtualK8S) NotifyPods(ctx context.Context, f func(*corev1.Pod)) {
 	}()
 }
 
+func (v *VirtualK8S) saveAndNotifyPod(pod *corev1.Pod) {
+	if pod == nil {
+		v.Logger.Error(fmt.Errorf("nil pod received in saveAndNotifyPod"), "skipping notification")
+		return
+	}
+
+	podKey := client.ObjectKeyFromObject(pod)
+	if err := PodHandler.SavePodToFile(context.Background(), pod); err != nil {
+		v.Logger.Error(err, "Failed to persist updated pod status", "pod", podKey)
+	}
+
+	if v.updatedPod != nil {
+		v.updatedPod(pod)
+		v.Logger.Info(" * K8s status is synchronized",
+			"version", pod.ResourceVersion,
+			"phase", pod.Status.Phase,
+		)
+	}
+}
+
 func (v *VirtualK8S) reconcileNonTerminalPods() {
 	if err := compute.HPK.WalkPodDirectories(func(path endpoint.PodPath) error {
 		podKey := client.ObjectKey{
@@ -558,17 +566,7 @@ func (v *VirtualK8S) reconcileNonTerminalPods() {
 			!apiequality.Semantic.DeepEqual(oldStatus.InitContainerStatuses, pod.Status.InitContainerStatuses)
 
 		if changed {
-			if err := PodHandler.SavePodToFile(context.Background(), pod); err != nil {
-				v.Logger.Error(err, "Failed to persist updated pod status during reconciliation", "pod", podKey)
-			}
-			if v.updatedPod != nil {
-				v.updatedPod(pod)
-				v.Logger.Info("Periodic reconcile checked pod status",
-					"pod", podKey,
-					"oldPhase", oldStatus.Phase,
-					"newPhase", pod.Status.Phase,
-				)
-			}
+			v.saveAndNotifyPod(pod)
 		}
 		return nil
 	}); err != nil {
