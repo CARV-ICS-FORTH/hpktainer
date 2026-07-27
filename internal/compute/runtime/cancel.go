@@ -131,6 +131,7 @@ func sweepSecondaryPIDs(secondaryPIDs []int) {
 		}
 	}
 
+	// 200 ms wait is intentionally short because the grace-period supervisor (pause) is already gone when sweeping secondary PIDs.
 	time.Sleep(200 * time.Millisecond)
 
 	for _, secPID := range secondaryPIDs {

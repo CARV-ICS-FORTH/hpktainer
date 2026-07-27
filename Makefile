@@ -33,7 +33,7 @@ test:
 	go test ./...
 
 check-shell:
-	@command -v shellcheck >/dev/null 2>&1 && shellcheck $$(find . -name "*.sh" -not -path "*/.*") || echo "shellcheck not installed, skipping"
+	@if command -v shellcheck >/dev/null 2>&1; then shellcheck --severity=error $$(find . -name "*.sh" -not -path "*/.*"); else echo "shellcheck not installed, skipping"; fi
 
 ci: fmt-check vet binaries-linux-amd64 test check-shell
 

@@ -467,7 +467,7 @@ func (v *VirtualK8S) NotifyPods(ctx context.Context, f func(*corev1.Pod)) {
 	go eh.Listen(ctx, events.PodControl{
 		UpdateStatus:         PodHandler.UpdateStatusFromRuntime,
 		LoadFromDisk:         PodHandler.LoadPodFromKey,
-		NotifyVirtualKubelet: v.saveAndNotifyPod,
+		NotifyVirtualKubelet: func(pod *corev1.Pod) { v.saveAndNotifyPod("event", pod) },
 	})
 
 	/*-- periodic reconcile of non-terminal pods --*/
@@ -512,20 +512,21 @@ func (v *VirtualK8S) NotifyPods(ctx context.Context, f func(*corev1.Pod)) {
 	}()
 }
 
-func (v *VirtualK8S) saveAndNotifyPod(pod *corev1.Pod) {
+func (v *VirtualK8S) saveAndNotifyPod(source string, pod *corev1.Pod) {
 	if pod == nil {
-		v.Logger.Error(fmt.Errorf("nil pod received in saveAndNotifyPod"), "skipping notification")
+		v.Logger.Error(fmt.Errorf("nil pod received in saveAndNotifyPod"), "skipping notification", "source", source)
 		return
 	}
 
 	podKey := client.ObjectKeyFromObject(pod)
 	if err := PodHandler.SavePodToFile(context.Background(), pod); err != nil {
-		v.Logger.Error(err, "Failed to persist updated pod status", "pod", podKey)
+		v.Logger.Error(err, "Failed to persist updated pod status", "pod", podKey, "source", source)
 	}
 
 	if v.updatedPod != nil {
 		v.updatedPod(pod)
 		v.Logger.Info(" * K8s status is synchronized",
+			"source", source,
 			"version", pod.ResourceVersion,
 			"phase", pod.Status.Phase,
 		)
@@ -551,7 +552,7 @@ func (v *VirtualK8S) reconcileNonTerminalPods() {
 			!apiequality.Semantic.DeepEqual(oldStatus.InitContainerStatuses, pod.Status.InitContainerStatuses)
 
 		if changed {
-			v.saveAndNotifyPod(pod)
+			v.saveAndNotifyPod("reconciler", pod)
 		}
 		return nil
 	}); err != nil {

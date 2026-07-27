@@ -151,11 +151,11 @@ func TestParseAndFormatProcessJobID(t *testing.T) {
 		t.Errorf("expected pid 12345, st 0, got pid %d, st %d, err %v", pid, st, err)
 	}
 
-	if IsProcessJobID("invalid") {
-		t.Errorf("expected IsProcessJobID('invalid') to be false")
+	if _, _, err := ParseProcessJobID("invalid"); err == nil {
+		t.Errorf("expected ParseProcessJobID('invalid') to return an error")
 	}
-	if !IsProcessJobID("pid://100:200") {
-		t.Errorf("expected IsProcessJobID('pid://100:200') to be true")
+	if pid, st, err := ParseProcessJobID("pid://100:200"); err != nil || pid != 100 || st != 200 {
+		t.Errorf("expected pid 100, st 200, got pid %d, st %d, err %v", pid, st, err)
 	}
 }
 

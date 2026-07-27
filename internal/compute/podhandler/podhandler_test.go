@@ -197,9 +197,9 @@ func TestSavePodToFile_AtomicWrite(t *testing.T) {
 		t.Fatalf("expected crd file at %s, got error: %v", crdPath, err)
 	}
 
-	tmpPath := crdPath + ".tmp"
-	if _, err := os.Stat(tmpPath); !os.IsNotExist(err) {
-		t.Fatalf("expected tmp file %s to be removed, but it exists", tmpPath)
+	tmpFiles, _ := filepath.Glob(filepath.Join(filepath.Dir(crdPath), "*.tmp"))
+	if len(tmpFiles) > 0 {
+		t.Fatalf("expected no tmp files to remain, but found: %v", tmpFiles)
 	}
 
 	loadedPod, err := LoadPodFromFile(crdPath)

@@ -85,17 +85,29 @@ func SavePodToFile(_ context.Context, pod *corev1.Pod) error {
 		return fmt.Errorf("failed encoding pod: %w", err)
 	}
 
-	tmpFile := filePath + ".tmp"
-	if err := os.WriteFile(tmpFile, podDef, endpoint.PodSpecJsonFilePermissions); err != nil {
-		return fmt.Errorf("failed to write tmp file path '%s': %w", tmpFile, err)
+	f, err := os.CreateTemp(filepath.Dir(filePath), ".crd-*.tmp")
+	if err != nil {
+		return fmt.Errorf("failed to create temp file in '%s': %w", filepath.Dir(filePath), err)
 	}
-	if err := os.Chmod(tmpFile, endpoint.PodSpecJsonFilePermissions); err != nil {
+	tmpFile := f.Name()
+
+	if _, err := f.Write(podDef); err != nil {
+		_ = f.Close()
 		_ = os.Remove(tmpFile)
-		return fmt.Errorf("failed to chmod tmp file path '%s': %w", tmpFile, err)
+		return fmt.Errorf("failed to write tmp file '%s': %w", tmpFile, err)
+	}
+	if err := f.Chmod(endpoint.PodSpecJsonFilePermissions); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpFile)
+		return fmt.Errorf("failed to chmod tmp file '%s': %w", tmpFile, err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmpFile)
+		return fmt.Errorf("failed to close tmp file '%s': %w", tmpFile, err)
 	}
 	if err := os.Rename(tmpFile, filePath); err != nil {
 		_ = os.Remove(tmpFile)
-		return fmt.Errorf("failed to rename tmp file path '%s' to '%s': %w", tmpFile, filePath, err)
+		return fmt.Errorf("failed to rename tmp file '%s' to '%s': %w", tmpFile, filePath, err)
 	}
 
 	return nil

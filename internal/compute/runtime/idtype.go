@@ -98,9 +98,3 @@ func ParseProcessJobID(raw string) (pid int, startTime uint64, err error) {
 
 	return p, st, nil
 }
-
-// IsProcessJobID checks if the given job ID represents a direct process PID (optionally with start time).
-func IsProcessJobID(jobID string) bool {
-	_, _, err := ParseProcessJobID(jobID)
-	return err == nil
-}
