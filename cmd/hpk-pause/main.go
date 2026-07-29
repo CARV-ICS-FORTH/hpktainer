@@ -360,11 +360,6 @@ func cleanEnvironment() error {
 }
 
 func getHostResolvConf(kubeDNSIP string, resolvConfPath string) string {
-	fallbackDNS := os.Getenv("FALLBACK_DNS")
-	if fallbackDNS == "" {
-		fallbackDNS = "1.1.1.1"
-	}
-
 	if resolvConfPath == "" {
 		resolvConfPath = "/etc/resolv.conf"
 	}
@@ -390,11 +385,10 @@ func getHostResolvConf(kubeDNSIP string, resolvConfPath string) string {
 	}
 
 	if raw == "" {
-		return fmt.Sprintf("nameserver %s\n", fallbackDNS)
+		return ""
 	}
 
 	var validLines []string
-	hasNameserver := false
 	for _, line := range strings.Split(raw, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "nameserver") {
@@ -405,14 +399,9 @@ func getHostResolvConf(kubeDNSIP string, resolvConfPath string) string {
 				if ip != nil && (ip.IsLoopback() || ipStr == kubeDNSIP) {
 					continue
 				}
-				hasNameserver = true
 			}
 		}
 		validLines = append(validLines, line)
-	}
-
-	if !hasNameserver {
-		validLines = append(validLines, fmt.Sprintf("nameserver %s", fallbackDNS))
 	}
 
 	return strings.Join(validLines, "\n") + "\n"

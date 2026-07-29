@@ -67,18 +67,9 @@ cleanup() {
     fi
     apptainer instance stop "$NAME" 2>/dev/null || true
     [ -e "$NAME-slirp4netns.sock" ] && rm -f "$NAME-slirp4netns.sock" || true
-    [ -e "resolv.conf.$NAME" ] && rm -f "resolv.conf.$NAME" || true
 }
 
 trap cleanup EXIT INT TERM
-
-# Namespace
-RESOLV_CONF="resolv.conf.$NAME"
-echo "nameserver $DNS_ADDR" > "$RESOLV_CONF"
-grep -v '127\.0\.0\.' /etc/resolv.conf | grep 'nameserver' >> "$RESOLV_CONF" || true
-if ! grep -q 'nameserver' "$RESOLV_CONF"; then
-    echo "nameserver 1.1.1.1" >> "$RESOLV_CONF"
-fi
 
 mkdir -p "$HOME/.hpk"
 mkdir -p "$HOME/.hpk/.apptainer/tmp"
@@ -115,7 +106,7 @@ apptainer instance run \
 	--no-mount hostfs \
 	--writable-tmpfs \
 	--network=none \
-	--bind "$RESOLV_CONF:/etc/resolv.conf" \
+	--dns "$DNS_ADDR" \
 	--bind "$HOME/.hpk:/var/lib/hpk" \
     --bind "$HOME/.hpk:/root/.hpk" \
     --bind "$HOME/.apptainer/cache:/root/.apptainer/cache" \
@@ -130,7 +121,6 @@ apptainer instance run \
     --env DATASTORE_TYPE=etcdv3 \
     --env ETCD_ENDPOINTS="http://${CONTROLLER_IP}:2379" \
     --env BUBBLE_ID="$BUBBLE_ID" \
-    --env FALLBACK_DNS="${FALLBACK_DNS:-1.1.1.1}" \
 	"$BUBBLE_IMAGE" \
 	"$NAME"
 
