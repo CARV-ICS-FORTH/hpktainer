@@ -1,7 +1,6 @@
 package podhandler
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -14,54 +13,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-func TestSavePodToFile_AtomicWrite(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "hpk-save-pod-test-*")
-	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	compute.HPK = endpoint.HPK(tmpDir)
-
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-pod",
-			Namespace: "default",
-		},
-		Spec: corev1.PodSpec{
-			Containers: []corev1.Container{{Name: "test-c"}},
-		},
-	}
-
-	podDir := compute.HPK.Pod(client.ObjectKeyFromObject(pod))
-	if err := os.MkdirAll(podDir.JobDir(), 0755); err != nil {
-		t.Fatalf("failed to create job dir: %v", err)
-	}
-
-	ctx := context.Background()
-	if err := SavePodToFile(ctx, pod); err != nil {
-		t.Fatalf("SavePodToFile failed: %v", err)
-	}
-
-	crdPath := podDir.EncodedJSONPath()
-	if _, err := os.Stat(crdPath); err != nil {
-		t.Fatalf("expected crd file at %s, got error: %v", crdPath, err)
-	}
-
-	tmpFiles, _ := filepath.Glob(filepath.Join(filepath.Dir(crdPath), "*.tmp"))
-	if len(tmpFiles) > 0 {
-		t.Fatalf("expected no tmp files to remain, but found: %v", tmpFiles)
-	}
-
-	loadedPod, err := LoadPodFromFile(crdPath)
-	if err != nil {
-		t.Fatalf("LoadPodFromFile failed: %v", err)
-	}
-	if loadedPod.Name != pod.Name || loadedPod.Namespace != pod.Namespace {
-		t.Errorf("loaded pod mismatch: got %s/%s, want %s/%s", loadedPod.Namespace, loadedPod.Name, pod.Namespace, pod.Name)
-	}
-}
-
 func TestDeletePod_CleanRemoval(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "hpk-delete-pod-test-*")
 	if err != nil {
@@ -69,7 +20,7 @@ func TestDeletePod_CleanRemoval(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	compute.HPK = endpoint.HPK(tmpDir)
+	compute.HPK = endpoint.HPKWithPods(tmpDir, filepath.Join(tmpDir, ".hpk", ".pods"))
 
 	podKey := client.ObjectKey{Namespace: "default", Name: "my-pod"}
 	pod := &corev1.Pod{
@@ -93,11 +44,7 @@ func TestDeletePod_CleanRemoval(t *testing.T) {
 		t.Fatalf("failed to create job dir: %v", err)
 	}
 
-	if err := SavePodToFile(context.Background(), pod); err != nil {
-		t.Fatalf("failed to save pod: %v", err)
-	}
-
-	ok := DeletePod(podKey)
+	ok := DeletePod(podKey, pod)
 	if !ok {
 		t.Fatalf("expected DeletePod to return true")
 	}

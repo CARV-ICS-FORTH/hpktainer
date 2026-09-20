@@ -35,13 +35,6 @@ func EscapeSingleQuote(str ...interface{}) string {
 	return strings.Join(out, " ")
 }
 
-func truncate(s string, max int) string {
-	if len(s) <= max {
-		return s
-	}
-	return s[:max]
-}
-
 func strval(v interface{}) string {
 	switch v := v.(type) {
 	case string:

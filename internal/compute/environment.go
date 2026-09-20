@@ -29,36 +29,14 @@ type HostEnvironment struct {
 	ContainerRegistry string
 	ApptainerBin      string
 
-	EnableCgroupV2 bool
-
 	WorkingDirectory string
+	PodsDirectory    string
 
 	// KubeDNS points to the internal DNS of a Kubernetes cluster.
 	KubeDNS string
 
 	// PauseImage is the image used for the pause container.
 	PauseImage string
-}
-
-// The VirtualEnvironment create lightweight "virtual environments" that resemble "Pods" semantics.
-type VirtualEnvironment struct {
-	// PodDirectory points to the pod directory on the underlying filesystem.
-	PodDirectory string
-
-	// CgroupFilePath points to the cgroup configuration for the virtual environment.
-	CgroupFilePath string
-
-	// IPAddressPath is where we store the internal Pod's ip.
-	IPAddressPath string
-
-	// StdoutPath to write stdout into the specified path.
-	StdoutPath string
-
-	// StdoutPath to write stderr into the specified path.
-	StderrPath string
-
-	// SysErrorFilePath indicate a system failure that cause the Pod to fail Immediately, bypassing any other checks.
-	SysErrorFilePath string
 }
 
 // Instantiated Types

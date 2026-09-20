@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Redirect all stdout and stderr to /var/log/entrypoint.log while keeping terminal output
-mkdir -p /var/log /tmp/.hpk-apptainer/tmp /root/.hpk/.apptainer/cache
+mkdir -p /var/log /tmp/.hpk/.apptainer/tmp /root/.hpk/.apptainer/cache
 exec > >(tee -a /var/log/entrypoint.log) 2>&1
 
 # Default values if not provided

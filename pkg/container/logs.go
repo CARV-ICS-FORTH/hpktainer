@@ -26,24 +26,6 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-const (
-	// LogTimeFormat is the time format used in the log.
-	// It is a modified version of RFC3339Nano that guarantees trailing
-	// zeroes are not trimmed, taken from
-	// https://github.com/golang/go/issues/19635
-	LogTimeFormat = "2006-01-02T15:04:05.000000000Z07:00"
-
-	// PartialLogType signifies a log line that exceeded the buffer
-	// length and needed to spill into a new line
-	PartialLogType = "P"
-
-	// FullLogType signifies a log line is full
-	FullLogType = "F"
-
-	// ANSIEscapeResetCode is a code that resets all colors and text effects
-	ANSIEscapeResetCode = "\033[0m"
-)
-
 func GetTailLog(path string, tail int) ([]string, error) {
 	var (
 		nllCounter int

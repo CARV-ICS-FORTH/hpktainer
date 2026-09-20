@@ -20,10 +20,10 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"time"
 
 	"errors"
 	"hpk/internal/compute/endpoint"
+	"hpk/internal/compute/volume"
 	"hpk/internal/compute/volume/configmap"
 	"hpk/internal/compute/volume/downwardapi"
 	"hpk/internal/compute/volume/emptydir"
@@ -40,19 +40,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	k8errors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/retry"
 )
-
-// NotFoundBackoff is the recommended backoff for a resource that is required,
-// but is not created yet. For instance, when mounting configmap volumes to pods.
-// TODO: in future version, the backoff can be self-modified depending on the load of the controller.
-var NotFoundBackoff = wait.Backoff{
-	Steps:    10,
-	Duration: 2 * time.Second,
-	Factor:   5.0,
-	Jitter:   0.1,
-}
 
 // mountVolumeSource prepares the volumes into the local pod directory.
 // Critical errors related to the HPK fail directly.
@@ -287,7 +276,7 @@ func (h *PodHandler) PersistentVolumeClaimSource(ctx context.Context, vol corev1
 
 		key := types.NamespacedName{Namespace: h.Pod.GetNamespace(), Name: source.ClaimName}
 
-		if errPVC := retry.OnError(NotFoundBackoff,
+		if errPVC := retry.OnError(volume.NotFoundBackoff,
 			func(err error) bool { // retry condition
 				return k8errors.IsNotFound(err) || errors.Is(err, compute.ErrUnboundedPVC)
 			},
@@ -330,7 +319,7 @@ func (h *PodHandler) PersistentVolumeClaimSource(ctx context.Context, vol corev1
 	{
 		key := types.NamespacedName{Namespace: h.Pod.GetNamespace(), Name: pvc.Spec.VolumeName}
 
-		if errPV := retry.OnError(NotFoundBackoff,
+		if errPV := retry.OnError(volume.NotFoundBackoff,
 			func(err error) bool { // retry condition
 				return k8errors.IsNotFound(err)
 			},

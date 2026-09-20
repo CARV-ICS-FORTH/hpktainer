@@ -96,7 +96,7 @@ else
 fi
 
 # Ensure required Apptainer cache and tmp directories exist
-mkdir -p /tmp/.hpk-apptainer/tmp "$HOME/.hpk/.apptainer/cache" "$HOME/.apptainer/cache"
+mkdir -p /tmp/.hpk/.apptainer/tmp "$HOME/.hpk/.apptainer/cache" "$HOME/.apptainer/cache"
 
 BIN_BINDS=()
 if [ -f "$HOME/.hpk/bin/hpk-kubelet" ]; then
@@ -122,10 +122,10 @@ apptainer instance run \
     --bind "$HOME/.apptainer/cache:/root/.apptainer/cache" \
     "${BIN_BINDS[@]}" \
     --env APPTAINER_CACHEDIR=/root/.hpk/.apptainer/cache \
-    --env APPTAINER_TMPDIR=/tmp/.hpk-apptainer/tmp \
+    --env APPTAINER_TMPDIR=/tmp/.hpk/.apptainer/tmp \
     --env SINGULARITY_CACHEDIR=/root/.hpk/.apptainer/cache \
-    --env SINGULARITY_TMPDIR=/tmp/.hpk-apptainer/tmp \
-    --env TMPDIR=/tmp/.hpk-apptainer/tmp \
+    --env SINGULARITY_TMPDIR=/tmp/.hpk/.apptainer/tmp \
+    --env TMPDIR=/tmp/.hpk/.apptainer/tmp \
 	--env HOST_IP="$HOST_IP_DETECTED" \
 	--env CONTROLLER_IP="$CONTROLLER_IP" \
 	--env HPK_DEV="${HPK_DEV:-0}" \

@@ -35,7 +35,7 @@ func ensureApptainerRuntimeDirs() (tmpDir string, cacheDir string, err error) {
 	preferredBase := "/root/.hpk/.apptainer"
 	cacheDir = filepath.Join(preferredBase, "cache")
 
-	fallbackBase := "/tmp/.hpk-apptainer"
+	fallbackBase := "/tmp/.hpk/.apptainer"
 	tmpDir = filepath.Join(fallbackBase, "tmp")
 
 	if err = os.MkdirAll(tmpDir, 0o755); err != nil {

@@ -2,6 +2,7 @@ package podhandler_test
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 
 	"hpk/internal/compute"
@@ -29,8 +30,8 @@ func setup(tmpDir string) error {
 		KubeMasterHost:    "",
 		ContainerRegistry: "",
 		ApptainerBin:      "apptainer",
-		EnableCgroupV2:    false,
 		WorkingDirectory:  tmpDir,
+		PodsDirectory:     filepath.Join(tmpDir, ".hpk", ".pods"),
 		KubeDNS:           "",
 	}
 

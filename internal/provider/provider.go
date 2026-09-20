@@ -23,7 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
+	"sync"
 	"time"
 
 	"hpk/internal/compute"
@@ -65,17 +65,6 @@ func isPodOwnedByNode(pod *corev1.Pod, ownNode string) bool {
 	return pod.Spec.NodeName == ownNode
 }
 
-func loadPodIfOwned(path endpoint.PodPath, ownNode string) (*corev1.Pod, error) {
-	pod, err := PodHandler.LoadPodFromFile(path.EncodedJSONPath())
-	if err != nil {
-		return nil, err
-	}
-	if !isPodOwnedByNode(pod, ownNode) {
-		return nil, nil
-	}
-	return pod, nil
-}
-
 // VirtualK8S implements the virtual-kubelet provider interface and stores pods in memory.
 type VirtualK8S struct {
 	InitConfig
@@ -83,10 +72,12 @@ type VirtualK8S struct {
 	Logger logr.Logger
 
 	updatedPod func(*corev1.Pod)
+
+	pods sync.Map // map[client.ObjectKey]*corev1.Pod
 }
 
 // NewVirtualK8S reads a kubeconfig file and sets up a client to interact
-// with the execution environment. It is designed to restore missing state after a restart.
+// with the execution environment.
 func NewVirtualK8S(config InitConfig) (*VirtualK8S, error) {
 	logger := zap.New(zap.UseDevMode(true))
 
@@ -98,67 +89,17 @@ func NewVirtualK8S(config InitConfig) (*VirtualK8S, error) {
 	}
 
 	/*---------------------------------------------------
-	 * Handle Corrupted Pods (With missing state)
+	 * Clean up any leftover pod directories from prior runs
 	 *---------------------------------------------------*/
-	var corruptedPods []endpoint.PodPath
-
-	// move corrupted pods to a centralized dir for inspection.
-	// Valid are considered the pods with a Pod description.
-	if err := compute.HPK.WalkPodDirectories(func(podpath endpoint.PodPath) error {
-		if pod, err := loadPodIfOwned(podpath, config.NodeName); err == nil && pod == nil {
-			return nil
+	_ = compute.HPK.WalkPodDirectories(func(podpath endpoint.PodPath) error {
+		logger.Info("Cleaning up leftover pod directory", "path", podpath)
+		_ = os.RemoveAll(podpath.String())
+		namespaceDir := filepath.Dir(podpath.String())
+		if empty, _ := endpoint.IsEmpty(namespaceDir); empty {
+			_ = os.Remove(namespaceDir)
 		}
-
-		ok, info := podpath.PodEnvironmentIsOK()
-		if !ok {
-			corruptedPods = append(corruptedPods, podpath)
-
-			compute.DefaultLogger.Info("Corrupted Pod has been detected",
-				"reason", info,
-				"path", podpath,
-			)
-		}
-
 		return nil
-	}); err != nil {
-		return nil, fmt.Errorf("pod scanning has failed: %w", err)
-	}
-
-	for _, path := range corruptedPods {
-		archivedPodPath := strings.ReplaceAll(string(path), compute.HPK.String(), compute.HPK.CorruptedDir())
-
-		// ensure that path prefix exists.
-		archivedNamespacePath := filepath.Dir(archivedPodPath)
-
-		if err := os.MkdirAll(archivedNamespacePath, endpoint.PodGlobalDirectoryPermissions); err != nil {
-			return nil, fmt.Errorf("basepath '%s' error: %w", archivedNamespacePath, err)
-		}
-
-		// move corrupted pod to the archived namespace.
-	retry:
-		if err := os.Rename(string(path), archivedPodPath); err != nil {
-			if errors.Is(err, os.ErrExist) {
-				archivedPodPath = fmt.Sprintf("%s-%d", archivedPodPath, time.Now().Second())
-				goto retry
-			}
-
-			if errors.Is(err, os.ErrNotExist) {
-				logger.Info("Skipping corrupted pod archive move because source no longer exists",
-					"from", path,
-					"to", archivedPodPath,
-					"error", err,
-				)
-				continue
-			}
-
-			return nil, fmt.Errorf("moving error of corrupted pod: %w", err)
-		}
-
-		logger.Info("Moved corrupted pod to archive",
-			"from", path,
-			"to", archivedPodPath,
-		)
-	}
+	})
 
 	return &VirtualK8S{
 		InitConfig: config,
@@ -178,6 +119,7 @@ func (v *VirtualK8S) CreatePod(ctx context.Context, pod *corev1.Pod) error {
 	}()
 
 	pod.Status.HostIP = v.InitConfig.InternalIP
+	v.pods.Store(podKey, pod)
 
 	go func() {
 		defer func() {
@@ -210,10 +152,11 @@ func (v *VirtualK8S) UpdatePod(ctx context.Context, pod *corev1.Pod) error {
 
 	defer logger.Info("[K8s] <- UpdatePod")
 
-	localPod, err := PodHandler.LoadPodFromKey(podKey)
-	if err != nil {
+	val, ok := v.pods.Load(podKey)
+	if !ok {
 		return errdefs.NotFoundf("object not found")
 	}
+	localPod := val.(*corev1.Pod)
 
 	localVersion, errLocal := strconv.ParseUint(localPod.ResourceVersion, 10, 64)
 	newVersion, errNew := strconv.ParseUint(pod.ResourceVersion, 10, 64)
@@ -235,10 +178,7 @@ func (v *VirtualK8S) UpdatePod(ctx context.Context, pod *corev1.Pod) error {
 		return nil
 	}
 
-	if err := PodHandler.SavePodToFile(ctx, pod); err != nil {
-		logger.Error(err, "failed to save updated pod to file", "pod", podKey)
-		return fmt.Errorf("failed to save updated pod '%s' to file: %w", podKey, err)
-	}
+	v.pods.Store(podKey, pod)
 
 	return nil
 }
@@ -255,18 +195,23 @@ func (v *VirtualK8S) DeletePod(ctx context.Context, pod *corev1.Pod) error {
 		return nil
 	}
 
-	if localPod, err := PodHandler.LoadPodFromKey(podKey); err == nil {
+	var localPod *corev1.Pod
+	if val, ok := v.pods.Load(podKey); ok {
+		localPod = val.(*corev1.Pod)
 		if !isPodOwnedByNode(localPod, v.NodeName) {
-			logger.Info("[K8s] <- DeletePod (SKIPPED - local pod file owned by another node)", "podNode", localPod.Spec.NodeName, "ownNode", v.NodeName)
+			logger.Info("[K8s] <- DeletePod (SKIPPED - local pod owned by another node)", "podNode", localPod.Spec.NodeName, "ownNode", v.NodeName)
 			return nil
 		}
+	} else {
+		localPod = pod
 	}
 
-	if !PodHandler.DeletePod(podKey) {
+	if !PodHandler.DeletePod(podKey, localPod) {
 		logger.Info("[K8s] <- DeletePod (POD NOT FOUND)")
 		return errdefs.NotFoundf("object not found")
 	}
 
+	v.pods.Delete(podKey)
 	logger.Info("[K8s] <- DeletePod (SUCCESS)")
 	return nil
 }
@@ -278,11 +223,12 @@ func (v *VirtualK8S) GetPod(ctx context.Context, namespace, name string) (*corev
 
 	logger.Info("[K8s] -> GetPod")
 
-	pod, err := PodHandler.LoadPodFromKey(podKey)
-	if err != nil {
+	val, ok := v.pods.Load(podKey)
+	if !ok {
 		logger.Info("[K8s] <- GetPod (POD NOT FOUND)")
 		return nil, errdefs.NotFoundf("object not found")
 	}
+	pod := val.(*corev1.Pod)
 
 	logger.Info("[K8s] <- GetPod",
 		"version", pod.GetResourceVersion(),
@@ -299,11 +245,12 @@ func (v *VirtualK8S) GetPodStatus(ctx context.Context, namespace, name string) (
 
 	logger.Info("[K8s] -> GetPodStatus")
 
-	pod, err := PodHandler.LoadPodFromKey(podKey)
-	if err != nil {
+	val, ok := v.pods.Load(podKey)
+	if !ok {
 		logger.Info("[K8s] <- GetPodStatus (POD NOT FOUND)")
 		return nil, errdefs.NotFoundf("object not found")
 	}
+	pod := val.(*corev1.Pod)
 
 	logger.Info("[K8s] <- GetPodStatus",
 		"version", pod.GetResourceVersion(),
@@ -319,26 +266,18 @@ func (v *VirtualK8S) GetPods(ctx context.Context) ([]*corev1.Pod, error) {
 	defer v.Logger.Info("[K8s] <- GetPods")
 
 	var pods []*corev1.Pod
-
-	if err := compute.HPK.WalkPodDirectories(func(path endpoint.PodPath) error {
-		pod, err := loadPodIfOwned(path, v.NodeName)
-		if err != nil {
-			v.Logger.Info("Ignore Corrupted Pod Dir", "path", path, "error", err)
-			return nil
-		}
-
-		if pod == nil {
-			return nil
+	v.pods.Range(func(key, val interface{}) bool {
+		pod := val.(*corev1.Pod)
+		if !isPodOwnedByNode(pod, v.NodeName) {
+			return true
 		}
 
 		PodHandler.SyncContainerStatuses(pod)
 		PodHandler.UpdateStatusFromRuntime(pod)
 
-		pods = append(pods, pod)
-		return nil
-	}); err != nil {
-		return nil, fmt.Errorf("failed to traverse pods: %w", err)
-	}
+		pods = append(pods, pod.DeepCopy())
+		return true
+	})
 
 	return pods, nil
 }
@@ -374,9 +313,7 @@ func (v *VirtualK8S) saveAndNotifyPod(source string, pod *corev1.Pod) {
 	}
 
 	podKey := client.ObjectKeyFromObject(pod)
-	if err := PodHandler.SavePodToFile(context.Background(), pod); err != nil {
-		v.Logger.Error(err, "Failed to persist updated pod status", "pod", podKey, "source", source)
-	}
+	v.pods.Store(podKey, pod)
 
 	if v.updatedPod != nil {
 		v.updatedPod(pod)
@@ -389,14 +326,14 @@ func (v *VirtualK8S) saveAndNotifyPod(source string, pod *corev1.Pod) {
 }
 
 func (v *VirtualK8S) reconcileNonTerminalPods() {
-	if err := compute.HPK.WalkPodDirectories(func(path endpoint.PodPath) error {
-		pod, err := loadPodIfOwned(path, v.NodeName)
-		if err != nil || pod == nil {
-			return nil
+	v.pods.Range(func(key, val interface{}) bool {
+		pod := val.(*corev1.Pod)
+		if !isPodOwnedByNode(pod, v.NodeName) {
+			return true
 		}
 
 		if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
-			return nil
+			return true
 		}
 
 		oldStatus := pod.Status.DeepCopy()
@@ -409,10 +346,8 @@ func (v *VirtualK8S) reconcileNonTerminalPods() {
 		if changed {
 			v.saveAndNotifyPod("reconciler", pod)
 		}
-		return nil
-	}); err != nil {
-		v.Logger.Error(err, "Periodic pod reconcile failed")
-	}
+		return true
+	})
 }
 
 func (v *VirtualK8S) PortForward(ctx context.Context, namespace, pod string, port int32, stream io.ReadWriteCloser) error {

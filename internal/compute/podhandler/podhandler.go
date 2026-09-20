@@ -35,80 +35,8 @@ import (
 
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/util/json"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
-
-// LoadPodFromKey loads a pod specification from its object key on disk.
-func LoadPodFromKey(podRef client.ObjectKey) (*corev1.Pod, error) {
-	filePath := compute.HPK.Pod(podRef).EncodedJSONPath()
-	return LoadPodFromFile(filePath)
-}
-
-// LoadPodFromFile will read, decode, and return a Pod from a file.
-func LoadPodFromFile(filePath string) (*corev1.Pod, error) {
-	if filePath == "" {
-		return nil, fmt.Errorf("file path not specified")
-	}
-
-	podDef, err := os.ReadFile(filePath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read file path %s: %w", filePath, err)
-	}
-
-	if len(podDef) == 0 {
-		return nil, fmt.Errorf("file was empty: %s", filePath)
-	}
-
-	var pod corev1.Pod
-	if err := json.Unmarshal(podDef, &pod); err != nil {
-		return nil, fmt.Errorf("failed decoding file '%s': %w", filePath, err)
-	}
-
-	return &pod, nil
-}
-
-// SavePodToFile atomically writes the Pod JSON specification to disk.
-func SavePodToFile(_ context.Context, pod *corev1.Pod) error {
-	if pod == nil {
-		return fmt.Errorf("empty pod")
-	}
-
-	podRef := client.ObjectKeyFromObject(pod)
-	filePath := compute.HPK.Pod(podRef).EncodedJSONPath()
-
-	podDef, err := json.Marshal(pod)
-	if err != nil {
-		return fmt.Errorf("failed encoding pod: %w", err)
-	}
-
-	f, err := os.CreateTemp(filepath.Dir(filePath), ".crd-*.tmp")
-	if err != nil {
-		return fmt.Errorf("failed to create temp file in '%s': %w", filepath.Dir(filePath), err)
-	}
-	tmpFile := f.Name()
-
-	if _, err := f.Write(podDef); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmpFile)
-		return fmt.Errorf("failed to write tmp file '%s': %w", tmpFile, err)
-	}
-	if err := f.Chmod(endpoint.PodSpecJsonFilePermissions); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmpFile)
-		return fmt.Errorf("failed to chmod tmp file '%s': %w", tmpFile, err)
-	}
-	if err := f.Close(); err != nil {
-		_ = os.Remove(tmpFile)
-		return fmt.Errorf("failed to close tmp file '%s': %w", tmpFile, err)
-	}
-	if err := os.Rename(tmpFile, filePath); err != nil {
-		_ = os.Remove(tmpFile)
-		return fmt.Errorf("failed to rename tmp file '%s' to '%s': %w", tmpFile, filePath, err)
-	}
-
-	return nil
-}
 
 func findContainerPID(parentPID int) int {
 	deadline := time.Now().Add(10 * time.Second)
@@ -234,30 +162,19 @@ func GetPodIPFromNetns(pausePID int) (string, error) {
 }
 
 // DeletePod terminates all processes associated with a Pod and removes its directory structure.
-func DeletePod(podKey client.ObjectKey) bool {
+func DeletePod(podKey client.ObjectKey, localPod *corev1.Pod) bool {
 	logger := compute.DefaultLogger.WithValues("pod", podKey)
 
 	podDir := compute.HPK.Pod(podKey)
 	_, statErr := os.Stat(podDir.String())
 	logger.Info(" * DeletePod invoked", "podDir", podDir.String(), "dirExists", statErr == nil)
 
-	localPod, err := LoadPodFromKey(podKey)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			logger.Info(" * Local pod file does not exist, skipping deletion", "podDir", podDir.String())
-			return true
-		}
-
-		logger.Error(err, "failed to load pod for deletion")
-		return false
-	}
-
 	// 1. Resolve pause PID
 	var pausePIDStr string
-	if localPod.Annotations != nil {
+	if localPod != nil && localPod.Annotations != nil {
 		pausePIDStr = localPod.Annotations["hpk.io/pause-pid"]
 	}
-	if pausePIDStr == "" {
+	if pausePIDStr == "" && localPod != nil {
 		pausePIDStr = runtime.GetPodID(localPod)
 	}
 
@@ -277,19 +194,21 @@ func DeletePod(podKey client.ObjectKey) bool {
 			}
 		}
 	}
-	collectPIDs(localPod.Status.InitContainerStatuses)
-	collectPIDs(localPod.Status.ContainerStatuses)
-	if localPod.Annotations != nil {
-		if cpid := localPod.Annotations["hpk.io/container-pid"]; cpid != "" && !seen[cpid] {
-			seen[cpid] = true
-			secondaryPIDs = append(secondaryPIDs, cpid)
+	if localPod != nil {
+		collectPIDs(localPod.Status.InitContainerStatuses)
+		collectPIDs(localPod.Status.ContainerStatuses)
+		if localPod.Annotations != nil {
+			if cpid := localPod.Annotations["hpk.io/container-pid"]; cpid != "" && !seen[cpid] {
+				seen[cpid] = true
+				secondaryPIDs = append(secondaryPIDs, cpid)
+			}
 		}
 	}
 
 	// 3. Terminate processes
 	if pausePIDStr != "" || len(secondaryPIDs) > 0 {
 		gracePeriod := 30 * time.Second
-		if localPod.Spec.TerminationGracePeriodSeconds != nil && *localPod.Spec.TerminationGracePeriodSeconds >= 0 {
+		if localPod != nil && localPod.Spec.TerminationGracePeriodSeconds != nil && *localPod.Spec.TerminationGracePeriodSeconds >= 0 {
 			gracePeriod = time.Duration(*localPod.Spec.TerminationGracePeriodSeconds) * time.Second
 		}
 		timeout := gracePeriod + 5*time.Second
@@ -330,18 +249,14 @@ func DeletePod(podKey client.ObjectKey) bool {
 				return false
 			}
 		} else {
-			logger.Error(err, "failed to remove pod directory", "directory", podDir)
+			logger.Error(removeErr, "failed to remove pod directory", "directory", podDir)
 			return false
 		}
 	}
 
 	logger.Info(" * Pod directory is removed")
 
-	// 5. Clean up host script workdir if any
-	workdir := filepath.Join("/tmp", fmt.Sprintf("%s_%s", podKey.Namespace, podKey.Name))
-	_ = os.RemoveAll(workdir)
-
-	// 6. Garbage collect empty namespace directory
+	// 5. Garbage collect empty namespace directory
 	namespaceDir := filepath.Dir(podDir.String())
 	if empty, _ := endpoint.IsEmpty(namespaceDir); empty {
 		if err := os.Remove(namespaceDir); err == nil {
@@ -372,7 +287,6 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, notify func(*corev1.Pod)) {
 	podEnvVars, err := FromServicesForPod(ctx, pod)
 	if err != nil {
 		compute.PodError(pod, "EnvVarError", "failed to list services when setting up env vars: %v", err)
-		_ = SavePodToFile(ctx, pod)
 		if notify != nil {
 			notify(pod)
 		}
@@ -390,7 +304,6 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, notify func(*corev1.Pod)) {
 	// Create directories
 	if err := os.MkdirAll(h.podDirectory.JobDir(), endpoint.PodGlobalDirectoryPermissions); err != nil {
 		compute.PodError(pod, "PodDirectoryError", "Cant create pod directory '%s': %v", h.podDirectory.JobDir(), err)
-		_ = SavePodToFile(ctx, h.Pod)
 		if notify != nil {
 			notify(pod)
 		}
@@ -399,7 +312,6 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, notify func(*corev1.Pod)) {
 
 	if err := os.MkdirAll(h.podDirectory.LogDir(), endpoint.PodGlobalDirectoryPermissions); err != nil {
 		compute.PodError(pod, "PodDirectoryError", "cannot create log directory '%s': %v", h.podDirectory.LogDir(), err)
-		_ = SavePodToFile(ctx, h.Pod)
 		if notify != nil {
 			notify(pod)
 		}
@@ -408,7 +320,6 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, notify func(*corev1.Pod)) {
 
 	if err := os.MkdirAll(h.podDirectory.VolumeDir(), endpoint.PodGlobalDirectoryPermissions); err != nil {
 		compute.PodError(pod, "PodDirectoryError", "cannot create volume directory '%s': %v", h.podDirectory.VolumeDir(), err)
-		_ = SavePodToFile(ctx, h.Pod)
 		if notify != nil {
 			notify(pod)
 		}
@@ -448,13 +359,8 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, notify func(*corev1.Pod)) {
 		}
 	}
 
-	// Persist pod metadata early
-	if err := SavePodToFile(ctx, h.Pod); err != nil {
-		compute.PodError(pod, "SavePodError", "failed to persist pod metadata early: %v", err)
-		if notify != nil {
-			notify(pod)
-		}
-		return
+	if notify != nil {
+		notify(pod)
 	}
 
 	logger.Info(" * Pod Environment has been created")
@@ -463,7 +369,6 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, notify func(*corev1.Pod)) {
 	for _, vol := range h.Pod.Spec.Volumes {
 		if err := h.mountVolumeSource(ctx, vol); err != nil {
 			compute.PodError(pod, "VolumeError", "%v", err)
-			_ = SavePodToFile(ctx, h.Pod)
 			if notify != nil {
 				notify(pod)
 			}
@@ -472,24 +377,10 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, notify func(*corev1.Pod)) {
 	}
 	h.logger.Info(" * All volumes have been mounted")
 
-	// Handle Cgroups
-	if compute.Environment.EnableCgroupV2 {
-		if _, err := os.Create(h.podDirectory.CgroupFilePath()); err != nil {
-			compute.PodError(pod, "CgroupError", "Cant create cgroup configuration file '%s': %v", h.podDirectory.CgroupFilePath(), err)
-			_ = SavePodToFile(ctx, h.Pod)
-			if notify != nil {
-				notify(pod)
-			}
-			return
-		}
-		logger.Info(" * Cgroups are set")
-	}
-
 	// Pull Pause Image
 	pauseImage, err := image.Pull(compute.HPK.ImageDir(), image.Docker, compute.Environment.PauseImage)
 	if err != nil {
 		compute.PodError(pod, "ImagePullError", "ImagePull error. Image:%s: %v", compute.Environment.PauseImage, err)
-		_ = SavePodToFile(ctx, h.Pod)
 		if notify != nil {
 			notify(pod)
 		}
@@ -497,37 +388,22 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, notify func(*corev1.Pod)) {
 	}
 
 	// Launch Pause Container via compute.Environment.ApptainerBin (without --host-networking)
-	pauseLogFile, err := os.Create(filepath.Join(h.podDirectory.LogDir(), "pause.log"))
-	if err != nil {
-		compute.PodError(pod, "PauseLogError", "failed to create pause log file: %v", err)
-		_ = SavePodToFile(ctx, h.Pod)
-		if notify != nil {
-			notify(pod)
-		}
-		return
-	}
-
 	pauseArgs := []string{
 		"exec",
 		"--nv",
 		"--cleanenv",
 		"--writable-tmpfs",
 		"--no-mount", "home,bind-paths",
+		pauseImage.Filepath,
+		"/entrypoint.sh",
+		"/usr/local/bin/hpk-pause",
 	}
-	if _, err := os.Stat("/usr/local/bin/hpk-pause"); err == nil {
-		pauseArgs = append(pauseArgs, "--bind", "/usr/local/bin/hpk-pause:/usr/local/bin/hpk-pause")
-	}
-	pauseArgs = append(pauseArgs, pauseImage.Filepath, "/entrypoint.sh", "/usr/local/bin/hpk-pause")
 
 	pauseCmd := exec.Command(compute.Environment.ApptainerBin, pauseArgs...)
 	pauseCmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	pauseCmd.Stdout = pauseLogFile
-	pauseCmd.Stderr = pauseLogFile
 
 	if err := pauseCmd.Start(); err != nil {
-		pauseLogFile.Close()
 		compute.PodError(pod, "PauseStartError", "failed to start pause container: %v", err)
-		_ = SavePodToFile(ctx, h.Pod)
 		if notify != nil {
 			notify(pod)
 		}
@@ -551,9 +427,7 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, notify func(*corev1.Pod)) {
 	podIP, err := GetPodIPFromNetns(containerPID)
 	if err != nil {
 		_ = pauseCmd.Process.Kill()
-		pauseLogFile.Close()
 		compute.PodError(pod, "NetnsIPError", "failed to discover pod IP from netns: %v", err)
-		_ = SavePodToFile(ctx, h.Pod)
 		if notify != nil {
 			notify(pod)
 		}
@@ -567,9 +441,7 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, notify func(*corev1.Pod)) {
 	// Prepare DNS files in job directory
 	if err := PrepareDNS(pod, h.podDirectory, compute.Environment.KubeDNS, podIP); err != nil {
 		_ = pauseCmd.Process.Kill()
-		pauseLogFile.Close()
 		compute.PodError(pod, "DNSError", "failed to prepare DNS: %v", err)
-		_ = SavePodToFile(ctx, h.Pod)
 		if notify != nil {
 			notify(pod)
 		}
@@ -585,9 +457,7 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, notify func(*corev1.Pod)) {
 		c, err := h.buildContainer(initContainer, initContainerStatus)
 		if err != nil {
 			_ = pauseCmd.Process.Kill()
-			pauseLogFile.Close()
 			compute.PodError(pod, "InitContainerError", "failed to materialize pod.Spec.InitContainers[%d]: %v", i, err)
-			_ = SavePodToFile(ctx, h.Pod)
 			if notify != nil {
 				notify(pod)
 			}
@@ -604,9 +474,7 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, notify func(*corev1.Pod)) {
 		c, err := h.buildContainer(container, containerStatus)
 		if err != nil {
 			_ = pauseCmd.Process.Kill()
-			pauseLogFile.Close()
 			compute.PodError(pod, "MainContainerError", "failed to materialize pod.Spec.Containers[%d]: %v", i, err)
-			_ = SavePodToFile(ctx, h.Pod)
 			if notify != nil {
 				notify(pod)
 			}
@@ -617,14 +485,12 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, notify func(*corev1.Pod)) {
 
 	// Update pod metadata with discovered IP and container initial states
 	UpdateStatusFromRuntime(pod)
-	_ = SavePodToFile(ctx, pod)
 	if notify != nil {
 		notify(pod)
 	}
 
 	// Monitor pause container lifetime in background
 	go func() {
-		defer pauseLogFile.Close()
 		_ = pauseCmd.Wait()
 	}()
 
@@ -648,7 +514,6 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, notify func(*corev1.Pod)) {
 			}
 			SetContainerTerminated(initStatus, 128)
 			UpdateStatusFromRuntime(pod)
-			_ = SavePodToFile(ctx, pod)
 			if notify != nil {
 				notify(pod)
 			}
@@ -658,7 +523,6 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, notify func(*corev1.Pod)) {
 		startTime, _ := runtime.GetProcessStartTime(cmd.Process.Pid)
 		SetContainerRunning(initStatus, cmd.Process.Pid, startTime)
 		UpdateStatusFromRuntime(pod)
-		_ = SavePodToFile(ctx, pod)
 		if notify != nil {
 			notify(pod)
 		}
@@ -677,7 +541,6 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, notify func(*corev1.Pod)) {
 
 		SetContainerTerminated(initStatus, exitCode)
 		UpdateStatusFromRuntime(pod)
-		_ = SavePodToFile(ctx, pod)
 		if notify != nil {
 			notify(pod)
 		}
@@ -708,7 +571,6 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, notify func(*corev1.Pod)) {
 			}
 			SetContainerTerminated(containerStatus, 128)
 			UpdateStatusFromRuntime(pod)
-			_ = SavePodToFile(ctx, pod)
 			if notify != nil {
 				notify(pod)
 			}
@@ -718,7 +580,6 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, notify func(*corev1.Pod)) {
 		startTime, _ := runtime.GetProcessStartTime(cmd.Process.Pid)
 		SetContainerRunning(containerStatus, cmd.Process.Pid, startTime)
 		UpdateStatusFromRuntime(pod)
-		_ = SavePodToFile(ctx, pod)
 		if notify != nil {
 			notify(pod)
 		}
@@ -739,7 +600,6 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, notify func(*corev1.Pod)) {
 
 			SetContainerTerminated(cs, exitCode)
 			UpdateStatusFromRuntime(pod)
-			_ = SavePodToFile(context.Background(), pod)
 			if notify != nil {
 				notify(pod)
 			}

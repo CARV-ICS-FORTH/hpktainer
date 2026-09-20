@@ -25,20 +25,7 @@ import (
 
 const (
 	PodGlobalDirectoryPermissions = os.FileMode(0o777)
-	PodSpecJsonFilePermissions    = os.FileMode(0o600)
-	ContainerJobPermissions       = os.FileMode(0o777)
-)
-
-// Pod-Related Extensions
-const (
-	// ExtensionCRD describes the file where HPK will write the pod definition.
-	ExtensionCRD = ".crd"
-
-	// ExtensionStdout describes the file where container execution will write its stdout.
-	ExtensionStdout = ".stdout"
-
-	// ExtensionStderr describes the file where container execution will write its stderr.
-	ExtensionStderr = ".stderr"
+	DefaultPodsDir                = "/tmp/.hpk/.pods"
 )
 
 // Container-Related Extensions
@@ -50,38 +37,54 @@ const (
 	ExtensionLogs = ".logs"
 )
 
-type HPKPath string
+type HPKPath struct {
+	rootPath string
+	podsPath string
+}
 
 func HPK(rootPath string) HPKPath {
-	return HPKPath(filepath.Join(rootPath, ".hpk"))
+	return HPKWithPods(rootPath, DefaultPodsDir)
+}
+
+func HPKWithPods(rootPath string, podsPath string) HPKPath {
+	if podsPath == "" {
+		podsPath = DefaultPodsDir
+	}
+	return HPKPath{
+		rootPath: filepath.Clean(filepath.Join(rootPath, ".hpk")),
+		podsPath: filepath.Clean(podsPath),
+	}
 }
 
 func (p HPKPath) String() string {
-	if p == "" {
+	if p.rootPath == "" {
 		panic("HPK path has not been initialized")
 	}
 
-	return string(p)
+	return p.rootPath
 }
 
 func (p HPKPath) ImageDir() string {
-	return filepath.Join(string(p), ".images")
+	return filepath.Join(p.rootPath, ".images")
 }
 
-func (p HPKPath) CorruptedDir() string {
-	return filepath.Join(string(p), ".corrupted")
-}
-
-func (p HPKPath) ApptainerDir() string {
-	return filepath.Join(string(p), ".apptainer")
+func (p HPKPath) PodsDir() string {
+	if p.podsPath == "" {
+		return DefaultPodsDir
+	}
+	return p.podsPath
 }
 
 type WalkPodFunc func(path PodPath) error
 
 func (p HPKPath) WalkPodDirectories(f WalkPodFunc) error {
-	maxDepth := strings.Count(p.String(), string(os.PathSeparator)) + 2 // expect path .hpk/namespace/pod
+	if _, err := os.Stat(p.PodsDir()); os.IsNotExist(err) {
+		return nil
+	}
 
-	return filepath.WalkDir(p.String(), func(path string, info os.DirEntry, err error) error {
+	maxDepth := strings.Count(p.PodsDir(), string(os.PathSeparator)) + 2 // expect path <podsDir>/namespace/pod
+
+	return filepath.WalkDir(p.PodsDir(), func(path string, info os.DirEntry, err error) error {
 		// check for traversing errors
 		if err != nil {
 			return fmt.Errorf("Pod traversal error: %w", err)
@@ -92,18 +95,21 @@ func (p HPKPath) WalkPodDirectories(f WalkPodFunc) error {
 			return nil
 		}
 
-		// skip hidden system paths starting with . (e.g. .certs, .images, .corrupted, .apptainer, .tls)
-		if path != p.String() && strings.HasPrefix(info.Name(), ".") {
+		// skip hidden system paths starting with .
+		if path != p.PodsDir() && strings.HasPrefix(info.Name(), ".") {
 			return filepath.SkipDir
 		}
 
 		// pod directory is found
 		depth := strings.Count(path, string(os.PathSeparator))
 		switch {
-		case depth < maxDepth: // pod's namespace
+		case depth < maxDepth: // pods root or pod's namespace
 			return nil
 		case depth == maxDepth: // pod directory
-			return f(PodPath(path))
+			if err := f(PodPath(path)); err != nil {
+				return err
+			}
+			return filepath.SkipDir
 		default: // pod contents
 			return filepath.SkipDir
 		}
@@ -111,7 +117,7 @@ func (p HPKPath) WalkPodDirectories(f WalkPodFunc) error {
 }
 
 func (p HPKPath) Pod(podRef client.ObjectKey) PodPath {
-	path := filepath.Join(p.String(), podRef.Namespace, podRef.Name)
+	path := filepath.Join(p.PodsDir(), podRef.Namespace, podRef.Name)
 
 	return PodPath(path)
 }
@@ -120,15 +126,6 @@ type PodPath string
 
 func (p PodPath) String() string {
 	return string(p)
-}
-
-// PodEnvironmentIsOK checks if the pod structure is ok.
-func (p PodPath) PodEnvironmentIsOK() (bool, string) {
-	if _, err := os.Open(p.EncodedJSONPath()); err != nil {
-		return false, "no pod specification was found"
-	}
-
-	return true, ""
 }
 
 func (p PodPath) JobDir() string {
@@ -141,22 +138,6 @@ func (p PodPath) VolumeDir() string {
 
 func (p PodPath) LogDir() string {
 	return filepath.Join(string(p), "logs")
-}
-
-func (p PodPath) EncodedJSONPath() string {
-	return filepath.Join(p.JobDir(), "pod"+ExtensionCRD)
-}
-
-func (p PodPath) CgroupFilePath() string {
-	return filepath.Join(p.JobDir(), "cgroup.toml")
-}
-
-func (p PodPath) StdoutPath() string {
-	return filepath.Join(p.LogDir(), ExtensionStdout)
-}
-
-func (p PodPath) StderrPath() string {
-	return filepath.Join(p.LogDir(), ExtensionStderr)
 }
 
 func (p PodPath) Container(containerName string) ContainerPath {

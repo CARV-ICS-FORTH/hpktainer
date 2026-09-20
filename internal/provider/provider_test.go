@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"hpk/internal/compute"
@@ -16,7 +17,7 @@ import (
 
 func TestReconcileNonTerminalPodsNotifiesOnlyOnChange(t *testing.T) {
 	tmpDir := t.TempDir()
-	compute.HPK = endpoint.HPK(tmpDir)
+	compute.HPK = endpoint.HPKWithPods(tmpDir, filepath.Join(tmpDir, ".hpk", ".pods"))
 
 	podKey := client.ObjectKey{Namespace: "default", Name: "test-pod"}
 
@@ -46,21 +47,18 @@ func TestReconcileNonTerminalPodsNotifiesOnlyOnChange(t *testing.T) {
 	podDir := compute.HPK.Pod(podKey)
 	_ = os.MkdirAll(podDir.JobDir(), 0755)
 
-	if err := PodHandler.SavePodToFile(nil, pod); err != nil {
-		t.Fatalf("failed to save pod to file: %v", err)
-	}
-
 	var notifyCount int
 	vk := &VirtualK8S{
 		updatedPod: func(p *corev1.Pod) {
 			notifyCount++
 		},
 	}
+	vk.pods.Store(podKey, pod)
 
 	// First call - PodHandler.UpdateStatusFromRuntime will calculate status from runtime
 	vk.reconcileNonTerminalPods()
 
-	// Reconcile automatically persisted the updated status to disk, so next reconcile has matching status.
+	// Reconcile automatically persisted the updated status, so next reconcile has matching status.
 	notifyCount = 0
 
 	// Second reconcile without any runtime changes should NOT trigger updatedPod
@@ -71,8 +69,9 @@ func TestReconcileNonTerminalPodsNotifiesOnlyOnChange(t *testing.T) {
 	}
 
 	// Now simulate a change in runtime (e.g. container terminated)
-	PodHandler.SetContainerTerminated(&pod.Status.ContainerStatuses[0], 0)
-	_ = PodHandler.SavePodToFile(nil, pod)
+	podCopy := pod.DeepCopy()
+	PodHandler.SetContainerTerminated(&podCopy.Status.ContainerStatuses[0], 0)
+	vk.pods.Store(podKey, podCopy)
 
 	vk.reconcileNonTerminalPods()
 
@@ -83,7 +82,7 @@ func TestReconcileNonTerminalPodsNotifiesOnlyOnChange(t *testing.T) {
 
 func TestNodeNameFiltering(t *testing.T) {
 	tmpDir := t.TempDir()
-	compute.HPK = endpoint.HPK(tmpDir)
+	compute.HPK = endpoint.HPKWithPods(tmpDir, filepath.Join(tmpDir, ".hpk", ".pods"))
 
 	podKeyA := client.ObjectKey{Namespace: "default", Name: "pod-a"}
 	podA := &corev1.Pod{
@@ -119,19 +118,17 @@ func TestNodeNameFiltering(t *testing.T) {
 		},
 	}
 
-	for _, pod := range []*corev1.Pod{podA, podB} {
-		podKey := client.ObjectKeyFromObject(pod)
-		podDir := compute.HPK.Pod(podKey)
-		_ = os.MkdirAll(podDir.JobDir(), 0755)
-		if err := PodHandler.SavePodToFile(nil, pod); err != nil {
-			t.Fatalf("failed to save pod %s: %v", podKey, err)
-		}
-	}
-
 	vk := &VirtualK8S{
 		InitConfig: InitConfig{
 			NodeName: "node-a",
 		},
+	}
+
+	for _, pod := range []*corev1.Pod{podA, podB} {
+		podKey := client.ObjectKeyFromObject(pod)
+		podDir := compute.HPK.Pod(podKey)
+		_ = os.MkdirAll(podDir.JobDir(), 0755)
+		vk.pods.Store(podKey, pod)
 	}
 
 	// 1. GetPods should return only podA

@@ -15,7 +15,11 @@ var (
 )
 
 func Initialize(pauseImage string) error {
-	compute.HPK = endpoint.HPK(compute.Environment.WorkingDirectory)
+	if compute.Environment.PodsDirectory != "" {
+		compute.HPK = endpoint.HPKWithPods(compute.Environment.WorkingDirectory, compute.Environment.PodsDirectory)
+	} else {
+		compute.HPK = endpoint.HPK(compute.Environment.WorkingDirectory)
+	}
 
 	// create the ~/.hpk directory, if it does not exist.
 	if err := os.MkdirAll(compute.HPK.String(), endpoint.PodGlobalDirectoryPermissions); err != nil {
@@ -27,14 +31,14 @@ func Initialize(pauseImage string) error {
 		return fmt.Errorf("Failed to create ImageDir '%s': %w", compute.HPK.ImageDir(), err)
 	}
 
+	// create the /tmp/.hpk/.pods directory, if it does not exist.
+	if err := os.MkdirAll(compute.HPK.PodsDir(), endpoint.PodGlobalDirectoryPermissions); err != nil {
+		return fmt.Errorf("Failed to create PodsDir '%s': %w", compute.HPK.PodsDir(), err)
+	}
+
 	// Sweep leftover temp image files from prior crashed pulls
 	if err := image.CleanupTempFiles(compute.HPK.ImageDir()); err != nil {
 		compute.DefaultLogger.Error(err, "failed to cleanup temp image files")
-	}
-
-	// create the ~/.hpk/corrupted directory, if it does not exist.
-	if err := os.MkdirAll(compute.HPK.CorruptedDir(), endpoint.PodGlobalDirectoryPermissions); err != nil {
-		return fmt.Errorf("Failed to create CorruptedDir '%s': %w", compute.HPK.CorruptedDir(), err)
 	}
 
 	img, err := image.Pull(compute.HPK.ImageDir(), image.Docker, pauseImage)
@@ -46,6 +50,7 @@ func Initialize(pauseImage string) error {
 
 	compute.DefaultLogger.Info("Runtime info",
 		"WorkingDirectory", compute.HPK.String(),
+		"PodsDirectory", compute.HPK.PodsDir(),
 		"PauseImagePath", DefaultPauseImage,
 	)
 
