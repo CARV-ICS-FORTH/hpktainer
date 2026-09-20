@@ -60,13 +60,18 @@ else
     apptainer exec docker://docker.io/calico/node:v3.28.0 /bin/true 2>/dev/null || true
 fi
 
+SCRIPT_DIR="${SLURM_SUBMIT_DIR:-$HOME/hpk}"
+if [ ! -f "$SCRIPT_DIR/hpk-bubble.sh" ]; then
+    SCRIPT_DIR="$HOME/hpk"
+fi
+
 # Start Controller Bubble
 echo "Starting Controller on $CONTROLLER_NODE..."
 export HPK_ROLE="controller"
 export CONTROLLER_IP=$CONTROLLER_IP
 export HPK_DEV=${HPK_DEV:-0}
 export NUM_NODES=$NUM_NODES
-srun --nodes=1 -w $CONTROLLER_NODE --exclusive ./hpk-bubble.sh 1 &
+srun --nodes=1 -w $CONTROLLER_NODE --exclusive "$SCRIPT_DIR/hpk-bubble.sh" 1 &
 
 # Wait for Controller initialization
 echo "Waiting for Controller initialization..."
@@ -93,7 +98,7 @@ for ((i=1; i<NUM_NODES; i++)); do
         export CONTROLLER_IP=$CONTROLLER_IP
         export HPK_DEV=${HPK_DEV:-0}
         export NUM_NODES=$NUM_NODES
-        srun --nodes=1 -w $NODE --exclusive ./hpk-bubble.sh $BUBBLE_ID
+        srun --nodes=1 -w $NODE --exclusive "$SCRIPT_DIR/hpk-bubble.sh" $BUBBLE_ID
     ) &
     
     ((BUBBLE_ID++))

@@ -191,7 +191,83 @@ func buildApptainerCommand(containerIP, gwIP, socketPath, mtuStr string) (*exec.
 	return runCmd, nil
 }
 
+func runHostNetworking(args []string) int {
+	if len(args) == 0 {
+		log.Println("no arguments provided to hpktainer")
+		return 1
+	}
+
+	log.Printf("Executing apptainer (host-networking passthrough): %v", args)
+
+	runCmd := exec.Command("apptainer", args...)
+	runCmd.Stdin = os.Stdin
+	runCmd.Stdout = os.Stdout
+	runCmd.Stderr = os.Stderr
+
+	hostEnv := os.Environ()
+	tmpDir, cacheDir, err := ensureApptainerRuntimeDirs()
+	if err != nil {
+		log.Printf("failed to prepare apptainer runtime dirs: %v", err)
+		return 1
+	}
+
+	hostEnv = append(hostEnv,
+		"APPTAINER_TMPDIR="+tmpDir,
+		"SINGULARITY_TMPDIR="+tmpDir,
+		"TMPDIR="+tmpDir,
+		"APPTAINER_CACHEDIR="+cacheDir,
+		"SINGULARITY_CACHEDIR="+cacheDir,
+	)
+	runCmd.Env = hostEnv
+
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigs)
+
+	if err := runCmd.Start(); err != nil {
+		log.Printf("Failed to start apptainer: %v", err)
+		return 1
+	}
+
+	doneSig := make(chan struct{})
+	defer close(doneSig)
+	go func() {
+		select {
+		case sig := <-sigs:
+			if runCmd.Process != nil {
+				runCmd.Process.Signal(sig)
+			}
+		case <-doneSig:
+		}
+	}()
+
+	err = runCmd.Wait()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return exitErr.ExitCode()
+		}
+		log.Printf("Apptainer exited with error: %v", err)
+		return 1
+	}
+
+	return 0
+}
+
 func run() int {
+	var isHostNetworking bool
+	var filteredArgs []string
+	for _, arg := range os.Args[1:] {
+		if arg == "--host-networking" || arg == "-host-networking" {
+			isHostNetworking = true
+			continue
+		}
+		filteredArgs = append(filteredArgs, arg)
+	}
+
+	if isHostNetworking {
+		return runHostNetworking(filteredArgs)
+	}
+
 	// 1. Check Root
 	if !isRoot() {
 		log.Println("hpktainer must be run as root to configure networking.")

@@ -18,10 +18,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 
-	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -29,23 +27,6 @@ const (
 	PodGlobalDirectoryPermissions = os.FileMode(0o777)
 	PodSpecJsonFilePermissions    = os.FileMode(0o600)
 	ContainerJobPermissions       = os.FileMode(0o777)
-)
-
-type ControlFileType = string
-
-// Control File (Written by the container execution)
-const (
-	// ExtensionSysError describes the file where container execution will describe its failure.
-	ExtensionSysError ControlFileType = ".syserror"
-
-	// ExtensionIP describes the file where container execution will write its ip.
-	ExtensionIP ControlFileType = ".ip"
-
-	// ExtensionExitCode describes the file where container execution will write its exit code.
-	ExtensionExitCode ControlFileType = ".exitCode"
-
-	// ExtensionJobID describes the file  where container execution will write its job id.
-	ExtensionJobID ControlFileType = ".jobid"
 )
 
 // Pod-Related Extensions
@@ -62,10 +43,10 @@ const (
 
 // Container-Related Extensions
 const (
-	// ExtensionEnvironment describes the file  where the environment variables for the container are held.
+	// ExtensionEnvironment describes the file where the environment variables for the container are held.
 	ExtensionEnvironment = ".env"
 
-	// ExtensionLogs describes the file  where container execution will write its logs.
+	// ExtensionLogs describes the file where container execution will write its logs.
 	ExtensionLogs = ".logs"
 )
 
@@ -123,52 +104,11 @@ func (p HPKPath) WalkPodDirectories(f WalkPodFunc) error {
 			return nil
 		case depth == maxDepth: // pod directory
 			return f(PodPath(path))
-		default: // pod contents. we don't need it. contents should be addressed by PodRuntimeEnv() calls.
+		default: // pod contents
 			return filepath.SkipDir
 		}
 	})
 }
-
-// ParseControlFilePath parses the path according to the expected HPK format, and returns the corresponding fields.
-// Validated through: https://regex101.com/r/olnlMx/1
-func (p HPKPath) ParseControlFilePath(absPath string) (podKey types.NamespacedName, fileName string, invalid bool) {
-	// ignore non absolute paths
-	if !filepath.IsAbs(absPath) {
-		return types.NamespacedName{}, "", true
-	}
-
-	// keep only the relative path within the pod directory (e.g, /namespace/pod/.../file)
-	relPath := strings.TrimPrefix(absPath, p.String())
-
-	// find matches
-	re := regexp.MustCompile(`^/(?P<namespace>\S+)/(?P<pod>\S+?)/controlfiles/(?P<file>.*)$`)
-	match := re.FindStringSubmatch(relPath)
-
-	if len(match) == 0 {
-		return types.NamespacedName{}, "", true
-	}
-
-	// parse fields
-	for i, name := range re.SubexpNames() {
-		if i > 0 && i <= len(match) {
-			switch name {
-			case "namespace":
-				podKey.Namespace = match[i]
-			case "pod":
-				podKey.Name = match[i]
-			case "file":
-				fileName = match[i]
-			}
-		}
-	}
-
-	return podKey, fileName, false
-}
-
-/*
-	Pod-Related paths captured by the Event Listener.
-	They are necessary to drive the lifecycle of a Pod.
-*/
 
 func (p HPKPath) Pod(podRef client.ObjectKey) PodPath {
 	path := filepath.Join(p.String(), podRef.Namespace, podRef.Name)
@@ -182,27 +122,15 @@ func (p PodPath) String() string {
 	return string(p)
 }
 
-/*
-	Pod-Related paths not captured by the Event Listener.
-	They are needed for HPK to bootstrap a pod.
-*/
-
-// PodEnvironmentIsOK checks if the pod structure is ok, and if it is not, it returns an indiciate reason
+// PodEnvironmentIsOK checks if the pod structure is ok.
 func (p PodPath) PodEnvironmentIsOK() (bool, string) {
-	// check that there is a valid pod description
 	if _, err := os.Open(p.EncodedJSONPath()); err != nil {
 		return false, "no pod specification was found"
-	}
-
-	// check if the pod is already failed
-	if _, err := os.Open(p.SysErrorFilePath()); !os.IsNotExist(err) {
-		return false, "pod has failed with a system error"
 	}
 
 	return true, ""
 }
 
-// JobDir .hpk/namespace/podName/.virtualenv
 func (p PodPath) JobDir() string {
 	return filepath.Join(string(p), "job")
 }
@@ -215,54 +143,21 @@ func (p PodPath) LogDir() string {
 	return filepath.Join(string(p), "logs")
 }
 
-func (p PodPath) ControlFileDir() string {
-	return filepath.Join(string(p), "controlfiles")
-}
-
-// EncodedJSONPath .hpk/namespace/podName/.virtualenv/pod.crd
 func (p PodPath) EncodedJSONPath() string {
 	return filepath.Join(p.JobDir(), "pod"+ExtensionCRD)
 }
 
-// CgroupFilePath .hpk/namespace/podName/.virtualenv/cgroup.toml
 func (p PodPath) CgroupFilePath() string {
 	return filepath.Join(p.JobDir(), "cgroup.toml")
 }
 
-// SubmitJobPath .hpk/namespace/podName/.virtualenv/submit.sh
-func (p PodPath) SubmitJobPath() string {
-	return filepath.Join(p.JobDir(), "submit.sh")
-}
-
-// StdoutPath $HPK/<namespace>/<podName>/logs/.stdout
 func (p PodPath) StdoutPath() string {
 	return filepath.Join(p.LogDir(), ExtensionStdout)
 }
 
-// StderrPath $HPK/<namespace>/<podName>/logs/.stderr
 func (p PodPath) StderrPath() string {
 	return filepath.Join(p.LogDir(), ExtensionStderr)
 }
-
-// SysErrorFilePath points to $HPK/<namespace>/<podName>/controlfile/.syserror
-func (p PodPath) SysErrorFilePath() string {
-	return filepath.Join(p.ControlFileDir(), string(ExtensionSysError))
-}
-
-// IPAddressPath points $HPK/<namespace>/<podName>/controlfile/.ip
-func (p PodPath) IPAddressPath() string {
-	return filepath.Join(p.ControlFileDir(), string(ExtensionIP))
-}
-
-// PauseJobIDPath points to $HPK/<namespace>/<podName>/controlfiles/pause.jobid
-func (p PodPath) PauseJobIDPath() string {
-	return filepath.Join(p.ControlFileDir(), "pause"+string(ExtensionJobID))
-}
-
-/*
-	Container-Related paths captured by the Event Listener.
-	They are necessary to drive the lifecycle of a Container.
-*/
 
 func (p PodPath) Container(containerName string) ContainerPath {
 	return ContainerPath{
@@ -279,19 +174,6 @@ type ContainerPath struct {
 func (c ContainerPath) LogsPath() string {
 	return filepath.Join(c.p.LogDir(), c.containerName+ExtensionLogs)
 }
-
-func (c ContainerPath) IDPath() string {
-	return filepath.Join(c.p.ControlFileDir(), c.containerName+string(ExtensionJobID))
-}
-
-func (c ContainerPath) ExitCodePath() string {
-	return filepath.Join(c.p.ControlFileDir(), c.containerName+string(ExtensionExitCode))
-}
-
-/*
-	Container-Related paths not captured by the Event Listener.
-	They are needed for HPK to bootstrap a container.
-*/
 
 func (c ContainerPath) EnvFilePath() string {
 	return filepath.Join(c.p.JobDir(), c.containerName+ExtensionEnvironment)

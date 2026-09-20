@@ -47,8 +47,6 @@ type Opts struct {
 	// Node name to use when creating a node in Kubernetes
 	NodeName string
 
-	FSPollingInterval time.Duration
-
 	// Number of workers to use to handle pod notifications
 	PodSyncWorkers       int
 	InformerResyncPeriod time.Duration
@@ -87,7 +85,6 @@ func installFlags(flags *pflag.FlagSet, c *Opts) {
 	flags.StringVar(&c.DefaultHostEnvironment.WorkingDirectory, "working-dir", GetUserHomeDir(), "sets up the HPK's working directory")
 
 	flags.BoolVar(&c.DefaultHostEnvironment.EnableCgroupV2, "enable-cgroupv2", false, "Enable support for cgroupv2.")
-	flags.DurationVar(&c.FSPollingInterval, "poll", 5*time.Second, "if greater than 0, it will use a poll based approach to watch for file system changes")
 
 	flags.IntVar(&c.PodSyncWorkers, "pod-sync-workers", 1, `set the number of pod synchronization workers`)
 	flags.DurationVar(&c.InformerResyncPeriod, "full-resync-period", 0, "how often to perform a full resync of pods between kubernetes and the provider")

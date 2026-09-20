@@ -15,13 +15,9 @@
 package podhandler
 
 import (
-	"bufio"
 	"fmt"
-	"os"
 	"sort"
-	"strconv"
 	"strings"
-	"time"
 
 	"hpk/internal/compute"
 	"hpk/pkg/crdtools"
@@ -32,14 +28,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// UpdateStatusFromRuntime performs a deep investigation of the running conditions of the pod to resolv its current status.
+// UpdateStatusFromRuntime performs a deep investigation of the running conditions of the pod to resolve its current status.
 func UpdateStatusFromRuntime(pod *corev1.Pod) {
 	podKey := client.ObjectKeyFromObject(pod)
-	podDir := compute.HPK.Pod(podKey)
 	logger := compute.DefaultLogger.WithValues("pod", podKey)
 
 	/*---------------------------------------------------
-	 * Handle Initialization and Finals States
+	 * Handle Initialization and Final States
 	 *---------------------------------------------------*/
 	switch pod.Status.Phase {
 	case "":
@@ -54,9 +49,7 @@ func UpdateStatusFromRuntime(pod *corev1.Pod) {
 
 	/*-- Initialization of virtual environment  --*/
 	if pod.Status.PodIP == "" {
-		podIPPath := podDir.IPAddressPath()
-		ip, ok := readStringFromFile(podIPPath)
-		if ok {
+		if ip, ok := pod.Annotations["hpk.io/pod-ip"]; ok && ip != "" {
 			pod.Status.PodIP = ip
 			pod.Status.PodIPs = append(pod.Status.PodIPs, corev1.PodIP{IP: ip})
 		}
@@ -90,18 +83,13 @@ func UpdateStatusFromRuntime(pod *corev1.Pod) {
 
 		/*-- Pod is Ready: all init containers have completed successfully --*/
 		crdtools.SetPodStatusCondition(&pod.Status.Conditions, corev1.PodCondition{
-			Type:   corev1.PodInitialized,
-			Status: corev1.ConditionTrue,
-			// LastProbeTime:      metav1.Time{},
+			Type:               corev1.PodInitialized,
+			Status:             corev1.ConditionTrue,
 			LastTransitionTime: metav1.Now(),
 			Reason:             "Initialized",
 			Message:            "all init containers in the pod have started successfully",
 		})
 
-		/*--
-			Set the transition between completion of init containers and starting of normal containers.
-			This transition may take arbitrary time, if for example we need to pull the container images.
-		--*/
 		pod.Status.Message = "Waiting"
 		pod.Status.Reason = "ContainerCreating"
 	}
@@ -149,29 +137,26 @@ func UpdateStatusFromRuntime(pod *corev1.Pod) {
 			},
 		},
 
-		{ /*-- RUNNING: one job is still running --*/
-			expression: state.NumRunningJobs()+state.NumSuccessfulJobs() == totalJobs,
+		{ /*-- RUNNING: all jobs are running or successfully completed --*/
+			expression: state.NumRunningJobs()+state.NumSuccessfulJobs() == totalJobs && state.NumRunningJobs() > 0,
 			change: func(status *corev1.PodStatus) {
 				status.Phase = corev1.PodRunning
 				status.Reason = "Running"
-				status.Message = "at least one pod is still running"
+				status.Message = "at least one container is still running"
 
 				/*-- ContainersReady: all containers in the pod are ready. --*/
 				crdtools.SetPodStatusCondition(&pod.Status.Conditions, corev1.PodCondition{
-					Type:   corev1.ContainersReady,
-					Status: corev1.ConditionTrue,
-					// LastProbeTime:      metav1.Time{},
+					Type:               corev1.ContainersReady,
+					Status:             corev1.ConditionTrue,
 					LastTransitionTime: metav1.Now(),
 					Reason:             "ContainersReady",
-					Message:            " all containers in the pod are ready.",
+					Message:            "all containers in the pod are ready.",
 				})
 
-				/*-- PodReady: the pod is able to service requests and should be added to the
-				  load balancing pools of all matching services. --*/
+				/*-- PodReady: the pod is able to service requests --*/
 				crdtools.SetPodStatusCondition(&pod.Status.Conditions, corev1.PodCondition{
-					Type:   corev1.PodReady,
-					Status: corev1.ConditionTrue,
-					// LastProbeTime:      metav1.Time{},
+					Type:               corev1.PodReady,
+					Status:             corev1.ConditionTrue,
 					LastTransitionTime: metav1.Now(),
 					Reason:             "PodReady",
 					Message:            "the pod is able to service requests",
@@ -179,8 +164,8 @@ func UpdateStatusFromRuntime(pod *corev1.Pod) {
 			},
 		},
 
-		{ /*-- PENDING: some jobs are not yet created --*/
-			expression: state.NumPendingJobs() > 0,
+		{ /*-- PENDING: some jobs are not yet created or starting --*/
+			expression: state.NumPendingJobs() > 0 || totalJobs == 0 || (state.NumRunningJobs() == 0 && state.NumSuccessfulJobs() == 0 && state.NumFailedJobs() == 0),
 			change: func(status *corev1.PodStatus) {
 				status.Phase = corev1.PodPending
 				status.Reason = "InQueue"
@@ -199,7 +184,7 @@ func UpdateStatusFromRuntime(pod *corev1.Pod) {
 	}
 
 	/*---------------------------------------------------
-	 * Check for Expected Lifecycle Transitions or panic
+	 * Check for Expected Lifecycle Transitions
 	 *---------------------------------------------------*/
 	for _, testcase := range phaseTransitionSequence {
 		if testcase.expression {
@@ -220,18 +205,16 @@ func UpdateStatusFromRuntime(pod *corev1.Pod) {
 
 func setTerminationConditions(pod *corev1.Pod) {
 	crdtools.SetPodStatusCondition(&pod.Status.Conditions, corev1.PodCondition{
-		Type:   corev1.ContainersReady,
-		Status: corev1.ConditionFalse,
-		// LastProbeTime:      metav1.Time{},
+		Type:               corev1.ContainersReady,
+		Status:             corev1.ConditionFalse,
 		LastTransitionTime: metav1.Now(),
 		Reason:             "ContainersUnready",
 		Message:            "Pod Has been Successfully Terminated.",
 	})
 
 	crdtools.SetPodStatusCondition(&pod.Status.Conditions, corev1.PodCondition{
-		Type:   corev1.PodReady,
-		Status: corev1.ConditionFalse,
-		// LastProbeTime:      metav1.Time{},
+		Type:               corev1.PodReady,
+		Status:             corev1.ConditionFalse,
 		LastTransitionTime: metav1.Now(),
 		Reason:             "PodUnready",
 		Message:            "Pod Has been Successfully Terminated.",
@@ -250,7 +233,6 @@ func podWithExplicitlyUnsupportedFields(logger logr.Logger, pod *corev1.Pod) boo
 
 	if pod.Spec.Affinity != nil {
 		logger.Info("Ignore .Spec.Affinity")
-		// unsupportedFields = append(unsupportedFields, ".Spec.Affinity")
 	}
 
 	if pod.Spec.DNSConfig != nil {
@@ -259,7 +241,6 @@ func podWithExplicitlyUnsupportedFields(logger logr.Logger, pod *corev1.Pod) boo
 
 	if pod.Spec.SecurityContext != nil {
 		logger.Info("Ignore .Spec.SecurityContext")
-		//	unsupportedFields = append(unsupportedFields, ".Spec.SecurityContext")
 	}
 
 	/*---------------------------------------------------
@@ -268,22 +249,18 @@ func podWithExplicitlyUnsupportedFields(logger logr.Logger, pod *corev1.Pod) boo
 	for i, container := range pod.Spec.Containers {
 		if container.SecurityContext != nil {
 			logger.Info(fmt.Sprintf("Ignore .Spec.Containers[%d].SecurityContext", i))
-			// unsupportedFields = append(unsupportedFields, fmt.Sprintf(".Spec.Containers[%d].SecurityContext", i))
 		}
 
 		if container.StartupProbe != nil {
 			logger.Info(fmt.Sprintf("Ignore .Spec.Containers[%d].StartupProbe", i))
-			// unsupportedFields = append(unsupportedFields, fmt.Sprintf(".Spec.Containers[%d].StartupProbe", i))
 		}
 
 		if container.LivenessProbe != nil {
 			logger.Info(fmt.Sprintf("Ignore .Spec.Containers[%d].LivenessProbe", i))
-			// unsupportedFields = append(unsupportedFields, fmt.Sprintf(".Spec.Containers[%d].LivenessProbe", i))
 		}
 
 		if container.ReadinessProbe != nil {
 			logger.Info(fmt.Sprintf("Ignore .Spec.Containers[%d].ReadinessProbe", i))
-			// unsupportedFields = append(unsupportedFields, fmt.Sprintf(".Spec.Containers[%d].ReadinessProbe", i))
 		}
 	}
 
@@ -299,8 +276,7 @@ func podWithExplicitlyUnsupportedFields(logger logr.Logger, pod *corev1.Pod) boo
 	return false
 }
 
-// HumanReadableCode translated the exit into a human-readable form.
-// Source: https://komodor.com/learn/exit-codes-in-containers-and-kubernetes-the-complete-guide/
+// HumanReadableCode translates the exit code into a human-readable form.
 func HumanReadableCode(code int) string {
 	switch code {
 	case 0:
@@ -330,66 +306,13 @@ func HumanReadableCode(code int) string {
 	}
 }
 
-func readStringFromFile(filepath string) (string, bool) {
-	for attempt := 0; attempt < 3; attempt++ {
-		out, err := os.ReadFile(filepath)
-		if os.IsNotExist(err) {
-			return "", false
-		}
-
-		if err != nil {
-			compute.DefaultLogger.Error(err, "cannot read file", "path", filepath)
-			return "", false
-		}
-
-		val := strings.TrimSpace(string(out))
-		if val != "" {
-			return val, true
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	return "", false
-}
-
-func readIntFromFile(filepath string) (int, bool) {
-	for attempt := 0; attempt < 3; attempt++ {
-		out, err := os.ReadFile(filepath)
-		if os.IsNotExist(err) {
-			return -1, false
-		}
-
-		if err != nil {
-			compute.DefaultLogger.Error(err, "cannot read file", "path", filepath)
-			return -1, false
-		}
-
-		scanner := bufio.NewScanner(strings.NewReader(string(out)))
-		scanner.Split(bufio.ScanWords)
-
-		if scanner.Scan() {
-			code, err := strconv.Atoi(scanner.Text())
-			if err != nil {
-				compute.DefaultLogger.Error(err, "cannot decode content to int", "path", filepath, "content", scanner.Text())
-				return -1, false
-			}
-
-			return code, true
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	return -1, false
-}
-
 /*************************************************************
 
-				Pod Lifecycle
+				Pod Lifecycle Classifier
 
 *************************************************************/
 
 // Classifier splits jobs into Pending, Running, Successful, and Failed.
-// To relief the garbage collector, we use a embeddable structure that we reset at every reconciliation cycle.
 type Classifier struct {
 	pendingJobs    map[string]*corev1.ContainerStatus
 	runningJobs    map[string]*corev1.ContainerStatus
@@ -404,7 +327,6 @@ func (in *Classifier) Reset() {
 	in.failedJobs = make(map[string]*corev1.ContainerStatus)
 }
 
-// Classify the object based on the  standard Frisbee lifecycle.
 func (in *Classifier) Classify(name string, status *corev1.ContainerStatus) {
 	switch {
 	case status.State.Terminated != nil:
@@ -418,7 +340,6 @@ func (in *Classifier) Classify(name string, status *corev1.ContainerStatus) {
 	case status.State.Waiting != nil:
 		in.pendingJobs[name] = status
 	default:
-		// if nothing above, then the container is not yet started.
 		in.pendingJobs[name] = status
 	}
 }
@@ -441,37 +362,28 @@ func (in *Classifier) NumFailedJobs() int {
 
 func (in *Classifier) ListPendingJobs() []string {
 	list := make([]string, 0, len(in.pendingJobs))
-
 	for jobName := range in.pendingJobs {
 		list = append(list, jobName)
 	}
-
 	sort.Strings(list)
-
 	return list
 }
 
 func (in *Classifier) ListSuccessfulJobs() []string {
 	list := make([]string, 0, len(in.successfulJobs))
-
 	for jobName := range in.successfulJobs {
 		list = append(list, jobName)
 	}
-
 	sort.Strings(list)
-
 	return list
 }
 
 func (in *Classifier) ListFailedJobs() []string {
 	list := make([]string, 0, len(in.failedJobs))
-
 	for jobName := range in.failedJobs {
 		list = append(list, jobName)
 	}
-
 	sort.Strings(list)
-
 	return list
 }
 

@@ -41,6 +41,13 @@ func SetContainerStatusID(status *corev1.ContainerStatus, typedValue string) {
 	status.ContainerID = typedValue
 }
 
+func GetPodID(pod *corev1.Pod) string {
+	if pod == nil || pod.Annotations == nil {
+		return ""
+	}
+	return pod.Annotations["pod.hpk/id"]
+}
+
 func HasJobID(pod *corev1.Pod) bool {
 	_, exists := pod.GetAnnotations()["pod.hpk/id"]
 

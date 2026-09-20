@@ -45,7 +45,6 @@ func TestReconcileNonTerminalPodsNotifiesOnlyOnChange(t *testing.T) {
 
 	podDir := compute.HPK.Pod(podKey)
 	_ = os.MkdirAll(podDir.JobDir(), 0755)
-	_ = os.MkdirAll(podDir.ControlFileDir(), 0755)
 
 	if err := PodHandler.SavePodToFile(nil, pod); err != nil {
 		t.Fatalf("failed to save pod to file: %v", err)
@@ -71,9 +70,9 @@ func TestReconcileNonTerminalPodsNotifiesOnlyOnChange(t *testing.T) {
 		t.Fatalf("expected 0 notifications when pod status did not change, got %d", notifyCount)
 	}
 
-	// Now simulate a change in runtime (e.g. exit code file created)
-	exitCodePath := podDir.Container("c1").ExitCodePath()
-	_ = os.WriteFile(exitCodePath, []byte("0"), 0644)
+	// Now simulate a change in runtime (e.g. container terminated)
+	PodHandler.SetContainerTerminated(&pod.Status.ContainerStatuses[0], 0)
+	_ = PodHandler.SavePodToFile(nil, pod)
 
 	vk.reconcileNonTerminalPods()
 
@@ -124,7 +123,6 @@ func TestNodeNameFiltering(t *testing.T) {
 		podKey := client.ObjectKeyFromObject(pod)
 		podDir := compute.HPK.Pod(podKey)
 		_ = os.MkdirAll(podDir.JobDir(), 0755)
-		_ = os.MkdirAll(podDir.ControlFileDir(), 0755)
 		if err := PodHandler.SavePodToFile(nil, pod); err != nil {
 			t.Fatalf("failed to save pod %s: %v", podKey, err)
 		}

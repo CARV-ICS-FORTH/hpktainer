@@ -98,6 +98,16 @@ fi
 # Ensure required Apptainer cache and tmp directories exist
 mkdir -p /tmp/.hpk-apptainer/tmp "$HOME/.hpk/.apptainer/cache" "$HOME/.apptainer/cache"
 
+BIN_BINDS=()
+if [ -f "$HOME/.hpk/bin/hpk-kubelet" ]; then
+    BIN_BINDS+=(
+        --bind "$HOME/.hpk/bin/hpk-kubelet:/usr/bin/hpk-kubelet"
+        --bind "$HOME/.hpk/bin/hpktainer:/usr/bin/hpktainer"
+        --bind "$HOME/.hpk/bin/hpk-net-daemon:/usr/bin/hpk-net-daemon"
+        --bind "$HOME/.hpk/bin/hpk-pause:/usr/local/bin/hpk-pause"
+    )
+fi
+
 # Pass IPs as env variables
 apptainer instance run \
 	--fakeroot \
@@ -110,6 +120,7 @@ apptainer instance run \
 	--bind "$HOME/.hpk:/var/lib/hpk" \
     --bind "$HOME/.hpk:/root/.hpk" \
     --bind "$HOME/.apptainer/cache:/root/.apptainer/cache" \
+    "${BIN_BINDS[@]}" \
     --env APPTAINER_CACHEDIR=/root/.hpk/.apptainer/cache \
     --env APPTAINER_TMPDIR=/tmp/.hpk-apptainer/tmp \
     --env SINGULARITY_CACHEDIR=/root/.hpk/.apptainer/cache \

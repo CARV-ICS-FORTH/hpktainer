@@ -1,70 +1,62 @@
 package podhandler
 
 import (
-	"bytes"
-	"os/exec"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
-	corev1 "k8s.io/api/core/v1"
+	"hpk/internal/compute/endpoint"
 )
 
-func TestGenerateEnvTemplate_NULSeparated(t *testing.T) {
-	tmpl, err := ParseTemplate(GenerateEnvTemplate)
-	if err != nil {
-		t.Fatalf("failed to parse template: %v", err)
+func TestEscapeSingleQuote(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"simple", "'simple'"},
+		{"foo'bar", "'foo'\\''bar'"},
+		{"hello world", "'hello world'"},
 	}
 
-	fields := GenerateEnvFields{
-		Variables: []corev1.EnvVar{
-			{Name: "SIMPLE", Value: "hello"},
-			{Name: "BASE64_PAD", Value: "first-line\nQUJDREVGRw=="},
-			{Name: "MULTILINE_CERT", Value: "-----BEGIN CERTIFICATE-----\nMIIF...\n-----END CERTIFICATE-----"},
-			{Name: "KUBERNETES_SERVICE_HOST", Value: "10.0.0.1"},
-		},
-	}
-
-	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, fields); err != nil {
-		t.Fatalf("failed to execute template: %v", err)
-	}
-
-	cmd := exec.Command("bash", "-c", buf.String())
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("script execution failed: %v, output:\n%s", err, output)
-	}
-
-	entries := bytes.Split(output, []byte{0})
-	// Expect 4 entries plus trailing empty slice from NUL ending
-	var parsed []corev1.EnvVar
-	for _, entry := range entries {
-		if len(entry) == 0 {
-			continue
-		}
-		parts := strings.SplitN(string(entry), "=", 2)
-		if len(parts) == 2 {
-			parsed = append(parsed, corev1.EnvVar{Name: parts[0], Value: parts[1]})
+	for _, tt := range tests {
+		got := EscapeSingleQuote(tt.input)
+		if got != tt.want {
+			t.Errorf("EscapeSingleQuote(%q) = %q; want %q", tt.input, got, tt.want)
 		}
 	}
+}
 
-	if len(parsed) != 4 {
-		t.Fatalf("expected 4 parsed env vars, got %d", len(parsed))
+func TestBuildApptainerArgs(t *testing.T) {
+	tmpDir := t.TempDir()
+	podDir := endpoint.PodPath(filepath.Join(tmpDir, "pod"))
+	_ = os.MkdirAll(podDir.JobDir(), 0755)
+	_ = os.WriteFile(filepath.Join(podDir.JobDir(), "resolv.conf"), []byte("nameserver 1.1.1.1\n"), 0644)
+	_ = os.WriteFile(filepath.Join(podDir.JobDir(), "hosts"), []byte("127.0.0.1 localhost\n"), 0644)
+
+	c := &Container{
+		ExecutionMode: "exec",
+		ImageFilePath: "/images/alpine.sif",
+		Command:       []string{"/bin/sh"},
+		Args:          []string{"-c", "echo hi"},
+		RunAsUser:     1000,
+		RunAsGroup:    1000,
+		Binds:         []string{"/host/data:/data:rw"},
 	}
 
-	if parsed[0].Name != "SIMPLE" || parsed[0].Value != "hello" {
-		t.Errorf("unexpected parsed[0]: %+v", parsed[0])
-	}
+	args := c.BuildApptainerArgs(12345, podDir)
 
-	if parsed[1].Name != "BASE64_PAD" || parsed[1].Value != "first-line\nQUJDREVGRw==" {
-		t.Errorf("unexpected parsed[1]: %+v", parsed[1])
+	joined := strings.Join(args, " ")
+	if !strings.HasPrefix(joined, "--host-networking exec") {
+		t.Errorf("expected --host-networking exec prefix, got: %s", joined)
 	}
-
-	if parsed[2].Name != "MULTILINE_CERT" || parsed[2].Value != "-----BEGIN CERTIFICATE-----\nMIIF...\n-----END CERTIFICATE-----" {
-		t.Errorf("unexpected parsed[2]: %+v", parsed[2])
+	if !strings.Contains(joined, "--netns-path /proc/12345/ns/net") {
+		t.Errorf("expected netns-path in args, got: %s", joined)
 	}
-
-	if parsed[3].Name != "KUBERNETES_SERVICE_HOST" || parsed[3].Value != "10.0.0.1" {
-		t.Errorf("unexpected parsed[3]: %+v", parsed[3])
+	if !strings.Contains(joined, "resolv.conf:/etc/resolv.conf") {
+		t.Errorf("expected resolv.conf bind in args, got: %s", joined)
+	}
+	if !strings.Contains(joined, "--security uid:1000,gid:1000") {
+		t.Errorf("expected security uid/gid in args, got: %s", joined)
 	}
 }

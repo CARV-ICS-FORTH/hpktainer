@@ -30,11 +30,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	mounter "k8s.io/utils/mount"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// buildContainer replicates the behavior of
-// https://github.com/kubernetes/kubernetes/blob/master/pkg/kubelet/kuberuntime/kuberuntime_container.go
+// buildContainer replicates the container preparation behavior.
 func (h *PodHandler) buildContainer(container *corev1.Container, containerStatus *corev1.ContainerStatus) (Container, error) {
 	/*---------------------------------------------------
 	 * Determine the effective security context
@@ -43,27 +41,20 @@ func (h *PodHandler) buildContainer(container *corev1.Container, containerStatus
 	uid, gid := DetermineEffectiveRunAsUser(effectiSecurityContext)
 
 	/*---------------------------------------------------
-	 * Generate Environment Variables
+	 * Generate Environment Variables File
 	 *---------------------------------------------------*/
-	envFileTemplate, err := ParseTemplate(GenerateEnvTemplate)
-	if err != nil {
-		return Container{}, fmt.Errorf("generate env template error: %w", err)
-	}
-
-	fields := GenerateEnvFields{
-		Variables: append(container.Env, h.podEnvVariables...),
-	}
-
-	envFileContent := strings.Builder{}
-
-	if err := envFileTemplate.Execute(&envFileContent, fields); err != nil {
-		/*-- since both the template and fields are internal to the code, the evaluation should always succeed	--*/
-		return Container{}, fmt.Errorf("failed to evaluate container execution template: %w", err)
+	var b strings.Builder
+	allEnvs := append(container.Env, h.podEnvVariables...)
+	for _, envVar := range allEnvs {
+		val := envVar.Value
+		if val == ".status.podIP" {
+			val = h.Pod.Status.PodIP
+		}
+		fmt.Fprintf(&b, "%s=%s\n", envVar.Name, EscapeSingleQuote(val))
 	}
 
 	envfilePath := h.podDirectory.Container(container.Name).EnvFilePath()
-
-	if err := os.WriteFile(envfilePath, []byte(envFileContent.String()), endpoint.PodGlobalDirectoryPermissions); err != nil {
+	if err := os.WriteFile(envfilePath, []byte(b.String()), endpoint.PodGlobalDirectoryPermissions); err != nil {
 		return Container{}, fmt.Errorf("cannot write env file for container '%s' of pod '%s': %w", container.Name, h.podKey, err)
 	}
 
@@ -72,11 +63,11 @@ func (h *PodHandler) buildContainer(container *corev1.Container, containerStatus
 	 *---------------------------------------------------*/
 	binds := make([]string, len(container.VolumeMounts))
 
-	// check the code from https://github.com/kubernetes/kubernetes/blob/master/pkg/kubelet/kubelet_pods.go#L196
 	for i, mount := range container.VolumeMounts {
 		hostPath := filepath.Join(h.podDirectory.VolumeDir(), mount.Name)
 
 		subPath := mount.SubPath
+		var err error
 		if mount.SubPathExpr != "" {
 			subPath, err = kubecontainer.ExpandContainerVolumeMounts(mount, h.podEnvVariables)
 			if err != nil {
@@ -97,29 +88,17 @@ func (h *PodHandler) buildContainer(container *corev1.Container, containerStatus
 			}
 
 			if !subPathFileExists {
-				// Create the sub path now because if it's auto-created later when referenced, it may have an
-				// incorrect ownership and mode.
-				// The placeholder should normally be of the same type (dir or file) as the bind target.
-				// However, at this point we do not have access to the bind.
-				// For this reason, we follow the convention that dir should be marked "/path/subpath/" whereas
-				// files should be marked as "/path/subpath".
-				//
-				// For the particular case of Argo, we know that "0" are always dirs.
 				if mount.SubPath == "0" {
 					if err := hostutil.SafeMakeDir(subPath, hostPath, endpoint.PodGlobalDirectoryPermissions); err != nil {
 						return Container{}, fmt.Errorf("failed to create dir placeholder. subpath:'%s': %w", subPathFile, err)
 					}
 				} else {
-					// A file is enough for all possible targets (symlink, device, pipe,
-					// socket, ...), bind-mounting them into a file correctly changes type
-					// of the target file.
 					if err = os.WriteFile(subPathFile, []byte{}, endpoint.PodGlobalDirectoryPermissions); err != nil {
 						return Container{}, fmt.Errorf("failed to create placeholder. subpath:'%s': %w", subPathFile, err)
 					}
 				}
 			}
 
-			// mount the subpath
 			hostPath = subPathFile
 		}
 
@@ -136,6 +115,7 @@ func (h *PodHandler) buildContainer(container *corev1.Container, containerStatus
 	 * Prepare Container Image
 	 *---------------------------------------------------*/
 	var img *image.Image
+	var err error
 
 	if container.ImagePullPolicy == corev1.PullNever {
 		img, err = image.ResolveLocal(compute.HPK.ImageDir(), container.Image)
@@ -147,15 +127,13 @@ func (h *PodHandler) buildContainer(container *corev1.Container, containerStatus
 		return Container{}, fmt.Errorf("ImagePull error. Image:%s: %w", container.Image, err)
 	}
 
-	// if there is no command, use the run mode, which will execute the runscript
-	// defined in the Entrypoint of the image.
 	executionMode := "exec"
 	if container.Command == nil {
 		executionMode = "run"
 	}
 
 	/*---------------------------------------------------
-	 * Prepare fields for Container Template
+	 * Prepare fields for Container Execution
 	 *---------------------------------------------------*/
 	containerPath := h.podDirectory.Container(container.Name)
 
@@ -170,8 +148,6 @@ func (h *PodHandler) buildContainer(container *corev1.Container, containerStatus
 		Args:          kubecontainer.ExpandContainerCommandOnlyStatic(container.Args, container.Env),
 		ExecutionMode: executionMode,
 		LogsPath:      containerPath.LogsPath(),
-		JobIDPath:     containerPath.IDPath(),
-		ExitCodePath:  containerPath.ExitCodePath(),
 	}
 
 	/*---------------------------------------------------
@@ -179,116 +155,100 @@ func (h *PodHandler) buildContainer(container *corev1.Container, containerStatus
 	 *---------------------------------------------------*/
 	containerStatus.Name = container.Name
 	containerStatus.ContainerID = containerID
-
 	containerStatus.Image = container.Image
 	containerStatus.ImageID = img.Filepath
 
 	return c, err
 }
 
-/*************************************************************
+// SetContainerRunning marks the container status as running.
+func SetContainerRunning(containerStatus *corev1.ContainerStatus, pid int, startTime uint64) {
+	containerStatus.ContainerID = runtime.FormatProcessJobID(pid, startTime)
+	containerStatus.State.Waiting = nil
+	containerStatus.State.Running = &corev1.ContainerStateRunning{
+		StartedAt: metav1.Now(),
+	}
+	containerStatus.State.Terminated = nil
+	started := true
+	containerStatus.Started = &started
+	containerStatus.Ready = true
+}
 
-		Load Container status from the FS
+// SetContainerTerminated marks the container status as terminated.
+func SetContainerTerminated(containerStatus *corev1.ContainerStatus, exitCode int) {
+	prevState := containerStatus.State
 
-*************************************************************/
+	var reason, message string
+	if exitCode == 0 {
+		reason = "Completed"
+		message = "Container successfully terminated"
+	} else {
+		reason = "Error(" + containerStatus.Name + ")"
+		message = HumanReadableCode(exitCode)
+	}
 
+	startedAt := metav1.Time{}
+	if prevState.Running != nil {
+		startedAt = prevState.Running.StartedAt
+	} else if prevState.Terminated != nil {
+		startedAt = prevState.Terminated.StartedAt
+	}
+
+	if prevState.Terminated == nil {
+		containerStatus.LastTerminationState = prevState
+		if exitCode != 0 {
+			containerStatus.RestartCount++
+		}
+	}
+
+	containerStatus.Ready = false
+	containerStatus.State.Waiting = nil
+	containerStatus.State.Running = nil
+	containerStatus.State.Terminated = &corev1.ContainerStateTerminated{
+		ExitCode:    int32(exitCode),
+		Signal:      0,
+		Reason:      reason,
+		Message:     message,
+		StartedAt:   startedAt,
+		FinishedAt:  metav1.Now(),
+		ContainerID: containerStatus.ContainerID,
+	}
+}
+
+// SyncContainerStatuses updates in-memory container statuses and verifies alive processes in /proc.
 func SyncContainerStatuses(pod *corev1.Pod) {
-	podKey := client.ObjectKeyFromObject(pod)
-	podDir := compute.HPK.Pod(podKey)
-
-	/*---------------------------------------------------
-	 * Generic Handler for ContainerStatus
-	 *---------------------------------------------------*/
-	handleStatus := func(containerStatus *corev1.ContainerStatus) {
-		prevState := containerStatus.State
-
-		/*-- Presence of Exit Code indicates Terminated  State--*/
-		exitCodePath := podDir.Container(containerStatus.Name).ExitCodePath()
-		exitCode, exitCodeExists := readIntFromFile(exitCodePath)
-
-		if exitCodeExists {
-			// prepare some messages
-			var reason, message string
-
-			if exitCode == 0 {
-				reason = "Completed"
-				message = "Container successfully terminated"
-			} else {
-				reason = "Error(" + containerStatus.Name + ")"
-				message = HumanReadableCode(exitCode)
-			}
-
-			startedAt := metav1.Time{}
-			if prevState.Running != nil {
-				startedAt = prevState.Running.StartedAt
-			} else if prevState.Terminated != nil {
-				startedAt = prevState.Terminated.StartedAt
-			}
-
-			// Update LastTerminationState and RestartCount on initial transition to Terminated
-			if prevState.Terminated == nil {
-				containerStatus.LastTerminationState = prevState
-				if exitCode != 0 {
-					containerStatus.RestartCount++
-				}
-			}
-
-			// set current status to terminate.
-			containerStatus.State.Waiting = nil
-			containerStatus.State.Running = nil
-			containerStatus.State.Terminated = &corev1.ContainerStateTerminated{
-				ExitCode:    int32(exitCode),
-				Signal:      0,
-				Reason:      reason,
-				Message:     message,
-				StartedAt:   startedAt,
-				FinishedAt:  metav1.Now(), // fixme: get it from the file's ctime
-				ContainerID: containerStatus.ContainerID,
-			}
-
+	checkStatus := func(containerStatus *corev1.ContainerStatus) {
+		if containerStatus.State.Terminated != nil {
 			return
 		}
 
-		jobIDPath := podDir.Container(containerStatus.Name).IDPath()
-		jobID, jobIDExists := readStringFromFile(jobIDPath)
-
-		/*-- Presence of Job ID indicated Running state (need to be set only once)--*/
-		if jobIDExists {
-			if containerStatus.State.Running == nil {
-				runtime.SetContainerStatusID(containerStatus, jobID)
-
-				containerStatus.State.Waiting = nil
-				containerStatus.State.Running = &corev1.ContainerStateRunning{
-					StartedAt: metav1.Now(), // fixme: we should get this info from the file's ctime
+		if containerStatus.State.Running != nil {
+			// Check if process has died in /proc
+			if containerStatus.ContainerID != "" {
+				pid, startTime, err := runtime.ParseProcessJobID(containerStatus.ContainerID)
+				if err == nil && pid > 0 {
+					if runtime.IsProcessDead(pid) {
+						SetContainerTerminated(containerStatus, 137)
+						return
+					}
+					_ = startTime
 				}
-				containerStatus.State.Terminated = nil
-
-				/*-- todo: since we do not support probes, make everything to look ok --*/
-				started := true
-				containerStatus.Started = &started
-				containerStatus.Ready = true
 			}
-
 			return
 		}
 
-		/*-- Lack of jobID indicates Waiting state --*/
-		containerStatus.State.Waiting = &corev1.ContainerStateWaiting{
-			Reason:  "ContainerStarting",
-			Message: "Container is starting on the host",
+		if containerStatus.State.Waiting == nil {
+			containerStatus.State.Waiting = &corev1.ContainerStateWaiting{
+				Reason:  "ContainerStarting",
+				Message: "Container is starting",
+			}
 		}
-		containerStatus.State.Running = nil
-		containerStatus.State.Terminated = nil
 	}
 
-	/*---------------------------------------------------
-	 * Iterate containers and call the Generic Handler
-	 *---------------------------------------------------*/
-	for i := 0; i < len(pod.Status.InitContainerStatuses); i++ {
-		handleStatus(&pod.Status.InitContainerStatuses[i])
+	for i := range pod.Status.InitContainerStatuses {
+		checkStatus(&pod.Status.InitContainerStatuses[i])
 	}
-
-	for i := 0; i < len(pod.Status.ContainerStatuses); i++ {
-		handleStatus(&pod.Status.ContainerStatuses[i])
+	for i := range pod.Status.ContainerStatuses {
+		checkStatus(&pod.Status.ContainerStatuses[i])
 	}
 }

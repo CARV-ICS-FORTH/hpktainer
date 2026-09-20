@@ -16,36 +16,18 @@ package podhandler
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
-	"text/template"
-
-	"hpk/internal/compute"
 
 	"al.essio.dev/pkg/shellescape"
-	"github.com/Masterminds/sprig"
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/types"
+	"hpk/internal/compute/endpoint"
 )
-
-var genericMap = map[string]interface{}{
-	"param":    EscapeSingleQuote,
-	"truncate": truncate,
-}
-
-// ParseTemplate returns a custom 'text/template' enhanced with functions for processing HPK templates.
-func ParseTemplate(text string) (*template.Template, error) {
-	return template.New("").
-		Funcs(sprig.TxtFuncMap()).
-		Funcs(genericMap).
-		Option("missingkey=error").Parse(text)
-}
 
 func EscapeSingleQuote(str ...interface{}) string {
 	out := make([]string, 0, len(str))
 	for _, s := range str {
 		if s != nil {
-			// wrap fields into single quotes, but escape any single quotes from the payload.
-			// escaped := strings.ReplaceAll(strval(s), "'", "\\'")
 			escaped := shellescape.Quote(strval(s))
 			out = append(out, fmt.Sprintf("%v", escaped))
 		}
@@ -75,112 +57,63 @@ func strval(v interface{}) string {
 	}
 }
 
-const HostScriptTemplate = `#!/bin/bash
-
-#### BEGIN SECTION: Host Environment ####
-# Description
-# 	Stuff to run outside the virtual environment
-
-# exit when any command fails
-#set -um pipeline
-set -u
-
-export workdir=/tmp/{{.Pod.Namespace}}_{{.Pod.Name}}
-echo "[Host] Creating workdir: ${workdir} "
-mkdir -p ${workdir}
-
-cleanup() {
-    rm -rf "${workdir}"
-}
-trap cleanup EXIT
-
-echo $$ > "${workdir}/.pid"
-
-export APPTAINERENV_KUBEDNS_IP={{.HostEnv.KubeDNS}}
-
-{{$.HostEnv.ApptainerBin}} exec --nv --scratch /scratch --workdir ${workdir} \
-{{- if .HostEnv.EnableCgroupV2}}
---apply-cgroups {{.VirtualEnv.CgroupFilePath}} 		\
-{{- end}}
---env PARENT=${PPID}								\
---bind /var/lib/hpk:/k8s-data			\
---bind /etc/apptainer/apptainer.conf				\
---bind $HOME,/tmp									\
---hostname {{truncate .Pod.Name 63}}							\
-{{$.PauseImageFilePath}} /entrypoint.sh /usr/local/bin/hpk-pause -namespace {{.Pod.Namespace}} -pod {{.Pod.Name}} ||
-echo "[HOST] **SYSTEMERROR** hpk-pause exited with code $?" | tee {{.VirtualEnv.SysErrorFilePath}}
-
-#### END SECTION: Host Environment ####
-`
-
-// JobFields provide the inputs to HostScriptTemplate.
-type JobFields struct {
-	Pod types.NamespacedName
-
-	// PauseImageFilePath contains the name of the image for the pause container.
-	PauseImageFilePath string
-
-	// VirtualEnv is the equivalent of a Pod.
-	VirtualEnv compute.VirtualEnvironment
-
-	HostEnv compute.HostEnvironment
-
-	// Containers is a list of container requests to be executed.
-	Containers []Container
-}
-
-// The Container creates new within the Pod and resemble the "Container" semantics.
+// Container holds definition and execution metadata for a container within a Pod.
 type Container struct {
-	// needed for apptainer start.
-	InstanceName string // instance://podName_containerName
-
-	// The UID to run the entrypoint of the container process.
-	// May also be set in PodSecurityContext.  If set in both SecurityContext and
-	// PodSecurityContext, the value specified in SecurityContext takes precedence.
-	RunAsUser int64
-
-	// The GID to run the entrypoint of the container process.
-	// May also be set in PodSecurityContext.  If set in both SecurityContext and
-	// PodSecurityContext, the value specified in SecurityContext takes precedence.
-	RunAsGroup int64
-
-	ImageFilePath string // format: REGISTRY://image:tag
-
-	EnvFilePath string
-
-	Binds []string
-
-	Command []string
-
-	Args []string // space separated args
-
-	ExecutionMode string // exec or run
-
-	// LogsPath instructs process to write stdout and stderr into the specified path.
-	LogsPath string
-
-	// JobIDPath points to the file where the process id of the container is stored.
-	// This is used to know when the container has started.
-	JobIDPath string
-
-	// ExitCodePath is the path where the embedded Container command will write its exit code
-	ExitCodePath string
+	InstanceName  string
+	RunAsUser     int64
+	RunAsGroup    int64
+	ImageFilePath string
+	EnvFilePath   string
+	Binds         []string
+	Command       []string
+	Args          []string
+	ExecutionMode string
+	LogsPath      string
 }
 
-// GenerateEnvTemplate is used to generate environment variables.
-// This is needed for variables that consume information from the downward API (like .status.podIP)
-const GenerateEnvTemplate = `#!/bin/bash
+// BuildApptainerArgs constructs the CLI arguments for executing a container via Apptainer/hpktainer.
+func (c *Container) BuildApptainerArgs(pausePID int, podDir endpoint.PodPath) []string {
+	args := []string{
+		"--host-networking",
+		c.ExecutionMode,
+		"--nv",
+		"--cleanenv",
+		"--writable-tmpfs",
+		"--no-mount", "home,bind-paths",
+		"--unsquash",
+	}
 
-{{- range $index, $variable := .Variables}}
-{{- if eq $variable.Value ".status.podIP"}}
-printf '%s=%s\0' {{$variable.Name | param}} "$(ip route get 1 | sed -n 's/.*src \([0-9.]\+\).*/\1/p')"
-{{ else }}
-printf '%s=%s\0' {{$variable.Name | param}} {{$variable.Value | param}}
-{{- end}}
-{{- end}}
-`
+	if pausePID > 0 {
+		args = append(args, "--netns-path", fmt.Sprintf("/proc/%d/ns/net", pausePID))
+	}
 
-// GenerateEnvFields provide the inputs to GenerateEnvTemplate.
-type GenerateEnvFields = struct {
-	Variables []corev1.EnvVar
+	var binds []string
+	resolvPath := filepath.Join(podDir.JobDir(), "resolv.conf")
+	hostsPath := filepath.Join(podDir.JobDir(), "hosts")
+	if _, err := os.Stat(resolvPath); err == nil {
+		binds = append(binds, resolvPath+":/etc/resolv.conf")
+	}
+	if _, err := os.Stat(hostsPath); err == nil {
+		binds = append(binds, hostsPath+":/etc/hosts")
+	}
+	binds = append(binds, c.Binds...)
+	if len(binds) > 0 {
+		args = append(args, "--bind", strings.Join(binds, ","))
+	}
+
+	if c.RunAsUser != 0 || c.RunAsGroup != 0 {
+		args = append(args, "--security", fmt.Sprintf("uid:%d,gid:%d", c.RunAsUser, c.RunAsGroup), "--userns")
+	}
+
+	if c.EnvFilePath != "" {
+		if _, err := os.Stat(c.EnvFilePath); err == nil {
+			args = append(args, "--env-file", c.EnvFilePath)
+		}
+	}
+
+	args = append(args, c.ImageFilePath)
+	args = append(args, c.Command...)
+	args = append(args, c.Args...)
+
+	return args
 }

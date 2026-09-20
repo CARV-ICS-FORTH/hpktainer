@@ -3,44 +3,53 @@
 
 Vagrant.configure("2") do |config|
   config.vm.box = "bento/ubuntu-24.04"
-
-  # Configure UTM provider for Apple Silicon
-  config.vm.provider "utm" do |utm|
-    utm.cpus = 2
-    utm.memory = 2048
-    # Enable shared graphics for clipboard sharing, if needed
-    # utm.graphics = "virtio-ramfb"
-  end
-  
-  # Configure libvirt provider for Linux
-  config.vm.provider :libvirt do |libvirt|
-    libvirt.driver = "kvm"
-    libvirt.cpus = 2
-    libvirt.memory = 2048
-  end
-
-  # Prevent Vagrant from replacing the insecure key with a unique one.
-  # This avoids authentication issues when /home is mounted via NFS (overwriting .ssh)
-  # or when re-provisioning.
   config.ssh.insert_key = false
 
+  # ==========================================
   # Controller Node
+  # ==========================================
   config.vm.define "controller" do |controller|
     controller.vm.hostname = "controller"
-    
-    # Define role FIRST
+    controller.vm.network "forwarded_port", guest: 22, host: 2250, id: "ssh", auto_correct: true
+
+    controller.vm.provider "utm" do |utm|
+      utm.name = "hpk-controller"
+      utm.cpus = 2
+      utm.memory = 2048
+      utm.directory_share_mode = "virtFS"
+    end
+
+    controller.vm.provider :libvirt do |libvirt|
+      libvirt.driver = "kvm"
+      libvirt.cpus = 2
+      libvirt.memory = 2048
+    end
+
     controller.vm.provision "shell", inline: "echo 'controller' > /etc/vagrant_role"
-    # Then run installation
     controller.vm.provision "shell", path: "install.sh"
   end
 
+  # ==========================================
   # Worker Node
+  # ==========================================
   config.vm.define "node" do |node|
     node.vm.hostname = "node"
-    
-    # Define role FIRST
+    node.vm.network "forwarded_port", guest: 22, host: 2251, id: "ssh", auto_correct: true
+
+    node.vm.provider "utm" do |utm|
+      utm.name = "hpk-node"
+      utm.cpus = 2
+      utm.memory = 2048
+      utm.directory_share_mode = "virtFS"
+    end
+
+    node.vm.provider :libvirt do |libvirt|
+      libvirt.driver = "kvm"
+      libvirt.cpus = 2
+      libvirt.memory = 2048
+    end
+
     node.vm.provision "shell", inline: "echo 'node' > /etc/vagrant_role"
-    # Then run installation
     node.vm.provision "shell", path: "install.sh"
   end
 end

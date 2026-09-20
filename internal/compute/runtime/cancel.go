@@ -28,7 +28,11 @@ import (
 
 var ErrInvalidJob = errors.New("invalid job id")
 
-// isProcessDead checks whether a process has exited or is in zombie state ('Z').
+// IsProcessDead checks whether a process has exited or is in zombie state ('Z').
+func IsProcessDead(pid int) bool {
+	return isProcessDead(pid)
+}
+
 func isProcessDead(pid int) bool {
 	err := syscall.Kill(pid, 0)
 	if errors.Is(err, syscall.ESRCH) {
@@ -178,9 +182,10 @@ func KillPodProcessesWithTimeout(primaryPIDStr string, secondaryPIDStrs []string
 	}
 
 	/*
-		Send SIGTERM using syscall.Kill to the primary process
-		and allow it to close gracefully.
+		Send SIGTERM using syscall.Kill to the primary process and all secondary processes,
+		and allow them to close gracefully.
 	*/
+	_ = syscall.Kill(-primaryPID, syscall.SIGTERM)
 	if err := syscall.Kill(primaryPID, syscall.SIGTERM); err != nil {
 		// If the process does not exist (ESRCH), consider it as already terminated.
 		if errors.Is(err, syscall.ESRCH) {
@@ -192,11 +197,30 @@ func KillPodProcessesWithTimeout(primaryPIDStr string, secondaryPIDStrs []string
 		return "", fmt.Errorf("could not kill process '%d': %w", primaryPID, err)
 	}
 
+	for _, secPID := range secondaryPIDs {
+		if secPID > 1 {
+			_ = syscall.Kill(-secPID, syscall.SIGTERM)
+			_ = syscall.Kill(secPID, syscall.SIGTERM)
+		}
+	}
+
+	allProcessesDead := func() bool {
+		if !isProcessDead(primaryPID) {
+			return false
+		}
+		for _, secPID := range secondaryPIDs {
+			if !isProcessDead(secPID) {
+				return false
+			}
+		}
+		return true
+	}
+
 	deadline := time.Now().Add(timeout)
 	fastUntil := time.Now().Add(1 * time.Second)
 
 	for {
-		if isProcessDead(primaryPID) {
+		if allProcessesDead() {
 			return "", nil
 		}
 
@@ -211,7 +235,8 @@ func KillPodProcessesWithTimeout(primaryPIDStr string, secondaryPIDStrs []string
 		time.Sleep(pollInterval)
 	}
 
-	// Timeout reached: escalate to SIGKILL for primary PID
+	// Timeout reached: escalate to SIGKILL for primary PID and secondary PIDs
+	_ = syscall.Kill(-primaryPID, syscall.SIGKILL)
 	if err := syscall.Kill(primaryPID, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
 		return "", fmt.Errorf("could not SIGKILL process '%d': %w", primaryPID, err)
 	}
@@ -229,7 +254,7 @@ func KillPodProcessesWithTimeout(primaryPIDStr string, secondaryPIDStrs []string
 	killDeadline := time.Now().Add(5 * time.Second)
 
 	for {
-		if isProcessDead(primaryPID) {
+		if allProcessesDead() {
 			return "", nil
 		}
 
