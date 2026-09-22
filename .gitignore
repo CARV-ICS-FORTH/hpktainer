@@ -1,14 +1,15 @@
 # Binaries
 bin/
+skifflet/bin/
+plaid/bin/
 *.test
 *.out
-/hpk-net-daemon
-/hpktainer
 
 # Artifacts
 *.sock
 /run/
 .vagrant/
+test/vagrant/.vagrant/
 
 # Go
 go.work
@@ -24,4 +25,3 @@ go.work.sum
 *.log
 
 context/
-plaid/

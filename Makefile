@@ -1,126 +1,98 @@
-# Makefile for HPK project
+# Makefile for Skiff project
 
 REGISTRY ?= docker.io/chazapis
-VERSION ?= $(shell cat VERSION)
-
-# Extract K8s version from go.mod and map v0.x.y to v1.x.y
-K8S_LIB_VERSION := $(shell go list -m -f '{{.Version}}' k8s.io/api)
-K8S_VERSION := $(subst v0.,v1.,$(K8S_LIB_VERSION))
+VERSION ?= $(shell cat VERSION 2>/dev/null || echo "0.1.0")
 
 # Binary output directory
 BIN_DIR = bin
 export GOFLAGS ?= -buildvcs=false
 
-# Inject version and build time
-LDFLAGS := -X 'hpk/pkg/version.Version=$(VERSION)' \
-           -X 'hpk/pkg/version.BuildTime=$(shell date)' \
-           -X 'hpk/pkg/version.K8sVersion=$(K8S_VERSION)'
+.PHONY: all build build-skifflet build-plaid test clean builder images develop fmt fmt-check check-shell
 
-.PHONY: all builder binaries binaries-linux-amd64 binaries-linux-arm64 images develop clean fmt fmt-check vet test check-shell ci
+all: build
 
-all: builder images
+build: build-skifflet build-plaid
 
-fmt:
-	gofmt -w .
+build-skifflet:
+	@echo "Building skifflet..."
+	$(MAKE) -C skifflet build
 
-fmt-check:
-	@test -z "$$(gofmt -l .)" || (echo "Unformatted Go files found:" && gofmt -l . && exit 1)
-
-vet:
-	go vet ./...
+build-plaid:
+	@echo "Building plaid..."
+	$(MAKE) -C plaid build
 
 test:
-	go test ./...
+	@echo "Running skifflet tests..."
+	$(MAKE) -C skifflet test
+	@echo "Running plaid tests..."
+	$(MAKE) -C plaid test
+
+fmt:
+	@echo "Formatting Go source files..."
+	gofmt -w skifflet plaid
+
+fmt-check:
+	@test -z "$$(gofmt -l skifflet plaid)" || (echo "Unformatted Go files found:" && gofmt -l skifflet plaid && exit 1)
 
 check-shell:
-	@if command -v shellcheck >/dev/null 2>&1; then shellcheck --severity=error $$(find . -name "*.sh" -not -path "*/.*"); else echo "shellcheck not installed, skipping"; fi
-
-ci: fmt-check vet binaries-linux-amd64 test check-shell
+	@if command -v shellcheck >/dev/null 2>&1; then \
+		shellcheck --severity=error $$(find scripts test -name "*.sh" -not -path "*/.*"); \
+	else \
+		echo "shellcheck not installed, skipping"; \
+	fi
 
 builder:
-	@echo "Building and pushing hpk-builder image..."
+	@echo "Building and pushing skiff-builder image..."
 	docker buildx build --platform linux/amd64,linux/arm64 \
-		-t $(REGISTRY)/hpk-builder:$(VERSION) \
-		-t $(REGISTRY)/hpk-builder:latest \
+		-t $(REGISTRY)/skiff-builder:$(VERSION) \
+		-t $(REGISTRY)/skiff-builder:latest \
 		--push \
-		-f images/hpk-builder/Dockerfile images/hpk-builder
-
-binaries: binaries-linux-amd64 binaries-linux-arm64
-
-binaries-linux-amd64:
-	@echo "Building binaries for linux/amd64..."
-	@mkdir -p $(BIN_DIR)/linux/amd64
-	GOOS=linux GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/linux/amd64/hpk-kubelet ./cmd/hpk-kubelet
-	GOOS=linux GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/linux/amd64/hpk-pause ./cmd/hpk-pause
-
-binaries-linux-arm64:
-	@echo "Building binaries for linux/arm64..."
-	@mkdir -p $(BIN_DIR)/linux/arm64
-	GOOS=linux GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/linux/arm64/hpk-kubelet ./cmd/hpk-kubelet
-	GOOS=linux GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/linux/arm64/hpk-pause ./cmd/hpk-pause
+		-f images/skiff-builder/Dockerfile images/skiff-builder
 
 images:
-	@echo "Building and pushing images..."
-
-	# hpk-bubble
+	@echo "Building and pushing skiff-bubble image..."
 	docker buildx build --platform linux/amd64,linux/arm64 \
 		--build-arg REGISTRY=$(REGISTRY) \
-		-t $(REGISTRY)/hpk-bubble:$(VERSION) \
-		-t $(REGISTRY)/hpk-bubble:latest \
+		-t $(REGISTRY)/skiff-bubble:$(VERSION) \
+		-t $(REGISTRY)/skiff-bubble:latest \
 		--push \
-		-f images/hpk-bubble/Dockerfile .
-
-	# hpk-pause
-	docker buildx build --platform linux/amd64,linux/arm64 \
-		--build-arg REGISTRY=$(REGISTRY) \
-		-t $(REGISTRY)/hpk-pause:$(VERSION) \
-		-t $(REGISTRY)/hpk-pause:latest \
-		--push \
-		-f images/hpk-pause/Dockerfile .
+		-f images/skiff-bubble/Dockerfile .
 
 develop:
 	@echo "Building images for local development..."
 	
-	# Build hpk-builder
+	# Build skiff-builder
 	docker build --build-arg REGISTRY=$(REGISTRY) \
-		-t $(REGISTRY)/hpk-builder:latest \
-		-f images/hpk-builder/Dockerfile images/hpk-builder
+		-t $(REGISTRY)/skiff-builder:latest \
+		-f images/skiff-builder/Dockerfile images/skiff-builder
 
-	# Build hpk-bubble (dev)
-	# docker build --build-arg REGISTRY=$(REGISTRY) \
-	# 	--build-arg BASE_IMAGE=$(REGISTRY)/hpk-builder:latest \
-	# 	-t $(REGISTRY)/hpk-bubble:latest \
-	# 	-f images/hpk-bubble/Dockerfile .
-	
-	# Build hpk-bubble
+	# Build skiff-bubble
 	docker build --build-arg REGISTRY=$(REGISTRY) \
-		-t $(REGISTRY)/hpk-bubble:latest \
-		-f images/hpk-bubble/Dockerfile .
-	
-	# Build hpk-pause
-	docker build --build-arg REGISTRY=$(REGISTRY) \
-		-t $(REGISTRY)/hpk-pause:latest \
-		-f images/hpk-pause/Dockerfile .
-	
+		-t $(REGISTRY)/skiff-bubble:latest \
+		-f images/skiff-bubble/Dockerfile .
+
 	@echo "Exporting images to tar files..."
-	@mkdir -p /tmp/hpk-images
-	docker save -o /tmp/hpk-images/hpk-bubble.tar $(REGISTRY)/hpk-bubble:latest
-	docker save -o /tmp/hpk-images/hpk-pause.tar $(REGISTRY)/hpk-pause:latest
-	
+	@mkdir -p /tmp/skiff-images
+	docker save -o /tmp/skiff-images/skiff-bubble.tar $(REGISTRY)/skiff-bubble:latest
+
 	@echo "Copying images to VMs via Vagrant..."
-	cd vagrant && vagrant ssh controller -c "mkdir -p ~/.hpk/images && rm -f ~/.hpk/images/*.sif"
-	cd vagrant && vagrant upload /tmp/hpk-images/hpk-bubble.tar /home/vagrant/.hpk/images/hpk-bubble.tar controller
-	cd vagrant && vagrant upload /tmp/hpk-images/hpk-pause.tar /home/vagrant/.hpk/images/hpk-pause.tar controller
-	
-	@echo "Copying scripts to controller..."
-	cd vagrant && vagrant ssh controller -c "mkdir -p ~/hpk"
+	cd test/vagrant && vagrant ssh controller -c "mkdir -p ~/.skiff/images && rm -f ~/.skiff/images/*.sif"
+	cd test/vagrant && vagrant upload /tmp/skiff-images/skiff-bubble.tar /home/vagrant/.skiff/images/skiff-bubble.tar controller
+
+	@echo "Copying scripts and tests to controller..."
+	cd test/vagrant && vagrant ssh controller -c "mkdir -p ~/skiff/scripts ~/skiff/test"
 	for f in scripts/*; do \
-		(cd vagrant && vagrant upload ../$$f /home/vagrant/hpk/$$(basename $$f) controller); \
+		(cd test/vagrant && vagrant upload ../../$$f /home/vagrant/skiff/scripts/$$(basename $$f) controller); \
 	done
-	cd vagrant && vagrant ssh controller -c "chmod +x ~/hpk/*.sh"
-	
+	for f in test/*.sh; do \
+		(cd test/vagrant && vagrant upload ../../$$f /home/vagrant/skiff/test/$$(basename $$f) controller); \
+	done
+	cd test/vagrant && vagrant ssh controller -c "chmod +x ~/skiff/scripts/*.sh ~/skiff/test/*.sh"
+
 	@echo "Development images deployed successfully!"
-	@echo "Set HPK_DEV=1 in hpk.slurm to use local images."
+	@echo "Set SKIFF_DEV=1 in scripts/skiff.slurm to use local images."
 
 clean:
-	rm -rf $(BIN_DIR)
+	$(MAKE) -C skifflet clean
+	$(MAKE) -C plaid clean
+	rm -rf $(BIN_DIR) /tmp/skiff-images

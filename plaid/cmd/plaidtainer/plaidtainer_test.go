@@ -1,0 +1,192 @@
+package main
+
+import (
+	"strings"
+	"testing"
+
+	"plaid/pkg/api"
+)
+
+func TestParsePlaidOptions(t *testing.T) {
+	args := []string{
+		"--host-networking",
+		"--ip=10.244.1.20/24",
+		"--gateway", "10.244.1.1",
+		"--dns=10.244.1.3",
+		"--socket=/run/test/plaidd.sock",
+		"--bind=/data:/data",
+		"--cleanenv",
+		"-B", "/tmp:/tmp",
+		"alpine.sif",
+		"ping", "-c", "3", "10.244.1.1",
+	}
+
+	opts, remaining := parsePlaidOptions(args)
+
+	if !opts.HostNetworking {
+		t.Errorf("expected HostNetworking to be true")
+	}
+	if opts.IP != "10.244.1.20/24" {
+		t.Errorf("expected IP '10.244.1.20/24', got %q", opts.IP)
+	}
+	if opts.Gateway != "10.244.1.1" {
+		t.Errorf("expected Gateway '10.244.1.1', got %q", opts.Gateway)
+	}
+	if opts.DNS != "10.244.1.3" {
+		t.Errorf("expected DNS '10.244.1.3', got %q", opts.DNS)
+	}
+	if opts.Socket != "/run/test/plaidd.sock" {
+		t.Errorf("expected Socket '/run/test/plaidd.sock', got %q", opts.Socket)
+	}
+	if opts.Bind != "/data:/data" {
+		t.Errorf("expected Bind '/data:/data', got %q", opts.Bind)
+	}
+
+	expectedRemaining := []string{
+		"--cleanenv",
+		"-B", "/tmp:/tmp",
+		"alpine.sif",
+		"ping", "-c", "3", "10.244.1.1",
+	}
+	if len(remaining) != len(expectedRemaining) {
+		t.Fatalf("expected %d remaining args, got %d: %v", len(expectedRemaining), len(remaining), remaining)
+	}
+	for i, r := range remaining {
+		if r != expectedRemaining[i] {
+			t.Errorf("at index %d: expected %q, got %q", i, expectedRemaining[i], r)
+		}
+	}
+}
+
+func TestSplitFlagsAndPositional(t *testing.T) {
+	args := []string{
+		"--cleanenv",
+		"-B", "/data:/data",
+		"--contain",
+		"alpine.sif",
+		"echo", "hello", "world",
+	}
+
+	flags, posArgs := splitFlagsAndPositional(args)
+
+	expectedFlags := []string{"--cleanenv", "-B", "/data:/data", "--contain"}
+	expectedPosArgs := []string{"alpine.sif", "echo", "hello", "world"}
+
+	if strings.Join(flags, " ") != strings.Join(expectedFlags, " ") {
+		t.Errorf("expected flags %v, got %v", expectedFlags, flags)
+	}
+	if strings.Join(posArgs, " ") != strings.Join(expectedPosArgs, " ") {
+		t.Errorf("expected posArgs %v, got %v", expectedPosArgs, posArgs)
+	}
+}
+
+func TestSplitImageAndCommand(t *testing.T) {
+	args := []string{
+		"-B", "/data:/data",
+		"docker://alpine:latest",
+		"sh", "-c", "echo hello",
+	}
+
+	flags, image, cmdArgs := splitImageAndCommand(args)
+
+	if len(flags) != 2 || flags[0] != "-B" || flags[1] != "/data:/data" {
+		t.Errorf("unexpected flags: %v", flags)
+	}
+	if image != "docker://alpine:latest" {
+		t.Errorf("expected image 'docker://alpine:latest', got %q", image)
+	}
+	if len(cmdArgs) != 3 || cmdArgs[0] != "sh" || cmdArgs[1] != "-c" || cmdArgs[2] != "echo hello" {
+		t.Errorf("unexpected cmdArgs: %v", cmdArgs)
+	}
+}
+
+func TestResolveNetworkParams(t *testing.T) {
+	status := &api.Response{
+		GatewayIP: "10.244.2.1",
+	}
+
+	ipStr, gwStr, dnsStr := resolveNetworkParams(status, "10.244.2.15/24", "", "")
+	if ipStr != "10.244.2.15/24" {
+		t.Errorf("expected IP '10.244.2.15/24', got %q", ipStr)
+	}
+	if gwStr != "10.244.2.1" {
+		t.Errorf("expected GW '10.244.2.1', got %q", gwStr)
+	}
+	if dnsStr != "10.244.2.3" {
+		t.Errorf("expected DNS '10.244.2.3', got %q", dnsStr)
+	}
+
+	// Case with nil status and explicit DNS
+	ipStr2, gwStr2, dnsStr2 := resolveNetworkParams(nil, "10.244.5.10/24", "", "8.8.8.8")
+	if ipStr2 != "10.244.5.10/24" {
+		t.Errorf("expected IP '10.244.5.10/24', got %q", ipStr2)
+	}
+	if gwStr2 != "10.244.5.1" {
+		t.Errorf("expected derived GW '10.244.5.1', got %q", gwStr2)
+	}
+	if dnsStr2 != "8.8.8.8" {
+		t.Errorf("expected DNS '8.8.8.8', got %q", dnsStr2)
+	}
+}
+
+func TestSplitFlagsWithNoMountAndNetnsPath(t *testing.T) {
+	args := []string{
+		"--nv",
+		"--cleanenv",
+		"--writable-tmpfs",
+		"--no-mount", "home,bind-paths",
+		"--unsquash",
+		"--netns-path", "/proc/12345/ns/net",
+		"/images/pause.sif",
+		"/pause",
+	}
+
+	flags, image, cmdArgs := splitImageAndCommand(args)
+	if image != "/images/pause.sif" {
+		t.Errorf("expected image '/images/pause.sif', got %q", image)
+	}
+	if len(cmdArgs) != 1 || cmdArgs[0] != "/pause" {
+		t.Errorf("expected cmdArgs ['/pause'], got %v", cmdArgs)
+	}
+	joinedFlags := strings.Join(flags, " ")
+	if !strings.Contains(joinedFlags, "--no-mount home,bind-paths") {
+		t.Errorf("expected --no-mount home,bind-paths in flags, got %s", joinedFlags)
+	}
+	if !strings.Contains(joinedFlags, "--netns-path /proc/12345/ns/net") {
+		t.Errorf("expected --netns-path /proc/12345/ns/net in flags, got %s", joinedFlags)
+	}
+}
+
+func TestMergePlaidOptions(t *testing.T) {
+	base := PlaidOptions{
+		HostNetworking: true,
+		DNS:            "1.1.1.1",
+		Socket:         "/run/base/plaidd.sock",
+		Binds:          []string{"/a:/a"},
+	}
+	override := PlaidOptions{
+		IP:      "10.244.1.5/24",
+		Gateway: "10.244.1.1",
+		Binds:   []string{"/b:/b"},
+	}
+
+	merged := mergePlaidOptions(base, override)
+	if !merged.HostNetworking {
+		t.Errorf("expected HostNetworking true")
+	}
+	if merged.DNS != "1.1.1.1" {
+		t.Errorf("expected DNS '1.1.1.1', got %q", merged.DNS)
+	}
+	if merged.Socket != "/run/base/plaidd.sock" {
+		t.Errorf("expected Socket '/run/base/plaidd.sock', got %q", merged.Socket)
+	}
+	if merged.IP != "10.244.1.5/24" {
+		t.Errorf("expected IP '10.244.1.5/24', got %q", merged.IP)
+	}
+	if merged.Gateway != "10.244.1.1" {
+		t.Errorf("expected Gateway '10.244.1.1', got %q", merged.Gateway)
+	}
+	if len(merged.Binds) != 2 || merged.Binds[0] != "/a:/a" || merged.Binds[1] != "/b:/b" {
+		t.Errorf("expected 2 binds [/a:/a, /b:/b], got %v", merged.Binds)
+	}
+}

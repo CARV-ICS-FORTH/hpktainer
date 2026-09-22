@@ -1,181 +1,155 @@
-# HPK
+# Skiff
 
-HPK allows HPC users to run their own private Kubernetes "mini Cloud" on a typical HPC cluster and then issue commands to it using Kubernetes-native tools.
+Skiff allows HPC users to run their own private Kubernetes "mini Cloud" on a typical HPC cluster and issue commands using Kubernetes-native tools without requiring root privileges.
 
-To deploy, copy the `scripts/` folder contents to your HPC account under `~/hpk/` and run:
+To deploy, copy the `scripts/` folder contents to your HPC account under `~/skiff/` and run:
 
 ```bash
-cd hpk
-sbatch --nodes=3 hpk.slurm
+cd skiff
+sbatch --nodes=3 skiff.slurm
 ```
 
 Then configure and use `kubectl`:
 
 ```bash
-export KUBECONFIG=${HOME}/.hpk/kubeconfig
+export KUBECONFIG=${HOME}/.skiff/kubeconfig
 kubectl get nodes
 ```
 
-## Implementation
+## Architecture & Components
 
-### Overview
+Skiff is organized as a unified monorepo containing two core sub-projects alongside top-level container packaging, scripts, and end-to-end tests:
 
-Users run a Slurm command to deploy one rootless container per cluster node, which we call **bubble** (using the `hpk-bubble` image). One bubble acts as the Kubernetes control plane, while the others act as worker nodes; together they form the Kubernetes cluster. Each bubble runs an instance of [K3s](https://k3s.io/), alongside the HPK-specific kubelet (`hpk-kubelet`), implemented using the [Virtual Kubelet](https://github.com/virtual-kubelet/virtual-kubelet) framework.
+```text
+skiff/
+├── Makefile                 # Top-level build orchestration & VM deployment
+├── README.md                # Top-level overview and architecture
+├── LICENSE                  # Apache 2.0 License
+├── VERSION                  # Project version
+│
+├── skifflet/                # Dedicated Kubelet module
+│   ├── cmd/skifflet/        # Main virtual-kubelet entrypoint
+│   ├── internal/            # Compute, provider, and pod lifecycle engine
+│   ├── pkg/                 # Helpers (volumes, crdtools, etc.)
+│   ├── go.mod               # module skifflet
+│   └── Makefile             # Local module build & unit tests
+│
+├── plaid/                   # First-class networking module
+│   ├── cmd/                 # plaid, plaidd, plaidctl, plaidtainer
+│   ├── pkg/                 # api, bridge, ipam, packet, slirp, tap, vxlan
+│   ├── go.mod               # module github.com/forth-ics/plaid
+│   └── Makefile             # Local module build & unit tests
+│
+├── images/                  # Container definitions
+│   ├── skiff-bubble/        # Bubble container packaging (skifflet, plaid, k3s)
+│   └── skiff-builder/       # Builder base image
+│
+├── scripts/                 # Cluster runtime scripts
+│   ├── skiff-bubble.sh      # Spawns bubble instance with slirp4netns
+│   └── skiff.slurm          # SLURM multi-node batch job template
+│
+├── test/                    # Tests and Vagrant cluster environment
+│   ├── vagrant/             # 2-node Vagrant development environment
+│   ├── test-skiff-e2e.sh    # End-to-end multi-node integration test
+│   ├── test-plaid-all.sh    # Plaid test suite
+│   ├── test-plaid-e2e.sh    # Plaid Apptainer e2e test
+│   └── test-plaid-unprivileged.sh
+│
+└── benchmarks/              # Cluster benchmark workloads
+    ├── analytics-spark/
+    ├── bert-distr-training/
+    └── dask-matrix/
+```
 
-For external networking, bubbles use [slirp4netns](https://github.com/rootless-containers/slirp4netns), while for internal, overlay networking they run [Plaid](https://github.com/forth-ics/plaid) and communicate via user-space VXLAN tunnels (each host forwards UDP port 8472 to the bubble to enable peer-to-peer overlay communication).
+### 1. Skifflet (`skifflet/`)
+`skifflet` is a Kubernetes [Virtual Kubelet](https://github.com/virtual-kubelet/virtual-kubelet) provider tailored for HPC environments:
+- Registers as a standard Kubernetes node in K3s.
+- Materializes Pods in unprivileged user space using [Apptainer](https://apptainer.org/) and `plaidtainer`.
+- Uses the standard Kubernetes pause container (`registry.k8s.io/pause:3.10`) to hold network namespaces and reap processes without requiring custom pause images.
+- Mounts Kubernetes volumes (ConfigMaps, Secrets, EmptyDir, HostPath, DownwardAPI, Projected) directly into unprivileged container filesystems.
 
-Inside the bubble, the [Apptainer](https://apptainer.org/) wrapper (`plaidtainer`) is used to spawn "pods" (using the `hpk-pause` image); these are containers that are given unique network addresses in the node's Plaid subnet and host user application containers.
+### 2. Plaid (`plaid/`)
+`plaid` provides rootless user-space networking:
+- **`plaidd`**: In-memory virtual Ethernet switch and cross-node VXLAN overlay router running over UDP port 8472.
+- **`plaidtainer`**: Transparent Apptainer wrapper that configures TAP interfaces and attaches containers to the Plaid subnet.
+- **`plaid`**: CNI-compatible plugin and container TAP initializer.
+- **`plaidctl`**: CLI tool for inspecting endpoints, routes, and network stats.
 
-All pod containers are connected to Plaid's user-space virtual Ethernet bridge (`plaidd`). In Kubernetes mode, `plaidd` coordinates directly with the Kubernetes API to discover node CIDRs, marks nodes ready, and maintains cross-host VXLAN overlay routes in memory over UDP port 8472 without requiring kernel bridges, iptables NAT, or Flannel.
+### 3. Skiff Bubble (`images/skiff-bubble/`)
+A rootless Apptainer container deployed per HPC node:
+- One bubble acts as the Kubernetes control plane (running [K3s](https://k3s.io/)), while the others act as worker nodes.
+- For external access, each bubble uses [slirp4netns](https://github.com/rootless-containers/slirp4netns).
+- For internal pod-to-pod networking across nodes, bubbles forward UDP port 8472 to maintain Plaid VXLAN overlay tunnels.
 
-### Architecture
-
-HPK implements a **4-level distributed architecture**.
-
-1. **Level 1: Host Node (Slurm Worker)**
-    * The physical node managed by Slurm.
-    * Executes `hpk.slurm`, which launches the bubble.
-
-2. **Level 2: Bubble (Node Overlay)**
-    * Implemented in the `hpk-bubble` container.
-    * An Apptainer instance acting as a virtual node.
-    * Runs K3s (the base Kubernetes distribution) and Plaid (`plaidd`).
-    * Runs the local `hpk-kubelet`, which registers itself as a node in the K3s cluster.
-    * Connects to other bubbles via a user-space VXLAN overlay (Plaid, UDP port 8472).
-
-3. **Level 3: Pod**
-    * Implemented in the `hpk-pause` container.
-    * Spawned by `hpk-kubelet` via `plaidtainer`.
-    * Each Pod is an Apptainer container with its own network namespace connected to `plaidd`.
-    * The Pod's entrypoint is the `hpk-pause` binary, which acts as a "pause container" to hold the network namespace and capture application container signals.
-
-4. **Level 4: Application Container**
-    * User application containers spawned in the pod.
-    * These run within the **same network namespace** as the Level 3 Pod.
-    * They share the Pod's IP address and can communicate over `localhost`.
-
-### Security & Trust Model
-
-HPK is designed to run in HPC environments under a **single-user trust model**:
-
-1. **Single-User Job Trust Domain**: All container instances and services (`hpk-bubble`, `hpk-kubelet`, K3s, Plaid) run rootless under the requesting user's UID within a dedicated Slurm job allocation. Security isolation between different users is enforced by Slurm and host OS user isolation.
-2. **Credential & Certificate Protection**:
-   - Cluster credentials (`kubeconfig`, `node-token`) and `hpk-kubelet` private keys (`kubelet.key`) stored in the shared NFS directory (`~/.hpk`) are restricted to owner-only access (`0600` permissions).
-   - The K3s server Certificate Authority private key (`server-ca.key`) is retained exclusively in memory/local storage on the controller node and is **never exported** to shared NFS storage.
-   - Node webhook certificates (`kubelet.crt`) are issued via Certificate Signing Requests (CSRs) submitted to `~/.hpk/.certs/<node>/kubelet.csr` and signed by a background signing loop running on the controller node. Under the single-user trust model, any CSR appearing in `~/.hpk/.certs/` is signed without additional verification, as write access to the user's NFS directory implies full access to all job credentials and node tokens.
-3. **Internal Services & Network Listeners**:
-   - Plaid VXLAN (port 8472 UDP) binds to network interfaces managed within the Slurm job allocation. Access to these ports relies on host user boundaries and Slurm job isolation.
+---
 
 ## Building
 
-All binaries are built and embedded in container images. The deployment script uses these images.
-
-To build, run:
+Build both `skifflet` and `plaid` binaries locally:
 
 ```bash
-make
+make build
 ```
 
-This uses `docker buildx` to build and push the images with multi-architecture support (amd64/arm64) to the configured registry (default: `docker.io/chazapis`). You can override the registry:
+Or build components individually:
 
 ```bash
-REGISTRY=myregistry.io/user make
+make build-skifflet
+make build-plaid
 ```
 
-*Note for developers: You can also build the binaries locally for testing purposes using `make binaries`. These will be placed in `bin/`.*
-
-### Development & CI Checks
-
-Before pushing commits, run local verification checks to ensure CI pipeline succeeds:
+Run unit tests across all modules:
 
 ```bash
-make ci
+make test
 ```
 
-This runs the same steps enforced by GitHub Actions:
-- **Code formatting check**: `make fmt-check` (auto-fix with `make fmt`)
-- **Go vet**: `make vet`
-- **Binary builds**: `make binaries-linux-amd64`
-- **Unit tests**: `make test`
-- **ShellCheck**: `shellcheck --severity=error $(find . -name "*.sh" -not -path "*/.*")`
+Build container images with Docker / Buildx:
 
-## Evaluating Locally
+```bash
+make images
+```
 
-You can test the setup locally using the provided Vagrant environment, which simulates a multi-node cluster using VMs.
+---
+
+## Evaluating Locally with Vagrant
+
+You can test the full multi-node cluster locally using the provided Vagrant environment in `test/vagrant/`:
 
 ### 1. Start the Environment
-This creates a 2-node cluster (`controller`, `node`) running Ubuntu 24.04 with Slurm pre-installed.
 
 ```bash
-cd vagrant
+cd test/vagrant
 vagrant up
-vagrant reload # Required to apply security settings (AppArmor disable)
+vagrant reload
+cd ../..
 ```
 
-The VMs use mDNS for networking and are accessible as `controller.local` and `node.local`.
+This boots a 2-node cluster (`controller.local`, `node.local`) running Ubuntu 24.04 with Slurm pre-installed.
 
-### 2. Deploy Scripts and Images
-
-**Option A: For production testing (using published images)**
-
-Upload the project scripts to the controller node:
-
-```bash
-# From the repository root on your host
-ssh -o StrictHostKeyChecking=no vagrant@controller.local "mkdir -p ~/hpk" # Password is 'vagrant'
-scp -r -o StrictHostKeyChecking=no scripts/* vagrant@controller.local:~/hpk/ # Password is 'vagrant'
-```
-
-**Option B: For development (using local images)**
-
-For rapid iteration during development, build and deploy images directly to the VMs:
+### 2. Deploy and Run with Local Images
 
 ```bash
 make develop
 ```
 
-This will:
-1. Build all images locally for your current architecture
-2. Export them as `.tar` files
-3. Copy them to both VMs at `~/.hpk/images/`
-4. Copy the `scripts/` directory to the controller at `~/hpk/`
-5. Remove old `.sif` files to ensure fresh builds are used
+This builds the `skiff-bubble` image, uploads it directly to the Vagrant VMs at `~/.skiff/images/`, and syncs all scripts and test suites.
 
-To use the local images, set `HPK_DEV=1` before running the cluster (see step 3).
-
-### 3. Run the Cluster
-Connect to the controller and submit the Slurm job:
+Then SSH into the controller and submit the job:
 
 ```bash
-ssh -o StrictHostKeyChecking=no vagrant@controller.local # Password is 'vagrant'
-
-export HPK_DEV=1 # If using development mode/local images
-cd ~/hpk
-sbatch --nodes=2 hpk.slurm
+ssh -o StrictHostKeyChecking=no vagrant@controller.local
+export SKIFF_DEV=1
+cd ~/skiff/scripts
+sbatch --nodes=2 skiff.slurm
 ```
 
-This will launch one controller bubble and one node bubble on the Vagrant VMs.
+### 3. Run End-to-End Tests
 
-### 4. Interact with the Bubble
-Once running, you can connect to the controller bubble:
-
-```bash
-apptainer shell instance://bubble1
-```
-
-Inside the bubble, you can inspect daemon status:
+Once the cluster is running:
 
 ```bash
-plaidctl status
-```
-
-Run nested containers with Plaid rootless networking:
-
-```bash
-plaidtainer exec alpine.sif ping -c 3 10.244.1.1
-```
-
-And verify external connectivity:
-```bash
-ping 8.8.8.8         # External access via slirp4netns
+export KUBECONFIG=~/.skiff/kubeconfig
+kubectl get nodes
+bash ~/skiff/test/test-skiff-e2e.sh
 ```
