@@ -129,8 +129,12 @@ func GetPodIPFromNetns(pausePID int) (string, error) {
 
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		cmd := exec.Command("nsenter", "-t", strconv.Itoa(pausePID), "-n", "ip", "-o", "-4", "addr", "show", "dev", "tap0")
+		cmd := exec.Command("nsenter", "-t", strconv.Itoa(pausePID), "-n", "ip", "-o", "-4", "addr", "show", "dev", "eth0")
 		output, err := cmd.Output()
+		if err != nil {
+			cmd = exec.Command("nsenter", "-t", strconv.Itoa(pausePID), "-n", "ip", "-o", "-4", "addr", "show", "dev", "tap0")
+			output, err = cmd.Output()
+		}
 		if err != nil {
 			cmd = exec.Command("nsenter", "-t", strconv.Itoa(pausePID), "-n", "ip", "-o", "-4", "addr", "show")
 			output, err = cmd.Output()
@@ -395,7 +399,6 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, notify func(*corev1.Pod)) {
 		"--writable-tmpfs",
 		"--no-mount", "home,bind-paths",
 		pauseImage.Filepath,
-		"/entrypoint.sh",
 		"/usr/local/bin/hpk-pause",
 	}
 

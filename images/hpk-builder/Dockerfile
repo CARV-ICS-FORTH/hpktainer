@@ -2,7 +2,7 @@ FROM ubuntu:24.04
 
 # Install Go 1.25 from PPA
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends software-properties-common && \
+    apt-get install -y --no-install-recommends software-properties-common make && \
     add-apt-repository ppa:longsleep/golang-backports && \
     apt-get update && \
     apt-get install -y --no-install-recommends golang-1.25 && \

@@ -8,8 +8,7 @@ exec > >(tee -a /var/log/entrypoint.log) 2>&1
 HOST_IP=${HOST_IP:-$(ip route get 1 | awk '{print $7; exit}')}
 CONTROLLER_IP=${CONTROLLER_IP:-$HOST_IP}
 
-echo "Starting Calico..."
-echo "  Etcd Endpoint: http://${CONTROLLER_IP}:2379"
+echo "Starting HPK Bubble..."
 echo "  Public IP:     ${HOST_IP}"
 echo "  Interface:     tap0"
 echo "  Role:          ${HPK_ROLE}"
@@ -26,125 +25,7 @@ done
 ip link set tap0 up
 
 # Add Host IP as secondary address to tap0
-# This is required for Calico VXLAN to use it as a source IP
 ip addr add ${HOST_IP}/32 dev tap0 2>/dev/null || true
-
-# Start Etcd if Controller
-if [ "$HPK_ROLE" = "controller" ]; then
-    echo "Starting Etcd..."
-    # Config for single node etcd
-    etcd --name default \
-         --listen-client-urls http://0.0.0.0:2379 \
-         --advertise-client-urls http://${HOST_IP}:2379 \
-         --listen-peer-urls http://0.0.0.0:2380 \
-         --initial-advertise-peer-urls http://${HOST_IP}:2380 \
-         --initial-cluster default=http://${HOST_IP}:2380 \
-         --initial-cluster-token etcd-cluster-1 \
-         --initial-cluster-state new \
-         --data-dir /var/lib/etcd \
-         >> /var/log/etcd.log 2>&1 &
-    
-    # Wait for etcd to accept connections
-    echo "Waiting for Etcd to accept connections on port 2379..."
-    while ! (echo > /dev/tcp/127.0.0.1/2379) 2>/dev/null; do
-        sleep 1
-    done
-    
-    # Initialize Calico config in Etcd
-    echo "Initializing Calico config in Etcd..."
-    export DATASTORE_TYPE=etcdv3
-    export ETCD_ENDPOINTS=http://127.0.0.1:2379
-    calicoctl apply -f - <<EOF
-apiVersion: projectcalico.org/v3
-kind: IPPool
-metadata:
-  name: default-ipv4-ippool
-spec:
-  cidr: 10.244.0.0/16
-  ipipMode: Never
-  vxlanMode: Always
-  natOutgoing: true
-  nodeSelector: all()
----
-apiVersion: projectcalico.org/v3
-kind: BGPConfiguration
-metadata:
-  name: default
-spec:
-  logSeverityScreen: Info
-  listenPort: 17900
-EOF
-fi
-
-BUBBLE_ID_VAL=${BUBBLE_ID:-1}
-NODE_NAME="$(hostname)"
-
-# Start Calico Node
-echo "Starting Calico Node for ${NODE_NAME}..."
-mkdir -p /var/run/calico /var/lib/calico /var/log/calico
-
-CALICO_ETCD="http://${CONTROLLER_IP}:2379"
-if [ "$HPK_ROLE" = "controller" ]; then
-    CALICO_ETCD="http://127.0.0.1:2379"
-fi
-
-export DATASTORE_TYPE=etcdv3
-export ETCD_ENDPOINTS="${ETCD_ENDPOINTS:-$CALICO_ETCD}"
-
-CALICO_IMAGE="docker://docker.io/calico/node:v3.28.0"
-
-apptainer instance run \
-  --no-mount home \
-  --no-mount cwd \
-  --no-mount hostfs \
-  --writable-tmpfs \
-  --bind /var/run/calico:/var/run/calico \
-  --bind /var/lib/calico:/var/lib/calico \
-  --bind /var/log/calico:/var/log/calico \
-  --env DATASTORE_TYPE=etcdv3 \
-  --env ETCD_ENDPOINTS=$CALICO_ETCD \
-  --env BGP_PORT=17900 \
-  --env FELIX_DEFAULTENDPOINTTOHOSTACTION=ACCEPT \
-  --env FELIX_INTERFACEPREFIX=cali \
-  --env FELIX_IPTABLESBACKEND=NFT \
-  --env FELIX_VXLANPORT=4789 \
-  --env CALICO_NETWORKING_BACKEND=bird \
-  --env NO_DEFAULT_POOLS=true \
-  --env NODENAME="${NODE_NAME}" \
-  --env FELIX_FELIXHOSTNAME="${NODE_NAME}" \
-  --env IP=${HOST_IP} \
-  --env KUBERNETES_SERVICE_HOST=${CONTROLLER_IP} \
-  --env KUBERNETES_SERVICE_PORT=6443 \
-  $CALICO_IMAGE \
-  calico-node
-
-# Wait for Calico Node to allocate a block affinity for this node dynamically (indicated by a blackhole route in the kernel)
-echo "Waiting for Calico to allocate an IPAM block for ${NODE_NAME}..."
-POD_SUBNET=""
-for i in {1..30}; do
-    POD_SUBNET=$(ip route | awk '/blackhole/ {print $2; exit}')
-    if [ -n "$POD_SUBNET" ]; then
-        break
-    fi
-    sleep 1
-done
-
-if [ -z "$POD_SUBNET" ]; then
-    echo "Error: Calico did not allocate an IPAM block in time."
-    exit 1
-fi
-echo "Calico dynamically allocated subnet: ${POD_SUBNET}"
-
-# Generate dynamic subnet config for CNI IPAM using the Calico-leased block
-mkdir -p /run/calico
-echo "CALICO_SUBNET=${POD_SUBNET}" > /run/calico/subnet.env
-echo "CALICO_MTU=1500" >> /run/calico/subnet.env
-
-# Configure iptables rules dynamically for the Calico-allocated subnet
-echo "Configuring iptables NAT and FORWARD rules for ${POD_SUBNET}..."
-iptables -t nat -C POSTROUTING -s ${POD_SUBNET} -o tap0 -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s ${POD_SUBNET} -o tap0 -j MASQUERADE
-iptables -C FORWARD -s ${POD_SUBNET} -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -s ${POD_SUBNET} -j ACCEPT
-iptables -C FORWARD -d ${POD_SUBNET} -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -d ${POD_SUBNET} -j ACCEPT
 
 # Start K3s if Controller
 if [ "$HPK_ROLE" = "controller" ]; then
@@ -156,6 +37,8 @@ if [ "$HPK_ROLE" = "controller" ]; then
       --tls-san 0.0.0.0 \
       --tls-san 127.0.0.1 \
       --tls-san localhost \
+      --cluster-cidr 10.244.0.0/16 \
+      --kube-controller-manager-arg=allocate-node-cidrs=true \
       --disable-agent \
       --disable servicelb \
       --disable traefik \
@@ -288,7 +171,6 @@ while true; do
   sleep 1
 done
 
-
 # Generate per-node webhook certificate for hpk-kubelet with node IP SAN via CSR signed by controller
 NODE_NAME="$(hostname)"
 NODE_CERT_DIR="/var/lib/hpk/.certs/${NODE_NAME}"
@@ -345,7 +227,7 @@ while ! k3s kubectl get service -n kube-system kube-dns >/dev/null 2>&1; do
 done
 
 echo "Starting hpk-kubelet..."
-# Using --apptainer=hpktainer to use our networking wrapper
+# Using --apptainer=plaidtainer to use our networking wrapper
 
 # Set pause container path based on development mode
 if [ "${HPK_DEV:-0}" = "1" ]; then
@@ -359,11 +241,18 @@ APISERVER_KEY_LOCATION="${NODE_CERT_DIR}/kubelet.key" \
 APISERVER_CERT_LOCATION="${NODE_CERT_DIR}/kubelet.crt" \
 VKUBELET_ADDRESS=${HOST_IP} \
 hpk-kubelet \
-  --apptainer=hpktainer \
+  --apptainer=plaidtainer \
   --nodename=$(hostname) \
   --disable-taint=true \
   ${PAUSE_IMAGE:+--pause-image=$PAUSE_IMAGE} \
   >> /var/log/hpk-kubelet.log 2>&1 &
+
+echo "Starting plaidd..."
+mkdir -p /run/plaid
+plaidd \
+  --kubeconfig=/var/lib/hpk/kubeconfig \
+  --node-name=$(hostname) \
+  >> /var/log/plaidd.log 2>&1 &
 
 echo "Starting kube-proxy..."
 kube-proxy \

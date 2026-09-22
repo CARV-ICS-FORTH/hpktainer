@@ -22,13 +22,11 @@ kubectl get nodes
 
 Users run a Slurm command to deploy one rootless container per cluster node, which we call **bubble** (using the `hpk-bubble` image). One bubble acts as the Kubernetes control plane, while the others act as worker nodes; together they form the Kubernetes cluster. Each bubble runs an instance of [K3s](https://k3s.io/), alongside the HPK-specific kubelet (`hpk-kubelet`), implemented using the [Virtual Kubelet](https://github.com/virtual-kubelet/virtual-kubelet) framework.
 
-For external networking, bubbles use [slirp4netns](https://github.com/rootless-containers/slirp4netns), while for internal, overlay networking they run [Calico](https://github.com/projectcalico/calico) and communicate via BGP-routed paths (each host forwards TCP port 17900 to the bubble to enable peer-to-peer BGP mesh communication).
+For external networking, bubbles use [slirp4netns](https://github.com/rootless-containers/slirp4netns), while for internal, overlay networking they run [Plaid](https://github.com/forth-ics/plaid) and communicate via user-space VXLAN tunnels (each host forwards UDP port 8472 to the bubble to enable peer-to-peer overlay communication).
 
-Inside the bubble, an [Apptainer](https://apptainer.org/) wrapper (`hpktainer`) is used to spawn "pods" (using the `hpk-pause` image, derived from `hpktainer-base`); these are containers that are given unique network addresses in the corresponding Calico subnet and host user application containers.
+Inside the bubble, the [Apptainer](https://apptainer.org/) wrapper (`plaidtainer`) is used to spawn "pods" (using the `hpk-pause` image); these are containers that are given unique network addresses in the node's Plaid subnet and host user application containers.
 
-All pod containers are configured in a bridge-free, point-to-point L3 routing layout at the bubble level. With the proper routing rules, they route traffic directly to pods running in other bubbles (via Calico-routed interfaces over BGP) and the outside world.
-
-The pod network stack is implemented in userspace using a pair of TAP interfaces; one in the nested container and one in the bubble. The pair is connected via two instances of the `hpk-net-daemon` that forward traffic over a UNIX socket created in a shared folder.
+All pod containers are connected to Plaid's user-space virtual Ethernet bridge (`plaidd`). In Kubernetes mode, `plaidd` coordinates directly with the Kubernetes API to discover node CIDRs, marks nodes ready, and maintains cross-host VXLAN overlay routes in memory over UDP port 8472 without requiring kernel bridges, iptables NAT, or Flannel.
 
 ### Architecture
 
@@ -41,18 +39,18 @@ HPK implements a **4-level distributed architecture**.
 2. **Level 2: Bubble (Node Overlay)**
     * Implemented in the `hpk-bubble` container.
     * An Apptainer instance acting as a virtual node.
-    * Runs K3s (the base Kubernetes distribution) and Calico (L3 routing and BGP peering). The first bubble, which acts as the Kubernetes control plane, also runs [etcd](https://etcd.io/) for supporting Calico.
+    * Runs K3s (the base Kubernetes distribution) and Plaid (`plaidd`).
     * Runs the local `hpk-kubelet`, which registers itself as a node in the K3s cluster.
-    * Connects to other bubbles via a BGP mesh network (Calico, BGP port 17900).
+    * Connects to other bubbles via a user-space VXLAN overlay (Plaid, UDP port 8472).
 
 3. **Level 3: Pod**
     * Implemented in the `hpk-pause` container.
-    * Spawned by `hpk-kubelet` via `hpktainer`.
-    * Each Pod is an Apptainer container with its own network namespace connected to the Bubble's point-to-point routing interface.
+    * Spawned by `hpk-kubelet` via `plaidtainer`.
+    * Each Pod is an Apptainer container with its own network namespace connected to `plaidd`.
     * The Pod's entrypoint is the `hpk-pause` binary, which acts as a "pause container" to hold the network namespace and capture application container signals.
 
 4. **Level 4: Application Container**
-    * User application containers spawned by `hpk-pause`.
+    * User application containers spawned in the pod.
     * These run within the **same network namespace** as the Level 3 Pod.
     * They share the Pod's IP address and can communicate over `localhost`.
 
@@ -60,13 +58,13 @@ HPK implements a **4-level distributed architecture**.
 
 HPK is designed to run in HPC environments under a **single-user trust model**:
 
-1. **Single-User Job Trust Domain**: All container instances and services (`hpk-bubble`, `hpk-kubelet`, K3s, Calico, etcd) run rootless under the requesting user's UID within a dedicated Slurm job allocation. Security isolation between different users is enforced by Slurm and host OS user isolation.
+1. **Single-User Job Trust Domain**: All container instances and services (`hpk-bubble`, `hpk-kubelet`, K3s, Plaid) run rootless under the requesting user's UID within a dedicated Slurm job allocation. Security isolation between different users is enforced by Slurm and host OS user isolation.
 2. **Credential & Certificate Protection**:
    - Cluster credentials (`kubeconfig`, `node-token`) and `hpk-kubelet` private keys (`kubelet.key`) stored in the shared NFS directory (`~/.hpk`) are restricted to owner-only access (`0600` permissions).
    - The K3s server Certificate Authority private key (`server-ca.key`) is retained exclusively in memory/local storage on the controller node and is **never exported** to shared NFS storage.
    - Node webhook certificates (`kubelet.crt`) are issued via Certificate Signing Requests (CSRs) submitted to `~/.hpk/.certs/<node>/kubelet.csr` and signed by a background signing loop running on the controller node. Under the single-user trust model, any CSR appearing in `~/.hpk/.certs/` is signed without additional verification, as write access to the user's NFS directory implies full access to all job credentials and node tokens.
 3. **Internal Services & Network Listeners**:
-   - Etcd (supporting Calico datastore on port 2379) and Calico BGP (port 17900) run unauthenticated and bind to network interfaces managed within the Slurm job allocation. Access to these ports relies on host user boundaries and Slurm job isolation.
+   - Plaid VXLAN (port 8472 UDP) binds to network interfaces managed within the Slurm job allocation. Access to these ports relies on host user boundaries and Slurm job isolation.
 
 ## Building
 
@@ -165,14 +163,19 @@ Once running, you can connect to the controller bubble:
 apptainer shell instance://bubble1
 ```
 
-Inside the bubble, you can run nested containers:
+Inside the bubble, you can inspect daemon status:
 
 ```bash
-hpktainer run docker://docker.io/chazapis/hpktainer-base:latest /bin/sh
+plaidctl status
 ```
 
-And verify connectivity:
+Run nested containers with Plaid rootless networking:
+
 ```bash
-ip addr show tap0    # Should show Calico IP
-ping 8.8.8.8         # External access
+plaidtainer exec alpine.sif ping -c 3 10.244.1.1
+```
+
+And verify external connectivity:
+```bash
+ping 8.8.8.8         # External access via slirp4netns
 ```

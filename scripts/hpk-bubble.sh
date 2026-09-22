@@ -17,7 +17,6 @@ CONTROLLER_IP=${CONTROLLER_IP:-$HOST_IP_DETECTED}
 
 SOCAT_PID_6443=""
 SOCAT_PID_10250=""
-SOCAT_PID_2379=""
 SLIRP_PID=""
 
 start_socat_relays() {
@@ -32,17 +31,7 @@ start_socat_relays() {
     socat TCP4-LISTEN:10250,bind="${HOST_IP_DETECTED}",reuseaddr,fork TCP4:127.0.0.1:10250 &
     SOCAT_PID_10250=$!
 
-    # Expose controller etcd to other bubbles
-    if [ "${HPK_ROLE:-controller}" = "controller" ]; then
-        socat TCP4-LISTEN:2379,bind="${HOST_IP_DETECTED}",reuseaddr,fork TCP4:127.0.0.1:2379 &
-        SOCAT_PID_2379=$!
-    fi
-
-    if [ "${HPK_ROLE:-controller}" = "controller" ]; then
-        echo "Started socat relays on ${HOST_IP_DETECTED} (6443/tcp, 10250/tcp, 2379/tcp)"
-    else
-        echo "Started socat relays on ${HOST_IP_DETECTED} (6443/tcp, 10250/tcp)"
-    fi
+    echo "Started socat relays on ${HOST_IP_DETECTED} (6443/tcp, 10250/tcp)"
 }
 
 cleanup() {
@@ -55,10 +44,6 @@ cleanup() {
     if [[ -n ${SOCAT_PID_10250:-} ]]; then
         kill "$SOCAT_PID_10250" 2>/dev/null || true
         wait "$SOCAT_PID_10250" 2>/dev/null || true
-    fi
-    if [[ -n ${SOCAT_PID_2379:-} ]]; then
-        kill "$SOCAT_PID_2379" 2>/dev/null || true
-        wait "$SOCAT_PID_2379" 2>/dev/null || true
     fi
 
     if [[ -n ${SLIRP_PID:-} ]]; then
@@ -102,8 +87,6 @@ BIN_BINDS=()
 if [ -f "$HOME/.hpk/bin/hpk-kubelet" ]; then
     BIN_BINDS+=(
         --bind "$HOME/.hpk/bin/hpk-kubelet:/usr/bin/hpk-kubelet"
-        --bind "$HOME/.hpk/bin/hpktainer:/usr/bin/hpktainer"
-        --bind "$HOME/.hpk/bin/hpk-net-daemon:/usr/bin/hpk-net-daemon"
         --bind "$HOME/.hpk/bin/hpk-pause:/usr/local/bin/hpk-pause"
     )
 fi
@@ -129,8 +112,6 @@ apptainer instance run \
 	--env HOST_IP="$HOST_IP_DETECTED" \
 	--env CONTROLLER_IP="$CONTROLLER_IP" \
 	--env HPK_DEV="${HPK_DEV:-0}" \
-    --env DATASTORE_TYPE=etcdv3 \
-    --env ETCD_ENDPOINTS="http://${CONTROLLER_IP}:2379" \
     --env BUBBLE_ID="$BUBBLE_ID" \
 	"$BUBBLE_IMAGE" \
 	"$NAME"
@@ -154,16 +135,13 @@ slirp4netns --configure --cidr="$CIDR/24" --mtu=1500 --api-socket "$NAME-slirp4n
 SLIRP_PID=$!
 
 # Forward ports based on Role
-# 17900: Calico BGP (TCP) - All
-# 4789: Calico VXLAN (UDP) - All
+# 8472: Plaid VXLAN (UDP) - All
 # 10250: Kubelet (TCP) - All
 # 6443: K3s API (TCP) - Controller
-# 2379: Etcd (TCP) - Controller
 
 # Construct JSON for hostfwd
-# Always forward 17900 TCP and 4789 UDP to the container's Host IP address (which Calico listens on)
-FWD_JSON_BGP='{"execute": "add_hostfwd", "arguments": {"proto": "tcp", "host_addr": "0.0.0.0", "host_port": 17900, "guest_addr": "'$HOST_IP_DETECTED'", "guest_port": 17900}}'
-FWD_JSON_VXLAN='{"execute": "add_hostfwd", "arguments": {"proto": "udp", "host_addr": "0.0.0.0", "host_port": 4789, "guest_addr": "'$HOST_IP_DETECTED'", "guest_port": 4789}}'
+# Always forward 8472 UDP to the container's Host IP address (which Plaid listens on)
+FWD_JSON_VXLAN='{"execute": "add_hostfwd", "arguments": {"proto": "udp", "host_addr": "0.0.0.0", "host_port": 8472, "guest_addr": "'$HOST_IP_DETECTED'", "guest_port": 8472}}'
 
 # Always forward 10250 TCP (kubelet)
 FWD_JSON_KUBELET='{"execute": "add_hostfwd", "arguments": {"proto": "tcp", "host_addr": "127.0.0.1", "host_port": 10250, "guest_addr": "'$NS_ADDR'", "guest_port": 10250}}'
@@ -173,25 +151,17 @@ HPK_ROLE=${HPK_ROLE:-controller}
 if [ "$HPK_ROLE" = "controller" ]; then
     # Add K3s 6443
     FWD_JSON_K3S='{"execute": "add_hostfwd", "arguments": {"proto": "tcp", "host_addr": "127.0.0.1", "host_port": 6443, "guest_addr": "'$NS_ADDR'", "guest_port": 6443}}'
-
-    # Add Etcd 2379
-    FWD_JSON_ETCD='{"execute": "add_hostfwd", "arguments": {"proto": "tcp", "host_addr": "127.0.0.1", "host_port": 2379, "guest_addr": "'$NS_ADDR'", "guest_port": 2379}}'
 fi
 
-while [ ! -e "$NAME-slirp4netns.sock" ]; do
-    sleep 1
+# Wait for slirp4netns socket to be ready and accept connections
+while ! echo -n "$FWD_JSON_VXLAN" | nc -U "$NAME-slirp4netns.sock" 2>/dev/null; do
+    sleep 0.5
 done
-
-echo -n "$FWD_JSON_BGP" | nc -U "$NAME-slirp4netns.sock"
-sleep 0.1
-echo -n "$FWD_JSON_VXLAN" | nc -U "$NAME-slirp4netns.sock"
 sleep 0.1
 echo -n "$FWD_JSON_KUBELET" | nc -U "$NAME-slirp4netns.sock"
 if [ "$HPK_ROLE" = "controller" ]; then
     sleep 0.1
     echo -n "$FWD_JSON_K3S" | nc -U "$NAME-slirp4netns.sock"
-    sleep 0.1
-    echo -n "$FWD_JSON_ETCD" | nc -U "$NAME-slirp4netns.sock"
 fi
 
 start_socat_relays

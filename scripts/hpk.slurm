@@ -49,15 +49,10 @@ if [ "${HPK_DEV:-0}" = "1" ]; then
         fi
     done
     
-    echo "Development mode: pre-warming third-party images (calico-node)..."
-    # Using 'exec /bin/true' forces Apptainer to fully build and cache the SIF file. 
-    # 'inspect' sometimes skips the full SIF generation in the cache.
-    apptainer exec docker://docker.io/calico/node:v3.28.0 /bin/true 2>/dev/null || true
 else
     echo "Production mode: pre-warming Apptainer cache..."
     apptainer exec docker://docker.io/chazapis/hpk-bubble:latest /bin/true 2>/dev/null || true
     apptainer exec docker://docker.io/chazapis/hpk-pause:latest /bin/true 2>/dev/null || true
-    apptainer exec docker://docker.io/calico/node:v3.28.0 /bin/true 2>/dev/null || true
 fi
 
 SCRIPT_DIR="${SLURM_SUBMIT_DIR:-$HOME/hpk}"

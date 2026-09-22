@@ -81,7 +81,7 @@ func installFlags(flags *pflag.FlagSet, c *Opts) {
 
 	flags.StringVar(&c.NodeName, "nodename", "hpk-kubelet", "kubernetes node name")
 
-	flags.StringVar(&c.DefaultHostEnvironment.ApptainerBin, "apptainer", "apptainer", "path to Apptainer bin")
+	flags.StringVar(&c.DefaultHostEnvironment.ApptainerBin, "apptainer", "plaidtainer", "path to Apptainer bin")
 	flags.StringVar(&c.DefaultHostEnvironment.ContainerRegistry, "registry", "docker://", "container registry")
 	flags.StringVar(&c.DefaultHostEnvironment.WorkingDirectory, "working-dir", GetUserHomeDir(), "sets up the HPK's working directory")
 	flags.StringVar(&c.DefaultHostEnvironment.PodsDirectory, "pods-dir", endpoint.DefaultPodsDir, "sets up the HPK's pods directory")

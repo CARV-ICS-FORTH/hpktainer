@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# End-to-end verification script for hpktainer refactored kubelet.
+# End-to-end verification script for HPK kubelet.
 # Deploys an HTTP server pod and a client pod, verifies IP allocation,
 # DNS resolution, connectivity, logs retrieval, and graceful deletion.
 
@@ -8,9 +8,13 @@ set -euo pipefail
 NAMESPACE="default"
 SERVER_POD="hpk-e2e-server"
 CLIENT_POD="hpk-e2e-client"
-TIMEOUT=60
+TIMEOUT=180
 
-if ! command -v kubectl >/dev/null 2>&1 && command -v k3s >/dev/null 2>&1; then
+if ! command -v kubectl >/dev/null 2>&1 && ! command -v k3s >/dev/null 2>&1; then
+    if command -v apptainer >/dev/null 2>&1 && apptainer instance list 2>/dev/null | grep -q 'bubble1'; then
+        kubectl() { apptainer exec --pwd /var/lib/hpk instance://bubble1 k3s kubectl --kubeconfig /var/lib/hpk/kubeconfig "$@"; }
+    fi
+elif ! command -v kubectl >/dev/null 2>&1 && command -v k3s >/dev/null 2>&1; then
     kubectl() { k3s kubectl "$@"; }
 fi
 
@@ -59,7 +63,8 @@ echo "Waiting for ${SERVER_POD} to become Running..."
 kubectl wait --for=condition=Ready "pod/${SERVER_POD}" --namespace="$NAMESPACE" --timeout="${TIMEOUT}s"
 
 SERVER_IP=$(kubectl get pod "${SERVER_POD}" --namespace="$NAMESPACE" -o jsonpath='{.status.podIP}')
-echo "Server pod is Running with IP: ${SERVER_IP}"
+SERVER_NODE=$(kubectl get pod "${SERVER_POD}" --namespace="$NAMESPACE" -o jsonpath='{.spec.nodeName}')
+echo "Server pod is Running on node ${SERVER_NODE} with IP: ${SERVER_IP}"
 
 if [ -z "$SERVER_IP" ]; then
     echo "Error: Server pod did not receive a PodIP"
@@ -70,6 +75,17 @@ echo "=== 3. Verifying logs collection ==="
 sleep 2
 kubectl logs "${SERVER_POD}" -c server --namespace="$NAMESPACE" || true
 
+# Determine if there is another node to test cross-node overlay networking
+TARGET_NODE_SPEC=""
+ALL_NODES=($(kubectl get nodes -o jsonpath='{.items[*].metadata.name}'))
+for n in "${ALL_NODES[@]}"; do
+    if [ "$n" != "$SERVER_NODE" ]; then
+        TARGET_NODE_SPEC="nodeName: $n"
+        echo "Multi-node detected: scheduling ${CLIENT_POD} to $n to test cross-node overlay connectivity"
+        break
+    fi
+done
+
 echo "=== 4. Testing connectivity from client pod ($CLIENT_POD) ==="
 cat <<EOF | kubectl apply -f -
 apiVersion: v1
@@ -78,6 +94,7 @@ metadata:
   name: ${CLIENT_POD}
   namespace: ${NAMESPACE}
 spec:
+  ${TARGET_NODE_SPEC}
   restartPolicy: Never
   containers:
   - name: client

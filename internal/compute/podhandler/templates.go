@@ -64,7 +64,7 @@ type Container struct {
 	LogsPath      string
 }
 
-// BuildApptainerArgs constructs the CLI arguments for executing a container via Apptainer/hpktainer.
+// BuildApptainerArgs constructs the CLI arguments for executing a container via Apptainer/plaidtainer.
 func (c *Container) BuildApptainerArgs(pausePID int, podDir endpoint.PodPath) []string {
 	args := []string{
 		"--host-networking",
