@@ -72,6 +72,9 @@ func (t *TapEndpoint) StartReadLoop(ctx context.Context, b *bridge.Bridge) {
 				case <-ctx.Done():
 					return
 				default:
+					// TAP device closed or failed (e.g. netns deleted).
+					// Deregister dead endpoint from bridge.
+					_ = b.RemoveEndpoint(t.epID)
 					return
 				}
 			}

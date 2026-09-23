@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -99,6 +100,37 @@ func cmdVersion() {
 	_ = json.NewEncoder(os.Stdout).Encode(result)
 }
 
+var (
+	rollbacks      []func()
+	rollbacksArmed = true
+)
+
+func addRollback(fn func()) {
+	rollbacks = append(rollbacks, fn)
+}
+
+func executeRollbacks() {
+	if !rollbacksArmed {
+		return
+	}
+	for i := len(rollbacks) - 1; i >= 0; i-- {
+		rollbacks[i]()
+	}
+	rollbacks = nil
+}
+
+func disarmRollbacks() {
+	rollbacksArmed = false
+	rollbacks = nil
+}
+
+func canonicalEndpointID(containerID, ifName string) string {
+	if ifName == "" || ifName == "eth0" {
+		return containerID
+	}
+	return fmt.Sprintf("%s-%s", containerID, ifName)
+}
+
 func cmdAdd() {
 	stdinData, err := io.ReadAll(os.Stdin)
 	if err != nil {
@@ -110,11 +142,39 @@ func cmdAdd() {
 		cniError(1, "Failed to parse CNI config JSON", err.Error())
 	}
 
+	cniVersion := conf.CNIVersion
+	if cniVersion == "" {
+		cniVersion = "0.4.0"
+	}
+	supportedVersions := map[string]bool{
+		"0.3.0": true,
+		"0.3.1": true,
+		"0.4.0": true,
+		"1.0.0": true,
+	}
+	if !supportedVersions[cniVersion] {
+		cniError(2, fmt.Sprintf("incompatible CNI version: %s (supported: 0.3.0, 0.3.1, 0.4.0, 1.0.0)", cniVersion), "")
+	}
+
 	if conf.SocketPath == "" {
 		conf.SocketPath = "/run/plaid/plaidd.sock"
 	}
 	if conf.MTU <= 0 {
-		conf.MTU = 1500
+		if envMTU := os.Getenv("PLAID_MTU"); envMTU != "" {
+			if parsed, err := strconv.Atoi(envMTU); err == nil && parsed > 0 {
+				conf.MTU = parsed
+			}
+		}
+	}
+	if conf.MTU <= 0 {
+		// Attempt to discover MTU from plaidd
+		client := api.NewClient(conf.SocketPath)
+		if st, err := client.GetStatus(); err == nil && st.MTU > 0 {
+			conf.MTU = st.MTU
+		}
+	}
+	if conf.MTU <= 0 {
+		conf.MTU = 1450
 	}
 
 	containerID := os.Getenv("CNI_CONTAINERID")
@@ -165,6 +225,9 @@ func cmdAdd() {
 			if err != nil {
 				cniError(2, "IPAM allocation failed", err.Error())
 			}
+			addRollback(func() {
+				_, _ = execIPAM("DEL", ipamConf.Type, cniData)
+			})
 			ipamResult = res
 			if len(ipamResult.IPs) > 0 {
 				if ip, ipNet, err := net.ParseCIDR(ipamResult.IPs[0].Address); err == nil {
@@ -232,6 +295,9 @@ func cmdAdd() {
 		cniError(3, "Failed to create TAP device in netns", err.Error())
 	}
 	defer tapFile.Close()
+	addRollback(func() {
+		_ = tapFile.Close()
+	})
 
 	// 3. Connect to plaidd and register endpoint with TAP fd
 	client := api.NewClient(conf.SocketPath)
@@ -239,8 +305,9 @@ func cmdAdd() {
 	if podIP != nil {
 		podIPStr = podIP.String()
 	}
+	epID := canonicalEndpointID(containerID, ifName)
 	req := &api.Request{
-		PodID:        containerID,
+		PodID:        epID,
 		PodName:      podName,
 		PodNamespace: podNamespace,
 		ContainerID:  containerID,
@@ -252,13 +319,11 @@ func cmdAdd() {
 	if err := client.AddEndpoint(req, int(tapFile.Fd())); err != nil {
 		cniError(4, "Failed to register endpoint with plaidd", err.Error())
 	}
+	addRollback(func() {
+		_ = client.RemoveEndpoint(epID, containerID)
+	})
 
 	// 4. Output CNI success result
-	cniVersion := conf.CNIVersion
-	if cniVersion == "" {
-		cniVersion = "0.4.0"
-	}
-
 	outResult := map[string]interface{}{
 		"cniVersion": cniVersion,
 		"interfaces": []map[string]interface{}{
@@ -309,6 +374,7 @@ func cmdAdd() {
 		}
 	}
 
+	disarmRollbacks()
 	_ = json.NewEncoder(os.Stdout).Encode(outResult)
 }
 
@@ -325,15 +391,23 @@ func cmdDel() {
 	}
 
 	containerID := os.Getenv("CNI_CONTAINERID")
+	ifName := os.Getenv("CNI_IFNAME")
+	if ifName == "" {
+		ifName = "eth0"
+	}
+	epID := canonicalEndpointID(containerID, ifName)
+
 	cniArgs := parseCNIArgs(os.Getenv("CNI_ARGS"))
 	podName := cniArgs["K8S_POD_NAME"]
 	if podName == "" {
 		podName = containerID
 	}
 
-	// 1. Unregister endpoint from plaidd
+	// 1. Unregister endpoint from plaidd using canonical endpoint ID
 	client := api.NewClient(conf.SocketPath)
-	_ = client.RemoveEndpoint(podName, containerID)
+	if err := client.RemoveEndpoint(epID, containerID); err != nil {
+		cniError(5, "Failed to remove endpoint from plaidd", err.Error())
+	}
 
 	// 2. Release IPAM if configured (fallback to /run/plaid/ipam.json if omitted)
 	if len(conf.IPAM) == 0 {
@@ -360,7 +434,9 @@ func cmdDel() {
 		var ipamConf IPAMConfig
 		if err := json.Unmarshal(conf.IPAM, &ipamConf); err == nil && ipamConf.Type != "" {
 			cniData := adjustHostLocalIPAM(stdinData)
-			_, _ = execIPAM("DEL", ipamConf.Type, cniData)
+			if _, err := execIPAM("DEL", ipamConf.Type, cniData); err != nil {
+				cniError(6, "Failed to release IPAM", err.Error())
+			}
 		}
 	}
 
@@ -368,6 +444,58 @@ func cmdDel() {
 }
 
 func cmdCheck() {
+	stdinData, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		cniError(1, "Failed to read stdin", err.Error())
+	}
+
+	var conf CNIConfig
+	if err := json.Unmarshal(stdinData, &conf); err != nil {
+		cniError(1, "Failed to parse CNI config JSON", err.Error())
+	}
+
+	if conf.SocketPath == "" {
+		conf.SocketPath = "/run/plaid/plaidd.sock"
+	}
+
+	containerID := os.Getenv("CNI_CONTAINERID")
+	if containerID == "" {
+		cniError(7, "Missing required CNI_CONTAINERID environment variable", "")
+	}
+	netnsPath := os.Getenv("CNI_NETNS")
+	if netnsPath == "" {
+		cniError(7, "Missing required CNI_NETNS environment variable", "")
+	}
+	ifName := os.Getenv("CNI_IFNAME")
+	if ifName == "" {
+		ifName = "eth0"
+	}
+
+	// 1. Verify container network namespace exists
+	if _, err := os.Stat(netnsPath); err != nil {
+		cniError(11, "Container netns does not exist", err.Error())
+	}
+
+	// 2. Verify plaidd daemon status and endpoint registration
+	client := api.NewClient(conf.SocketPath)
+	status, err := client.GetStatus()
+	if err != nil {
+		cniError(100, "plaidd daemon unavailable", err.Error())
+	}
+
+	epID := canonicalEndpointID(containerID, ifName)
+	found := false
+	for _, epStr := range status.Endpoints {
+		if strings.HasPrefix(epStr, epID+" ") || strings.HasPrefix(epStr, epID+"(") || epStr == epID {
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		cniError(101, fmt.Sprintf("endpoint %s not found in plaidd bridge", epID), "")
+	}
+
 	os.Exit(0)
 }
 
@@ -454,6 +582,7 @@ func generateMAC() net.HardwareAddr {
 }
 
 func cniError(code int, msg, details string) {
+	executeRollbacks()
 	errResp := map[string]interface{}{
 		"cniVersion": "0.4.0",
 		"code":       code,
@@ -518,8 +647,17 @@ func cmdExec(args []string) {
 
 	binPath, err := exec.LookPath(cmdPart[0])
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: command not found: %s\n", cmdPart[0])
-		os.Exit(127)
+		if cmdPart[0] == "/.singularity.d/runscript" {
+			if shPath, shErr := exec.LookPath("/bin/sh"); shErr == nil {
+				binPath = shPath
+				cmdPart = append([]string{"/bin/sh"}, cmdPart[1:]...)
+				err = nil
+			}
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: command not found: %s\n", cmdPart[0])
+			os.Exit(127)
+		}
 	}
 
 	if err := syscall.Exec(binPath, cmdPart, os.Environ()); err != nil {
@@ -537,7 +675,13 @@ func runInit(args []string, verbose bool) {
 	fs.StringVar(&gwStr, "gateway", os.Getenv("PLAID_GATEWAY_IP"), "Gateway IP (defaults to .1 of subnet)")
 	fs.StringVar(&socketPath, "socket", os.Getenv("PLAID_SOCKET_PATH"), "Path to plaidd UNIX domain socket")
 	fs.StringVar(&ifName, "ifname", os.Getenv("PLAID_IFNAME"), "Interface name to create (default: eth0)")
-	fs.IntVar(&mtu, "mtu", 1500, "MTU for the interface")
+	defaultMTU := 1450
+	if envMTU := os.Getenv("PLAID_MTU"); envMTU != "" {
+		if parsed, err := strconv.Atoi(envMTU); err == nil && parsed > 0 {
+			defaultMTU = parsed
+		}
+	}
+	fs.IntVar(&mtu, "mtu", defaultMTU, "MTU for the interface")
 	fs.StringVar(&containerID, "container-id", os.Getenv("PLAID_CONTAINER_ID"), "Container identifier")
 
 	_ = fs.Parse(args)
@@ -557,7 +701,7 @@ func runInit(args []string, verbose bool) {
 		}
 	}
 	if mtu <= 0 {
-		mtu = 1500
+		mtu = defaultMTU
 	}
 
 	if ipStr == "" {
@@ -693,7 +837,7 @@ Environment Variables (for init & exec):
   PLAID_GATEWAY_IP        Gateway IP (default: .1 of subnet)
   PLAID_SOCKET_PATH       Path to plaidd UNIX socket (default: /run/plaid/plaidd.sock)
   PLAID_IFNAME            Interface name (default: eth0)
-  PLAID_MTU               Interface MTU (default: 1500)
+  PLAID_MTU               Interface MTU (default: 1450)
   PLAID_CONTAINER_ID      Container identifier (default: hostname)
 
 When called by container runtimes via CNI, the standard CNI environment variables

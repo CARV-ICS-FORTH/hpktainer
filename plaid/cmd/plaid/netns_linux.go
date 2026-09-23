@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"os"
 	"runtime"
-	"syscall"
 
+	"golang.org/x/sys/unix"
 	"plaid/pkg/tap"
 )
 
@@ -17,29 +17,50 @@ func createTapInNetNS(netnsPath string, cfg tap.TapConfig) (*os.File, error) {
 	}
 
 	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
+	// If we fail to restore the thread's original netns, we must NOT call
+	// runtime.UnlockOSThread(), as that would return an OS thread trapped in the
+	// container's netns back into the Go runtime worker pool.
+	restored := false
+	defer func() {
+		if restored {
+			runtime.UnlockOSThread()
+		}
+	}()
 
-	curNS, err := os.Open("/proc/self/ns/net")
+	// Open the calling thread's current network namespace
+	curNS, err := os.Open("/proc/thread-self/ns/net")
 	if err != nil {
-		return nil, fmt.Errorf("failed to open current netns: %w", err)
+		// Fallback to /proc/self/ns/net for older kernels (<3.17)
+		curNS, err = os.Open("/proc/self/ns/net")
+		if err != nil {
+			restored = true
+			return nil, fmt.Errorf("failed to open current netns: %w", err)
+		}
 	}
 	defer curNS.Close()
 
 	targetNS, err := os.Open(netnsPath)
 	if err != nil {
+		restored = true
 		return nil, fmt.Errorf("failed to open target netns %s: %w", netnsPath, err)
 	}
 	defer targetNS.Close()
 
-	_, _, errno := syscall.Syscall(syscall.SYS_SETNS, targetNS.Fd(), uintptr(syscall.CLONE_NEWNET), 0)
-	if errno != 0 {
-		return nil, fmt.Errorf("setns to target netns failed: %w", errno)
+	if err := unix.Setns(int(targetNS.Fd()), unix.CLONE_NEWNET); err != nil {
+		restored = true
+		return nil, fmt.Errorf("setns to target netns failed: %w", err)
 	}
 
 	tapFile, tapErr := tap.CreateAndConfigureTap(cfg)
 
 	// Revert to original host netns
-	_, _, _ = syscall.Syscall(syscall.SYS_SETNS, curNS.Fd(), uintptr(syscall.CLONE_NEWNET), 0)
+	if err := unix.Setns(int(curNS.Fd()), unix.CLONE_NEWNET); err != nil {
+		if tapFile != nil {
+			_ = tapFile.Close()
+		}
+		return nil, fmt.Errorf("failed to restore original netns (OS thread permanently locked): %w", err)
+	}
 
+	restored = true
 	return tapFile, tapErr
 }

@@ -15,7 +15,6 @@ import (
 
 var (
 	ErrSlirpNotRunning = errors.New("slirp4netns is not running")
-	slirpRouterMAC     = net.HardwareAddr{0x52, 0x54, 0x00, 0x12, 0x34, 0x56}
 )
 
 // FrameInjector receives packets coming back from slirp4netns to deliver to pods.

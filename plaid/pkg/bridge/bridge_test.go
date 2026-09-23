@@ -420,3 +420,74 @@ func TestBridgeGatewayICMPPing(t *testing.T) {
 		t.Errorf("Expected ICMP Echo Reply (Type 0), got: %v", replyIP.Payload)
 	}
 }
+
+type blockingEndpoint struct {
+	mockEndpoint
+	writeStarted chan struct{}
+	releaseWrite chan struct{}
+}
+
+func (b *blockingEndpoint) Write(frame []byte) error {
+	select {
+	case b.writeStarted <- struct{}{}:
+	default:
+	}
+	<-b.releaseWrite
+	return nil
+}
+
+func TestBridgeFloodNonBlockingLock(t *testing.T) {
+	b, pod1, _ := setupTestBridge()
+
+	blockingEP := &blockingEndpoint{
+		mockEndpoint: *newMockEndpoint("slow-pod", "tap-slow", "10.244.1.99", "02:00:00:00:00:99"),
+		writeStarted: make(chan struct{}, 1),
+		releaseWrite: make(chan struct{}),
+	}
+	_ = b.AddEndpoint(blockingEP)
+
+	bcastMAC, _ := net.ParseMAC("ff:ff:ff:ff:ff:ff")
+	frame := &packet.EthernetFrame{
+		DstMAC:    bcastMAC,
+		SrcMAC:    pod1.MAC(),
+		EtherType: packet.EtherTypeIPv4,
+		Payload:   []byte("broadcast flood frame"),
+	}
+	raw, _ := frame.Marshal()
+
+	floodDone := make(chan struct{})
+	go func() {
+		_ = b.ProcessFrame(pod1, raw)
+		close(floodDone)
+	}()
+
+	// Wait until blockingEP.Write has been entered inside flood
+	select {
+	case <-blockingEP.writeStarted:
+	case <-time.After(1 * time.Second):
+		t.Fatalf("timeout waiting for blockingEP.Write to start")
+	}
+
+	// While blockingEP is still stuck in Write, another goroutine should NOT be blocked from modifying or reading bridge!
+	addDone := make(chan struct{})
+	go func() {
+		newEP := newMockEndpoint("pod3", "tap3", "10.244.1.5", "02:00:00:00:00:05")
+		_ = b.AddEndpoint(newEP)
+		close(addDone)
+	}()
+
+	select {
+	case <-addDone:
+		// Succeeded! AddEndpoint acquired write lock and completed even while slow endpoint was in Write!
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("b.AddEndpoint stalled waiting on slow endpoint in flood!")
+	}
+
+	// Release the slow endpoint and finish flood
+	close(blockingEP.releaseWrite)
+	select {
+	case <-floodDone:
+	case <-time.After(1 * time.Second):
+		t.Fatalf("flood did not finish after release")
+	}
+}

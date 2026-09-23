@@ -50,6 +50,79 @@ func FindHostLocalBinary() (string, error) {
 	return "", fmt.Errorf("host-local CNI plugin not found in standard paths or CNI_PATH")
 }
 
+// ValidateNodeCIDR validates that nodeCIDR is a valid IPv4 /24 network.
+func ValidateNodeCIDR(nodeCIDR string) (*net.IPNet, error) {
+	if nodeCIDR == "" {
+		return nil, fmt.Errorf("empty node CIDR")
+	}
+	ip, ipNet, err := net.ParseCIDR(nodeCIDR)
+	if err != nil {
+		return nil, fmt.Errorf("invalid node CIDR %q: %w", nodeCIDR, err)
+	}
+	if ipNet.IP.To4() == nil || ip.To4() == nil {
+		return nil, fmt.Errorf("IPv6 is not supported; node CIDR %q must be IPv4", nodeCIDR)
+	}
+	ones, bits := ipNet.Mask.Size()
+	if bits != 32 || ones != 24 {
+		return nil, fmt.Errorf("unsupported prefix /%d in %q: only /24 subnets are supported", ones, nodeCIDR)
+	}
+	return ipNet, nil
+}
+
+// BuildHostLocalIPAMConfig generates the host-local CNI IPAM JSON configuration for a given nodeCIDR.
+func BuildHostLocalIPAMConfig(socketDir, nodeCIDR, gwIP string) ([]byte, error) {
+	ipNet, err := ValidateNodeCIDR(nodeCIDR)
+	if err != nil {
+		return nil, err
+	}
+
+	ip4 := ipNet.IP.To4()
+	base0, base1, base2 := ip4[0], ip4[1], ip4[2]
+
+	gateway := gwIP
+	if gateway == "" {
+		gateway = net.IPv4(base0, base1, base2, 1).String()
+	} else {
+		parsedGW := net.ParseIP(gateway)
+		if parsedGW == nil || parsedGW.To4() == nil {
+			return nil, fmt.Errorf("invalid gateway IP %q: must be a valid IPv4 address", gwIP)
+		}
+		if !ipNet.Contains(parsedGW) {
+			return nil, fmt.Errorf("gateway IP %s is not within node CIDR %s", gateway, nodeCIDR)
+		}
+	}
+
+	rangeStart := net.IPv4(base0, base1, base2, 4).String()
+	rangeEnd := net.IPv4(base0, base1, base2, 254).String()
+
+	ipamDir := filepath.Join(socketDir, "ipam")
+	if err := os.MkdirAll(ipamDir, 0777); err != nil {
+		return nil, fmt.Errorf("failed to create ipam data dir %s: %w", ipamDir, err)
+	}
+	_ = os.Chmod(ipamDir, 0777)
+
+	conf := fmt.Sprintf(`{
+  "cniVersion": "0.4.0",
+  "name": "plaid-ipam",
+  "ipam": {
+    "type": "host-local",
+    "dataDir": %q,
+    "ranges": [
+      [
+        {
+          "subnet": %q,
+          "rangeStart": %q,
+          "rangeEnd": %q,
+          "gateway": %q
+        }
+      ]
+    ]
+  }
+}`, ipamDir, nodeCIDR, rangeStart, rangeEnd, gateway)
+
+	return []byte(conf), nil
+}
+
 // GetIPAMConfig returns the IPAM JSON configuration, either by reading /run/plaid/ipam.json
 // or dynamically synthesizing it from plaidd status.
 func GetIPAMConfig(socketPath string) ([]byte, error) {
@@ -71,42 +144,7 @@ func GetIPAMConfig(socketPath string) ([]byte, error) {
 		return nil, fmt.Errorf("plaidd status has empty NodeCIDR")
 	}
 
-	_, ipNet, err := net.ParseCIDR(status.NodeCIDR)
-	if err != nil || ipNet.IP.To4() == nil {
-		return nil, fmt.Errorf("invalid NodeCIDR %q: %w", status.NodeCIDR, err)
-	}
-
-	ip4 := ipNet.IP.To4()
-	rangeStart := net.IPv4(ip4[0], ip4[1], ip4[2], 4).String()
-	rangeEnd := net.IPv4(ip4[0], ip4[1], ip4[2], 254).String()
-	gwIP := status.GatewayIP
-	if gwIP == "" {
-		gwIP = net.IPv4(ip4[0], ip4[1], ip4[2], 1).String()
-	}
-
-	ipamDir := filepath.Join(socketDir, "ipam")
-	_ = os.MkdirAll(ipamDir, 0777)
-
-	conf := fmt.Sprintf(`{
-  "cniVersion": "0.4.0",
-  "name": "plaid-ipam",
-  "ipam": {
-    "type": "host-local",
-    "dataDir": %q,
-    "ranges": [
-      [
-        {
-          "subnet": %q,
-          "rangeStart": %q,
-          "rangeEnd": %q,
-          "gateway": %q
-        }
-      ]
-    ]
-  }
-}`, ipamDir, status.NodeCIDR, rangeStart, rangeEnd, gwIP)
-
-	return []byte(conf), nil
+	return BuildHostLocalIPAMConfig(socketDir, status.NodeCIDR, status.GatewayIP)
 }
 
 // AllocateIP allocates an IP for containerID using host-local.

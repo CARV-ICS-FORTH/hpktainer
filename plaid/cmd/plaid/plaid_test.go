@@ -5,12 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"plaid/pkg/api"
 )
@@ -82,7 +80,13 @@ func TestCNIPlugin(t *testing.T) {
 		t.Errorf("Unexpected cniVersion: %v", vResp["cniVersion"])
 	}
 
-	// 2. Test DEL (empty/non-existent endpoint should succeed without error)
+	// 2. Test DEL when endpoint is pre-registered under containerID but K8S_POD_NAME is different
+	handler.endpoints["cont-123"] = &api.Request{
+		PodID:       "cont-123",
+		ContainerID: "cont-123",
+		PodName:     "test-pod",
+	}
+
 	delConf := fmt.Sprintf(`{
 		"cniVersion": "0.4.0",
 		"name": "cbr0",
@@ -95,7 +99,7 @@ func TestCNIPlugin(t *testing.T) {
 		"CNI_COMMAND=DEL",
 		"CNI_CONTAINERID=cont-123",
 		"CNI_IFNAME=eth0",
-		"CNI_ARGS=K8S_POD_NAME=test-pod;K8S_POD_NAMESPACE=default",
+		"CNI_ARGS=K8S_POD_NAME=test-pod-different;K8S_POD_NAMESPACE=default",
 	)
 	dCmd.Stdin = bytes.NewReader([]byte(delConf))
 	dOut, err := dCmd.CombinedOutput()
@@ -103,7 +107,46 @@ func TestCNIPlugin(t *testing.T) {
 		t.Fatalf("CNI DEL failed: %v, output: %s", err, dOut)
 	}
 
-	// 3. Test API communication directly
+	// Verify the endpoint was removed under its canonical containerID!
+	if _, exists := handler.endpoints["cont-123"]; exists {
+		t.Fatalf("CNI DEL failed to remove endpoint with canonical containerID cont-123 when K8S_POD_NAME was different")
+	}
+
+	// 3. Test CNI CHECK failure when endpoint not found
+	cCmd := exec.Command(binPath)
+	cCmd.Env = append(os.Environ(),
+		"CNI_COMMAND=CHECK",
+		"CNI_CONTAINERID=cont-123",
+		"CNI_IFNAME=eth0",
+		"CNI_NETNS="+binPath, // use existing file as netns path for stat
+	)
+	cCmd.Stdin = bytes.NewReader([]byte(delConf))
+	cOut, err := cCmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("Expected CNI CHECK to fail when endpoint not found in plaidd, but succeeded: %s", cOut)
+	}
+
+	// 4. Test Incompatible CNI Version
+	badVerConf := fmt.Sprintf(`{
+		"cniVersion": "9.9.9",
+		"name": "cbr0",
+		"type": "plaid",
+		"socketPath": %q
+	}`, sockPath)
+	badVerCmd := exec.Command(binPath)
+	badVerCmd.Env = append(os.Environ(),
+		"CNI_COMMAND=ADD",
+		"CNI_CONTAINERID=cont-bad-ver",
+		"CNI_IFNAME=eth0",
+		"CNI_NETNS="+binPath,
+	)
+	badVerCmd.Stdin = bytes.NewReader([]byte(badVerConf))
+	badOut, err := badVerCmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("Expected incompatible CNI version to fail, got success: %s", badOut)
+	}
+
+	// 5. Test API communication directly
 	client := api.NewClient(sockPath)
 	rPipe, _, _ := os.Pipe()
 	defer rPipe.Close()
@@ -134,10 +177,53 @@ func TestCNIPlugin(t *testing.T) {
 	if status.EndpointsCount != 0 {
 		t.Errorf("Expected 0 endpoints after DEL, got %d", status.EndpointsCount)
 	}
-}
 
-func init() {
-	// Silence unused warnings for net and time
-	_ = net.IPv4zero
-	_ = time.Second
+	// 6. Test Transactional Rollback on ADD failure
+	logFile := filepath.Join(tmpDir, "ipam.log")
+	mockIPAMScript := filepath.Join(tmpDir, "mock-ipam")
+	scriptContent := fmt.Sprintf(`#!/bin/sh
+cmd="$CNI_COMMAND"
+echo "$cmd" >> %q
+if [ "$cmd" = "ADD" ]; then
+    echo '{"cniVersion":"0.4.0","ips":[{"version":"4","address":"10.244.1.99/24","gateway":"10.244.1.1"}]}'
+    exit 0
+fi
+if [ "$cmd" = "DEL" ]; then
+    exit 0
+fi
+`, logFile)
+	if err := os.WriteFile(mockIPAMScript, []byte(scriptContent), 0755); err != nil {
+		t.Fatalf("Failed to write mock IPAM script: %v", err)
+	}
+
+	rollbackConf := fmt.Sprintf(`{
+		"cniVersion": "0.4.0",
+		"name": "cbr0",
+		"type": "plaid",
+		"socketPath": %q,
+		"ipam": {
+			"type": "mock-ipam"
+		}
+	}`, sockPath)
+
+	failCmd := exec.Command(binPath)
+	failCmd.Env = append(os.Environ(),
+		"CNI_COMMAND=ADD",
+		"CNI_CONTAINERID=cont-rollback",
+		"CNI_IFNAME=eth0",
+		"CNI_PATH="+tmpDir,
+		"CNI_NETNS=/nonexistent/netns/path", // will fail at TAP creation in netns
+	)
+	failCmd.Stdin = bytes.NewReader([]byte(rollbackConf))
+	_ = failCmd.Run() // expected to fail
+
+	// Read log to verify ADD was followed by rollback DEL!
+	logBytes, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("Failed to read IPAM log: %v", err)
+	}
+	logStr := string(logBytes)
+	if !bytes.Contains(logBytes, []byte("ADD")) || !bytes.Contains(logBytes, []byte("DEL")) {
+		t.Fatalf("Expected mock IPAM to receive both ADD and rollback DEL, got: %q", logStr)
+	}
 }

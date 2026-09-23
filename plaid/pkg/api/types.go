@@ -4,6 +4,9 @@ package api
 type Action string
 
 const (
+	// MaxMessageSize defines the maximum framed message size (16 MB).
+	MaxMessageSize = 16 * 1024 * 1024
+
 	ActionAddEndpoint      Action = "add_endpoint"
 	ActionRemoveEndpoint   Action = "remove_endpoint"
 	ActionAddRoute         Action = "add_route"
@@ -56,6 +59,7 @@ type Response struct {
 	NodeCIDR       string   `json:"node_cidr,omitempty"`
 	ClusterCIDR    string   `json:"cluster_cidr,omitempty"`
 	GatewayIP      string   `json:"gateway_ip,omitempty"`
+	MTU            int      `json:"mtu,omitempty"`
 	Endpoints      []string `json:"endpoints,omitempty"`
 	FilterRules    []string `json:"filter_rules,omitempty"`
 }

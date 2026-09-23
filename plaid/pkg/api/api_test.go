@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -143,5 +144,82 @@ func TestAPIServerAndClient(t *testing.T) {
 	}
 	if handlers.lastDelReq == nil || handlers.lastDelReq.PodID != "pod-123" {
 		t.Errorf("RemoveEndpoint handler did not receive expected request")
+	}
+}
+
+func TestLargeResponseAndFraming(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sockPath := filepath.Join(t.TempDir(), "l.sock")
+	largeHandlers := &largeStatusHandler{}
+
+	srv := NewServer(sockPath, nil, nil, largeHandlers)
+	if err := srv.Start(ctx); err != nil {
+		t.Fatalf("Failed to start server: %v", err)
+	}
+	defer srv.Close()
+
+	client := NewClient(sockPath)
+	resp, err := client.GetStatus()
+	if err != nil {
+		t.Fatalf("GetStatus with large response failed: %v", err)
+	}
+	if !resp.Success || len(resp.Endpoints) != 200 {
+		t.Fatalf("Expected 200 endpoints in large status, got %d", len(resp.Endpoints))
+	}
+}
+
+type largeStatusHandler struct{}
+
+func (h *largeStatusHandler) HandleGetStatus() (*Response, error) {
+	// Generate an endpoint list well over 6,000 bytes
+	endpoints := make([]string, 200)
+	for i := range endpoints {
+		endpoints[i] = fmt.Sprintf("endpoint-%04d-with-extra-long-description-padding-to-exceed-4096-bytes-and-verify-framing", i)
+	}
+	return &Response{
+		Success:        true,
+		EndpointsCount: len(endpoints),
+		Endpoints:      endpoints,
+	}, nil
+}
+
+func TestFDLeakPrevention(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sockPath := filepath.Join(t.TempDir(), "k.sock")
+	srv := NewServer(sockPath, nil, nil, nil)
+	if err := srv.Start(ctx); err != nil {
+		t.Fatalf("Failed to start server: %v", err)
+	}
+	defer srv.Close()
+
+	// 1. Send unexpected FD with a non-AddEndpoint request (e.g. remove_route)
+	rPipe, wPipe, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	defer wPipe.Close()
+
+	client := NewClient(sockPath)
+	// Send with passFD on a request that does not take an FD
+	req := &Request{
+		Action: ActionRemoveRoute,
+		Subnet: "10.0.0.0/24",
+	}
+	// The client Send passes rPipe.Fd()
+	_, err = client.Send(req, int(rPipe.Fd()))
+	_ = rPipe.Close()
+	if err != nil {
+		t.Fatalf("Send unexpected FD request failed: %v", err)
+	}
+
+	// 2. Test Socket Lock prevents second server instance
+	srv2 := NewServer(sockPath, nil, nil, nil)
+	if err := srv2.Start(ctx); err == nil {
+		srv2.Close()
+		t.Fatalf("Expected error when starting second server with same socket lock, got nil")
 	}
 }

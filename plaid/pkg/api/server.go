@@ -2,12 +2,17 @@ package api
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"sync"
 	"syscall"
+	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // EndpointHandler handles AddEndpoint and RemoveEndpoint requests.
@@ -42,6 +47,7 @@ type Server struct {
 	statusProv    StatusProvider
 	filterHandler FilterHandler
 	listener      net.Listener
+	lockFile      *os.File
 	mu            sync.Mutex
 	closed        bool
 	closeOnce     sync.Once
@@ -66,10 +72,23 @@ func (s *Server) SetFilterHandler(fh FilterHandler) {
 
 // Start begins listening on the UNIX domain socket.
 func (s *Server) Start(ctx context.Context) error {
+	lockPath := s.socketPath + ".lock"
+	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return fmt.Errorf("failed to open API lock file %s: %w", lockPath, err)
+	}
+	if err := unix.Flock(int(lockFile.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		_ = lockFile.Close()
+		return fmt.Errorf("another plaidd instance is actively holding API socket lock %s: %w", lockPath, err)
+	}
+	s.lockFile = lockFile
+
 	_ = os.Remove(s.socketPath)
 
 	l, err := net.Listen("unix", s.socketPath)
 	if err != nil {
+		_ = unix.Flock(int(s.lockFile.Fd()), unix.LOCK_UN)
+		_ = s.lockFile.Close()
 		return fmt.Errorf("failed to listen on API socket %s: %w", s.socketPath, err)
 	}
 	s.listener = l
@@ -104,6 +123,8 @@ func (s *Server) acceptLoop(ctx context.Context) {
 func (s *Server) handleConn(conn net.Conn) {
 	defer conn.Close()
 
+	_ = conn.SetDeadline(time.Now().Add(15 * time.Second))
+
 	unixConn, ok := conn.(*net.UnixConn)
 	if !ok {
 		return
@@ -117,37 +138,96 @@ func (s *Server) handleConn(conn net.Conn) {
 		return
 	}
 
-	var req Request
-	if err := json.Unmarshal(buf[:n], &req); err != nil {
-		sendResponse(unixConn, &Response{Success: false, Error: "invalid JSON request"})
-		return
-	}
-
-	// Extract passed file descriptors from oob if any
-	var receivedFD = -1
+	// 1. Immediately extract ALL received FDs from oob and set close-on-exec
+	var allFDs []int
 	if oobn > 0 {
 		scms, err := syscall.ParseSocketControlMessage(oob[:oobn])
 		if err == nil {
 			for _, scm := range scms {
 				fds, err := syscall.ParseUnixRights(&scm)
-				if err == nil && len(fds) > 0 {
-					receivedFD = fds[0]
-					break
+				if err == nil {
+					for _, fd := range fds {
+						syscall.CloseOnExec(fd)
+						allFDs = append(allFDs, fd)
+					}
 				}
 			}
 		}
+	}
+
+	claimed := false
+	var tapFD = -1
+	defer func() {
+		for _, fd := range allFDs {
+			if !claimed || fd != tapFD {
+				_ = syscall.Close(fd)
+			}
+		}
+	}()
+
+	// 2. Read full 4-byte header
+	for n < 4 {
+		more, err := unixConn.Read(buf[n:4])
+		if err != nil {
+			return
+		}
+		n += more
+	}
+
+	msgLen := binary.BigEndian.Uint32(buf[:4])
+	if msgLen > MaxMessageSize {
+		sendResponse(unixConn, &Response{Success: false, Error: "request payload exceeds maximum size"})
+		return
+	}
+
+	payload := make([]byte, msgLen)
+	copied := copy(payload, buf[4:n])
+	if copied < int(msgLen) {
+		if _, err := io.ReadFull(unixConn, payload[copied:]); err != nil {
+			sendResponse(unixConn, &Response{Success: false, Error: "failed to read complete request body"})
+			return
+		}
+	}
+
+	var req Request
+	if err := json.Unmarshal(payload, &req); err != nil {
+		sendResponse(unixConn, &Response{Success: false, Error: "invalid JSON request"})
+		return
+	}
+
+	// 3. FD validation
+	if req.Action != ActionAddEndpoint {
+		// Close all FDs immediately if not AddEndpoint
+		for _, fd := range allFDs {
+			_ = syscall.Close(fd)
+		}
+		allFDs = nil
+	} else {
+		if len(allFDs) == 0 {
+			sendResponse(unixConn, &Response{Success: false, Error: "missing TAP file descriptor for add_endpoint"})
+			return
+		}
+		tapFD = allFDs[0]
+		// Close any extra FDs beyond the first one immediately
+		for _, extraFD := range allFDs[1:] {
+			_ = syscall.Close(extraFD)
+		}
+		allFDs = []int{tapFD}
 	}
 
 	var resp Response
 	switch req.Action {
 	case ActionAddEndpoint:
 		if s.epHandler != nil {
-			err = s.epHandler.HandleAddEndpoint(&req, receivedFD)
+			err = s.epHandler.HandleAddEndpoint(&req, tapFD)
 			if err != nil {
 				resp = Response{Success: false, Error: err.Error()}
 			} else {
+				claimed = true
 				resp = Response{Success: true}
 			}
+		} else {
+			resp = Response{Success: false, Error: "endpoint handler not configured"}
 		}
 	case ActionRemoveEndpoint:
 		if s.epHandler != nil {
@@ -227,8 +307,20 @@ func (s *Server) handleConn(conn net.Conn) {
 
 func sendResponse(conn *net.UnixConn, resp *Response) {
 	data, err := json.Marshal(resp)
-	if err == nil {
-		_, _ = conn.Write(data)
+	if err != nil {
+		return
+	}
+	frame := make([]byte, 4+len(data))
+	binary.BigEndian.PutUint32(frame[:4], uint32(len(data)))
+	copy(frame[4:], data)
+
+	var written int
+	for written < len(frame) {
+		n, err := conn.Write(frame[written:])
+		if err != nil {
+			return
+		}
+		written += n
 	}
 }
 
@@ -244,6 +336,11 @@ func (s *Server) Close() error {
 			err = s.listener.Close()
 		}
 		_ = os.Remove(s.socketPath)
+		if s.lockFile != nil {
+			_ = unix.Flock(int(s.lockFile.Fd()), unix.LOCK_UN)
+			_ = s.lockFile.Close()
+			_ = os.Remove(s.socketPath + ".lock")
+		}
 	})
 	return err
 }

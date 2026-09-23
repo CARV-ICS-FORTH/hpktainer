@@ -1,8 +1,10 @@
 package api
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"syscall"
 	"time"
@@ -18,7 +20,7 @@ type Client struct {
 func NewClient(socketPath string) *Client {
 	return &Client{
 		socketPath: socketPath,
-		timeout:    5 * time.Second,
+		timeout:    10 * time.Second,
 	}
 }
 
@@ -30,6 +32,9 @@ func (c *Client) Send(req *Request, passFD int) (*Response, error) {
 	}
 	defer conn.Close()
 
+	deadline := time.Now().Add(c.timeout)
+	_ = conn.SetDeadline(deadline)
+
 	unixConn, ok := conn.(*net.UnixConn)
 	if !ok {
 		return nil, fmt.Errorf("connection is not a unix domain socket")
@@ -40,25 +45,52 @@ func (c *Client) Send(req *Request, passFD int) (*Response, error) {
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
+	if len(data) > MaxMessageSize {
+		return nil, fmt.Errorf("request payload exceeds maximum size %d", MaxMessageSize)
+	}
+
+	frame := make([]byte, 4+len(data))
+	binary.BigEndian.PutUint32(frame[:4], uint32(len(data)))
+	copy(frame[4:], data)
+
 	var oob []byte
 	if passFD >= 0 {
 		oob = syscall.UnixRights(passFD)
 	}
 
-	_, _, err = unixConn.WriteMsgUnix(data, oob, nil)
+	n, _, err := unixConn.WriteMsgUnix(frame, oob, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request to plaidd: %w", err)
 	}
+	if n < len(frame) {
+		var written int = n
+		for written < len(frame) {
+			nw, err := unixConn.Write(frame[written:])
+			if err != nil {
+				return nil, fmt.Errorf("failed to write complete request to plaidd: %w", err)
+			}
+			written += nw
+		}
+	}
 
-	_ = conn.SetReadDeadline(time.Now().Add(c.timeout))
-	respBuf := make([]byte, 4096)
-	n, err := conn.Read(respBuf)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response from plaidd: %w", err)
+	// Read 4-byte response length header
+	lenBuf := make([]byte, 4)
+	if _, err := io.ReadFull(conn, lenBuf); err != nil {
+		return nil, fmt.Errorf("failed to read response header from plaidd: %w", err)
+	}
+
+	respLen := binary.BigEndian.Uint32(lenBuf)
+	if respLen > MaxMessageSize {
+		return nil, fmt.Errorf("response size %d exceeds limit %d", respLen, MaxMessageSize)
+	}
+
+	respBuf := make([]byte, respLen)
+	if _, err := io.ReadFull(conn, respBuf); err != nil {
+		return nil, fmt.Errorf("failed to read response body from plaidd: %w", err)
 	}
 
 	var resp Response
-	if err := json.Unmarshal(respBuf[:n], &resp); err != nil {
+	if err := json.Unmarshal(respBuf, &resp); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
 	}
 

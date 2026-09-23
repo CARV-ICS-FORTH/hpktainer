@@ -14,7 +14,6 @@ import (
 
 var (
 	ErrEndpointNotFound = errors.New("endpoint not found")
-	ErrEndpointExists   = errors.New("endpoint already exists")
 )
 
 func ipAdd(ip net.IP, n uint32) net.IP {
@@ -491,13 +490,17 @@ func (b *Bridge) InjectFrame(frame *packet.EthernetFrame) error {
 
 func (b *Bridge) flood(srcEP Endpoint, raw []byte) error {
 	b.mu.RLock()
-	defer b.mu.RUnlock()
-
-	var firstErr error
+	eps := make([]Endpoint, 0, len(b.endpoints))
 	for _, ep := range b.endpoints {
 		if srcEP != nil && ep.ID() == srcEP.ID() {
 			continue
 		}
+		eps = append(eps, ep)
+	}
+	b.mu.RUnlock()
+
+	var firstErr error
+	for _, ep := range eps {
 		if err := ep.Write(raw); err != nil && firstErr == nil {
 			firstErr = err
 		}

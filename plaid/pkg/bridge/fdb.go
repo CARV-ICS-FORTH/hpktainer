@@ -14,19 +14,59 @@ type FDBEntry struct {
 	Static    bool
 }
 
+const DefaultMaxFDBEntries = 1024
+
 // FDB is a concurrent-safe MAC forwarding database.
 type FDB struct {
-	mu      sync.RWMutex
-	entries map[string]*FDBEntry
-	ttl     time.Duration
+	mu         sync.RWMutex
+	entries    map[string]*FDBEntry
+	ttl        time.Duration
+	maxEntries int
 }
 
 // NewFDB creates a new FDB with the given entry expiration TTL (e.g. 5 minutes).
 func NewFDB(ttl time.Duration) *FDB {
 	return &FDB{
-		entries: make(map[string]*FDBEntry),
-		ttl:     ttl,
+		entries:    make(map[string]*FDBEntry),
+		ttl:        ttl,
+		maxEntries: DefaultMaxFDBEntries,
 	}
+}
+
+// SetMaxEntries configures the maximum number of entries allowed in the FDB.
+func (f *FDB) SetMaxEntries(max int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.maxEntries = max
+}
+
+// EvictExpired removes all non-static entries that have exceeded TTL. Returns number of evicted entries.
+func (f *FDB) EvictExpired() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.evictExpiredLocked()
+}
+
+func (f *FDB) evictExpiredLocked() int {
+	if f.ttl <= 0 {
+		return 0
+	}
+	now := time.Now()
+	evicted := 0
+	for k, e := range f.entries {
+		if !e.Static && now.Sub(e.UpdatedAt) > f.ttl {
+			delete(f.entries, k)
+			evicted++
+		}
+	}
+	return evicted
+}
+
+// Len returns the current number of entries in the FDB.
+func (f *FDB) Len() int {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return len(f.entries)
 }
 
 // Learn registers or refreshes a MAC address mapping to an endpoint.
@@ -39,6 +79,28 @@ func (f *FDB) Learn(mac net.HardwareAddr, ep Endpoint) {
 		entry.Endpoint = ep
 		entry.UpdatedAt = time.Now()
 		return
+	}
+
+	// If table reached max capacity, evict expired entries first
+	if f.maxEntries > 0 && len(f.entries) >= f.maxEntries {
+		f.evictExpiredLocked()
+	}
+
+	// If still at capacity, evict oldest non-static entry
+	if f.maxEntries > 0 && len(f.entries) >= f.maxEntries {
+		var oldestKey string
+		var oldestTime time.Time
+		for k, e := range f.entries {
+			if !e.Static {
+				if oldestKey == "" || e.UpdatedAt.Before(oldestTime) {
+					oldestKey = k
+					oldestTime = e.UpdatedAt
+				}
+			}
+		}
+		if oldestKey != "" {
+			delete(f.entries, oldestKey)
+		}
 	}
 
 	f.entries[key] = &FDBEntry{

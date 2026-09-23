@@ -185,11 +185,12 @@ func (c *Controller) Run(ctx context.Context, onAdd RouteAddFunc, onDelete Route
 			c.handleNodeAddOrUpdate(node, onAdd)
 		},
 		UpdateFunc: func(oldObj, newObj interface{}) {
-			node, ok := newObj.(*v1.Node)
-			if !ok || node == nil {
+			newNode, ok := newObj.(*v1.Node)
+			if !ok || newNode == nil {
 				return
 			}
-			c.handleNodeAddOrUpdate(node, onAdd)
+			oldNode, _ := oldObj.(*v1.Node)
+			c.handleNodeUpdate(oldNode, newNode, onAdd, onDelete)
 		},
 		DeleteFunc: func(obj interface{}) {
 			node, ok := obj.(*v1.Node)
@@ -207,7 +208,56 @@ func (c *Controller) Run(ctx context.Context, onAdd RouteAddFunc, onDelete Route
 		},
 	})
 
-	informer.Run(ctx.Done())
+	go informer.Run(ctx.Done())
+
+	if !cache.WaitForCacheSync(ctx.Done(), informer.HasSynced) {
+		fmt.Fprintf(os.Stderr, "[plaidd/k8s] Informer cache sync failed or context canceled\n")
+		return
+	}
+	fmt.Printf("[plaidd/k8s] Informer cache synchronized successfully\n")
+
+	<-ctx.Done()
+}
+
+func (c *Controller) handleNodeUpdate(oldNode, newNode *v1.Node, onAdd RouteAddFunc, onDelete RouteDeleteFunc) {
+	if newNode.Name == c.nodeName {
+		return
+	}
+
+	var oldCIDR, newCIDR string
+	if oldNode != nil {
+		oldCIDR = oldNode.Spec.PodCIDR
+		if oldCIDR == "" && len(oldNode.Spec.PodCIDRs) > 0 {
+			oldCIDR = oldNode.Spec.PodCIDRs[0]
+		}
+	}
+
+	newCIDR = newNode.Spec.PodCIDR
+	if newCIDR == "" && len(newNode.Spec.PodCIDRs) > 0 {
+		newCIDR = newNode.Spec.PodCIDRs[0]
+	}
+
+	var oldHostIP net.IP
+	if oldNode != nil {
+		oldHostIP = ExtractNodeIP(oldNode)
+	}
+	newHostIP := ExtractNodeIP(newNode)
+
+	// If CIDR changed, remove the old route first
+	if oldCIDR != "" && oldCIDR != newCIDR {
+		if _, oldSN, err := net.ParseCIDR(oldCIDR); err == nil && onDelete != nil {
+			onDelete(oldNode.Name, oldSN)
+		}
+	}
+
+	// If new CIDR and host IP exist, update/add route
+	if newCIDR != "" && newHostIP != nil {
+		if _, newSN, err := net.ParseCIDR(newCIDR); err == nil && onAdd != nil {
+			if oldCIDR != newCIDR || oldHostIP == nil || !oldHostIP.Equal(newHostIP) {
+				onAdd(newNode.Name, newSN, newHostIP)
+			}
+		}
+	}
 }
 
 func (c *Controller) handleNodeAddOrUpdate(node *v1.Node, onAdd RouteAddFunc) {

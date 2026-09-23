@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -15,6 +17,7 @@ import (
 	"plaid/pkg/api"
 	"plaid/pkg/bridge"
 	"plaid/pkg/filter"
+	"plaid/pkg/ipam"
 	"plaid/pkg/k8s"
 	"plaid/pkg/packet"
 	"plaid/pkg/slirp"
@@ -51,6 +54,7 @@ type Config struct {
 	Routes            string
 	Kubeconfig        string
 	NodeName          string
+	MTU               int
 }
 
 func main() {
@@ -71,6 +75,7 @@ func main() {
 	flag.StringVar(&cfg.Routes, "routes", "", "Initial overlay routes, comma-separated (e.g. '10.244.2.0/24=node.local')")
 	flag.StringVar(&cfg.Kubeconfig, "kubeconfig", "", "Path to kubeconfig file (Kubernetes mode only; defaults to in-cluster service account)")
 	flag.StringVar(&cfg.NodeName, "node-name", "", "Local node name (Kubernetes mode only; defaults to NODE_NAME env or hostname)")
+	flag.IntVar(&cfg.MTU, "mtu", 1450, "Effective MTU for container TAP interfaces and slirp (default: 1450, allowing 50B VXLAN overhead on 1500B host MTU)")
 
 	flag.Parse()
 
@@ -131,7 +136,7 @@ func NewPlaidDaemon(cfg Config) (*PlaidDaemon, error) {
 		fmt.Printf("[plaidd] Static mode active [NodeCIDR=%s]\n", cfg.NodeCIDR)
 	}
 
-	_, nodeNet, err := net.ParseCIDR(cfg.NodeCIDR)
+	nodeNet, err := ipam.ValidateNodeCIDR(cfg.NodeCIDR)
 	if err != nil {
 		return nil, fmt.Errorf("invalid node-cidr: %w", err)
 	}
@@ -139,6 +144,23 @@ func NewPlaidDaemon(cfg Config) (*PlaidDaemon, error) {
 	_, clusterNet, err := net.ParseCIDR(cfg.ClusterCIDR)
 	if err != nil {
 		return nil, fmt.Errorf("invalid cluster-cidr: %w", err)
+	}
+	if clusterNet.IP.To4() == nil {
+		return nil, fmt.Errorf("IPv6 is not supported; cluster CIDR %q must be IPv4", cfg.ClusterCIDR)
+	}
+
+	if cfg.MTU <= 0 {
+		if envMTU := os.Getenv("PLAID_MTU"); envMTU != "" {
+			if parsed, err := strconv.Atoi(envMTU); err == nil && parsed > 0 {
+				cfg.MTU = parsed
+			}
+		}
+	}
+	if cfg.MTU <= 0 {
+		cfg.MTU = 1450
+	}
+	if cfg.MTU < 576 || cfg.MTU > 65535 {
+		return nil, fmt.Errorf("invalid MTU %d: must be between 576 and 65535", cfg.MTU)
 	}
 
 	gwIP := net.ParseIP(cfg.GatewayIP)
@@ -205,7 +227,7 @@ func NewPlaidDaemon(cfg Config) (*PlaidDaemon, error) {
 			BinaryPath:          cfg.SlirpBin,
 			SocketPath:          cfg.SlirpSocket,
 			CIDR:                cfg.NodeCIDR,
-			MTU:                 1500,
+			MTU:                 cfg.MTU,
 			DisableDNS:          cfg.SlirpDisableDNS,
 			DisableHostLoopback: !cfg.SlirpHostLoopback,
 		}, b)
@@ -237,7 +259,9 @@ func NewPlaidDaemon(cfg Config) (*PlaidDaemon, error) {
 
 func (d *PlaidDaemon) Start(ctx context.Context) error {
 	// Initialize runtime dir, permissions, IPAM config, and binary
-	initRuntimeDir(d.cfg.SocketPath, d.cfg.NodeCIDR, d.cfg.GatewayIP)
+	if err := initRuntimeDir(d.cfg.SocketPath, d.cfg.NodeCIDR, d.cfg.GatewayIP); err != nil {
+		return fmt.Errorf("failed to initialize runtime dir: %w", err)
+	}
 
 	if d.overlay != nil {
 		if err := d.overlay.Start(ctx); err != nil {
@@ -340,6 +364,10 @@ func (d *PlaidDaemon) HandleRemoveEndpoint(req *api.Request) error {
 	}
 
 	err := d.bridge.RemoveEndpoint(epID)
+	if errors.Is(err, bridge.ErrEndpointNotFound) {
+		// Idempotent success per CNI specification
+		return nil
+	}
 	if err == nil {
 		fmt.Printf("[plaidd] Removed endpoint %s\n", epID)
 	}
@@ -422,6 +450,7 @@ func (d *PlaidDaemon) HandleGetStatus() (*api.Response, error) {
 		NodeCIDR:       d.cfg.NodeCIDR,
 		ClusterCIDR:    d.cfg.ClusterCIDR,
 		GatewayIP:      d.cfg.GatewayIP,
+		MTU:            d.cfg.MTU,
 		Endpoints:      epList,
 	}, nil
 }
@@ -482,43 +511,22 @@ func (d *PlaidDaemon) HandleListFilterRules() (*api.Response, error) {
 	}, nil
 }
 
-func initRuntimeDir(socketPath, nodeCIDR, gwIP string) {
+func initRuntimeDir(socketPath, nodeCIDR, gwIP string) error {
 	socketDir := filepath.Dir(socketPath)
-	_ = os.MkdirAll(socketDir, 0777)
+	if err := os.MkdirAll(socketDir, 0777); err != nil {
+		return fmt.Errorf("failed to create runtime socket directory %s: %w", socketDir, err)
+	}
 	_ = os.Chmod(socketDir, 0777)
 
-	ipamDir := filepath.Join(socketDir, "ipam")
-	_ = os.MkdirAll(ipamDir, 0777)
-	_ = os.Chmod(ipamDir, 0777)
-
-	// Calculate rangeStart (.4) and rangeEnd (.254)
-	_, ipNet, err := net.ParseCIDR(nodeCIDR)
-	if err == nil && ipNet.IP.To4() != nil {
-		ip4 := ipNet.IP.To4()
-		rangeStart := net.IPv4(ip4[0], ip4[1], ip4[2], 4).String()
-		rangeEnd := net.IPv4(ip4[0], ip4[1], ip4[2], 254).String()
-
-		ipamConf := fmt.Sprintf(`{
-  "cniVersion": "0.4.0",
-  "name": "plaid-ipam",
-  "ipam": {
-    "type": "host-local",
-    "dataDir": %q,
-    "ranges": [
-      [
-        {
-          "subnet": %q,
-          "rangeStart": %q,
-          "rangeEnd": %q,
-          "gateway": %q
-        }
-      ]
-    ]
-  }
-}`, ipamDir, nodeCIDR, rangeStart, rangeEnd, gwIP)
-
-		ipamFile := filepath.Join(socketDir, "ipam.json")
-		_ = os.WriteFile(ipamFile, []byte(ipamConf), 0666)
-		_ = os.Chmod(ipamFile, 0666)
+	ipamConf, err := ipam.BuildHostLocalIPAMConfig(socketDir, nodeCIDR, gwIP)
+	if err != nil {
+		return fmt.Errorf("failed to build host-local IPAM configuration: %w", err)
 	}
+
+	ipamFile := filepath.Join(socketDir, "ipam.json")
+	if err := os.WriteFile(ipamFile, ipamConf, 0666); err != nil {
+		return fmt.Errorf("failed to write IPAM config file %s: %w", ipamFile, err)
+	}
+	_ = os.Chmod(ipamFile, 0666)
+	return nil
 }

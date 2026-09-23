@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
 	"syscall"
 	"unsafe"
 )
@@ -132,7 +131,11 @@ func CreateAndConfigureTap(cfg TapConfig) (*os.File, error) {
 		var reqMTU ifreqInt
 		reqMTU.name = nameTo16(actualName)
 		reqMTU.val = int32(cfg.MTU)
-		_, _, _ = syscall.Syscall(syscall.SYS_IOCTL, uintptr(sock), uintptr(SIOCSIFMTU), uintptr(unsafe.Pointer(&reqMTU)))
+		_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(sock), uintptr(SIOCSIFMTU), uintptr(unsafe.Pointer(&reqMTU)))
+		if errno != 0 {
+			_ = syscall.Close(fd)
+			return nil, fmt.Errorf("ioctl SIOCSIFMTU (%d) failed on %s: %w", cfg.MTU, actualName, errno)
+		}
 	}
 
 	// 2. Set MAC
@@ -141,7 +144,11 @@ func CreateAndConfigureTap(cfg TapConfig) (*os.File, error) {
 		reqMAC.name = nameTo16(actualName)
 		reqMAC.addr.family = ARPHRD_ETHER
 		copy(reqMAC.addr.data[0:6], cfg.MAC)
-		_, _, _ = syscall.Syscall(syscall.SYS_IOCTL, uintptr(sock), uintptr(SIOCSIFHWADDR), uintptr(unsafe.Pointer(&reqMAC)))
+		_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(sock), uintptr(SIOCSIFHWADDR), uintptr(unsafe.Pointer(&reqMAC)))
+		if errno != 0 {
+			_ = syscall.Close(fd)
+			return nil, fmt.Errorf("ioctl SIOCSIFHWADDR (%s) failed on %s: %w", cfg.MAC, actualName, errno)
+		}
 	}
 
 	// 3. Set IP
@@ -150,7 +157,11 @@ func CreateAndConfigureTap(cfg TapConfig) (*os.File, error) {
 		reqAddr.name = nameTo16(actualName)
 		reqAddr.addr.Family = syscall.AF_INET
 		copy(reqAddr.addr.Addr[:], cfg.IP.To4())
-		_, _, _ = syscall.Syscall(syscall.SYS_IOCTL, uintptr(sock), uintptr(SIOCSIFADDR), uintptr(unsafe.Pointer(&reqAddr)))
+		_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(sock), uintptr(SIOCSIFADDR), uintptr(unsafe.Pointer(&reqAddr)))
+		if errno != 0 {
+			_ = syscall.Close(fd)
+			return nil, fmt.Errorf("ioctl SIOCSIFADDR (%s) failed on %s: %w", cfg.IP, actualName, errno)
+		}
 	}
 
 	// 4. Set Netmask
@@ -159,20 +170,32 @@ func CreateAndConfigureTap(cfg TapConfig) (*os.File, error) {
 		reqMask.name = nameTo16(actualName)
 		reqMask.addr.Family = syscall.AF_INET
 		copy(reqMask.addr.Addr[:], cfg.Mask)
-		_, _, _ = syscall.Syscall(syscall.SYS_IOCTL, uintptr(sock), uintptr(SIOCSIFNETMASK), uintptr(unsafe.Pointer(&reqMask)))
+		_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(sock), uintptr(SIOCSIFNETMASK), uintptr(unsafe.Pointer(&reqMask)))
+		if errno != 0 {
+			_ = syscall.Close(fd)
+			return nil, fmt.Errorf("ioctl SIOCSIFNETMASK failed on %s: %w", actualName, errno)
+		}
 	}
 
 	// 5. Bring TAP interface UP
 	var reqUp ifreq
 	reqUp.name = nameTo16(actualName)
 	reqUp.flags = IFF_UP | IFF_RUNNING
-	_, _, _ = syscall.Syscall(syscall.SYS_IOCTL, uintptr(sock), uintptr(SIOCSIFFLAGS), uintptr(unsafe.Pointer(&reqUp)))
+	_, _, errno = syscall.Syscall(syscall.SYS_IOCTL, uintptr(sock), uintptr(SIOCSIFFLAGS), uintptr(unsafe.Pointer(&reqUp)))
+	if errno != 0 {
+		_ = syscall.Close(fd)
+		return nil, fmt.Errorf("ioctl SIOCSIFFLAGS UP failed on %s: %w", actualName, errno)
+	}
 
 	// 6. Bring loopback up
 	var reqLo ifreq
 	reqLo.name = nameTo16("lo")
 	reqLo.flags = IFF_UP | IFF_RUNNING
-	_, _, _ = syscall.Syscall(syscall.SYS_IOCTL, uintptr(sock), uintptr(SIOCSIFFLAGS), uintptr(unsafe.Pointer(&reqLo)))
+	_, _, errno = syscall.Syscall(syscall.SYS_IOCTL, uintptr(sock), uintptr(SIOCSIFFLAGS), uintptr(unsafe.Pointer(&reqLo)))
+	if errno != 0 {
+		_ = syscall.Close(fd)
+		return nil, fmt.Errorf("ioctl SIOCSIFFLAGS UP failed on lo: %w", errno)
+	}
 
 	// 7. Add default route
 	if cfg.Gateway != nil && cfg.Gateway.To4() != nil {
@@ -185,8 +208,9 @@ func CreateAndConfigureTap(cfg TapConfig) (*os.File, error) {
 		rt.gateway.Family = syscall.AF_INET
 		copy(rt.gateway.Addr[:], cfg.Gateway.To4())
 		_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(sock), uintptr(SIOCADDRT), uintptr(unsafe.Pointer(&rt)))
-		if errno != 0 {
-			_ = exec.Command("ip", "route", "add", "default", "via", cfg.Gateway.String(), "dev", actualName).Run()
+		if errno != 0 && errno != syscall.EEXIST {
+			_ = syscall.Close(fd)
+			return nil, fmt.Errorf("ioctl SIOCADDRT default route via %s dev %s failed: %w", cfg.Gateway, actualName, errno)
 		}
 	}
 

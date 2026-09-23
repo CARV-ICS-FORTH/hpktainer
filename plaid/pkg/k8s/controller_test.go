@@ -160,4 +160,30 @@ func TestNodeEventHandlers(t *testing.T) {
 		t.Errorf("unexpected deleted route: %v", deletedRoutes["remote-node-1"])
 	}
 	mu.Unlock()
+
+	// 4. Peer node CIDR changed (handleNodeUpdate)
+	updatedPeerNode := &v1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "remote-node-1",
+		},
+		Spec: v1.NodeSpec{
+			PodCIDR: "10.244.3.0/24",
+		},
+		Status: v1.NodeStatus{
+			Addresses: []v1.NodeAddress{
+				{Type: v1.NodeInternalIP, Address: "192.168.64.20"},
+			},
+		},
+	}
+	delete(deletedRoutes, "remote-node-1")
+	ctrl.handleNodeUpdate(peerNode, updatedPeerNode, onAdd, onDelete)
+
+	mu.Lock()
+	if deletedRoutes["remote-node-1"] != "10.244.2.0/24" {
+		t.Errorf("expected old route 10.244.2.0/24 to be deleted on CIDR change, got %v", deletedRoutes["remote-node-1"])
+	}
+	if addedRoutes["remote-node-1"] != "10.244.3.0/24=192.168.64.20" {
+		t.Errorf("expected updated route 10.244.3.0/24=192.168.64.20, got %v", addedRoutes["remote-node-1"])
+	}
+	mu.Unlock()
 }

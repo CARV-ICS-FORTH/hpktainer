@@ -190,3 +190,84 @@ func TestMergePlaidOptions(t *testing.T) {
 		t.Errorf("expected 2 binds [/a:/a, /b:/b], got %v", merged.Binds)
 	}
 }
+
+func TestWorkloadArgPreservation(t *testing.T) {
+	// Diagnostic from expert review: exec alpine.sif program --bind app-value --ip app-address
+	args := []string{
+		"--bind", "/host:/cont",
+		"alpine.sif",
+		"program",
+		"--bind", "app-value",
+		"--ip", "app-address",
+		"-c", "config.yaml",
+	}
+
+	opts, flags, image, cmdArgs := parseWrapperArgs(args)
+
+	if image != "alpine.sif" {
+		t.Fatalf("expected image 'alpine.sif', got %q", image)
+	}
+	if opts.Bind != "/host:/cont" {
+		t.Errorf("expected wrapper bind '/host:/cont', got %q", opts.Bind)
+	}
+	if opts.IP != "" {
+		t.Errorf("expected wrapper IP to be empty, got stolen value %q", opts.IP)
+	}
+
+	expectedCmdArgs := []string{"program", "--bind", "app-value", "--ip", "app-address", "-c", "config.yaml"}
+	if strings.Join(cmdArgs, " ") != strings.Join(expectedCmdArgs, " ") {
+		t.Fatalf("expected workload args %v, got %v", expectedCmdArgs, cmdArgs)
+	}
+	_ = flags
+}
+
+func TestShortFlagContainDoesNotEatImage(t *testing.T) {
+	// In Apptainer, -c is --contain (boolean), not taking an argument!
+	args := []string{
+		"-c",
+		"alpine.sif",
+		"sh",
+	}
+
+	_, flags, image, cmdArgs := parseWrapperArgs(args)
+	if len(flags) != 1 || flags[0] != "-c" {
+		t.Errorf("expected flags ['-c'], got %v", flags)
+	}
+	if image != "alpine.sif" {
+		t.Errorf("expected image 'alpine.sif', got %q (did -c eat the image?)", image)
+	}
+	if len(cmdArgs) != 1 || cmdArgs[0] != "sh" {
+		t.Errorf("expected cmdArgs ['sh'], got %v", cmdArgs)
+	}
+}
+
+func TestExplicitDoubleDashBoundary(t *testing.T) {
+	args := []string{
+		"--ip", "10.244.1.50",
+		"--",
+		"alpine.sif",
+		"--ip", "workload-ip",
+	}
+
+	opts, _, image, cmdArgs := parseWrapperArgs(args)
+	if opts.IP != "10.244.1.50" {
+		t.Errorf("expected wrapper IP '10.244.1.50', got %q", opts.IP)
+	}
+	if image != "alpine.sif" {
+		t.Errorf("expected image 'alpine.sif', got %q", image)
+	}
+	if len(cmdArgs) != 2 || cmdArgs[0] != "--ip" || cmdArgs[1] != "workload-ip" {
+		t.Errorf("expected cmdArgs ['--ip', 'workload-ip'], got %v", cmdArgs)
+	}
+}
+
+func TestRandomID(t *testing.T) {
+	id1 := randomID("test")
+	id2 := randomID("test")
+	if id1 == id2 {
+		t.Errorf("expected random IDs to be distinct, got %q and %q", id1, id2)
+	}
+	if !strings.HasPrefix(id1, "test-") || len(id1) < 10 {
+		t.Errorf("unexpected ID format: %q", id1)
+	}
+}

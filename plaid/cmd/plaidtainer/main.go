@@ -1,11 +1,14 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,6 +17,14 @@ import (
 )
 
 const version = "0.1.0"
+
+func randomID(prefix string) string {
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("%s-%d", prefix, time.Now().UnixNano())
+	}
+	return fmt.Sprintf("%s-%s", prefix, hex.EncodeToString(b))
+}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -27,14 +38,27 @@ func main() {
 		os.Exit(1)
 	}
 
-	globalOpts, remaining := parsePlaidOptions(os.Args[1:])
-	if len(remaining) < 1 {
+	var globalOpts PlaidOptions
+	var cmd string
+	var args []string
+
+	startIdx := 1
+	for startIdx < len(os.Args) && strings.HasPrefix(os.Args[startIdx], "-") {
+		startIdx++
+	}
+	if startIdx > 1 {
+		globalOpts, _ = parsePlaidOptions(os.Args[1:startIdx])
+	}
+	if startIdx < len(os.Args) {
+		cmd = os.Args[startIdx]
+		args = os.Args[startIdx+1:]
+	} else if len(os.Args) > 1 {
+		cmd = os.Args[1]
+		args = os.Args[2:]
+	} else {
 		printUsage()
 		os.Exit(1)
 	}
-
-	cmd := remaining[0]
-	args := remaining[1:]
 
 	switch cmd {
 	case "version", "--version", "-v":
@@ -61,7 +85,7 @@ func main() {
 
 	default:
 		// Forward any other Apptainer command directly (build, inspect, pull, etc.)
-		code := runCommand(apptainerBin, remaining)
+		code := runCommand(apptainerBin, os.Args[1:])
 		os.Exit(code)
 	}
 }
@@ -89,20 +113,17 @@ func handleInstance(apptainerBin string, globalOpts PlaidOptions, args []string)
 }
 
 func handleInstanceStartOrRun(apptainerBin string, globalOpts PlaidOptions, action string, args []string) {
-	cmdOpts, remaining := parsePlaidOptions(args)
+	cmdOpts, flags, imagePath, remaining := parseWrapperArgs(args)
 	opts := mergePlaidOptions(globalOpts, cmdOpts)
 	opts.EnsureDefaults()
 
-	// Extract flags, image, and instance name
-	flags, posArgs := splitFlagsAndPositional(remaining)
-	if len(posArgs) < 2 {
+	if imagePath == "" || len(remaining) < 1 {
 		fmt.Fprintf(os.Stderr, "Usage: plaidtainer instance %s [options] <image> <instance-name> [args...]\n", action)
 		os.Exit(1)
 	}
 
-	imagePath := posArgs[0]
-	instanceName := posArgs[1]
-	instanceArgs := posArgs[2:]
+	instanceName := remaining[0]
+	instanceArgs := remaining[1:]
 
 	if opts.HostNetworking {
 		apptainerArgs := []string{"instance", action}
@@ -195,6 +216,13 @@ func handleInstanceStartOrRun(apptainerBin string, globalOpts PlaidOptions, acti
 		"--socket", opts.Socket,
 		"--container-id", instanceName,
 	}
+	effectiveMTU := opts.MTU
+	if effectiveMTU <= 0 && status != nil && status.MTU > 0 {
+		effectiveMTU = status.MTU
+	}
+	if effectiveMTU > 0 {
+		initArgs = append(initArgs, "--mtu", strconv.Itoa(effectiveMTU))
+	}
 
 	cmdInit := exec.Command(apptainerBin, initArgs...)
 	out, err := cmdInit.CombinedOutput()
@@ -214,37 +242,50 @@ func handleInstanceStartOrRun(apptainerBin string, globalOpts PlaidOptions, acti
 }
 
 func handleInstanceStop(apptainerBin string, globalOpts PlaidOptions, args []string) {
-	cmdOpts, remaining := parsePlaidOptions(args)
+	cmdOpts, flags, instanceName, remaining := parseWrapperArgs(args)
 	opts := mergePlaidOptions(globalOpts, cmdOpts)
 	opts.EnsureDefaults()
-	_, posArgs := splitFlagsAndPositional(remaining)
 
-	if len(posArgs) < 1 {
-		fmt.Fprintln(os.Stderr, "Usage: plaidtainer instance stop [options] <instance-name>")
-		os.Exit(1)
+	if instanceName == "" && len(remaining) == 0 {
+		// Passthrough commands like "instance stop -a"
+		stopArgs := append([]string{"instance", "stop"}, args...)
+		code := runCommand(apptainerBin, stopArgs)
+		os.Exit(code)
 	}
 
-	instanceName := posArgs[0]
+	target := instanceName
+	if target == "" && len(remaining) > 0 {
+		target = remaining[0]
+	}
 
-	// 1. Tell plaidd to remove endpoint
-	client := api.NewClient(opts.Socket)
-	_ = client.RemoveEndpoint(instanceName, instanceName)
-
-	// 2. Release IPAM allocation
-	_ = ipam.ReleaseIP(instanceName, opts.Socket)
-
-	// 3. Stop Apptainer instance
-	fmt.Printf("[plaidtainer] Stopping Apptainer instance %q...\n", instanceName)
-	stopArgs := append([]string{"instance", "stop"}, remaining...)
+	// 1. Stop Apptainer instance FIRST
+	fmt.Printf("[plaidtainer] Stopping Apptainer instance %q...\n", target)
+	var stopArgs []string
+	stopArgs = append([]string{"instance", "stop"}, flags...)
+	stopArgs = append(stopArgs, target)
+	if len(remaining) > 0 && target == instanceName {
+		stopArgs = append(stopArgs, remaining...)
+	}
 	code := runCommand(apptainerBin, stopArgs)
-	os.Exit(code)
+	if code != 0 {
+		fmt.Fprintf(os.Stderr, "Warning: apptainer instance stop exited with code %d\n", code)
+		os.Exit(code)
+	}
+
+	// 2. Only after instance has stopped, unregister endpoint from plaidd
+	client := api.NewClient(opts.Socket)
+	_ = client.RemoveEndpoint(target, target)
+
+	// 3. Release IPAM allocation
+	_ = ipam.ReleaseIP(target, opts.Socket)
+
+	os.Exit(0)
 }
 
 func handleExec(apptainerBin string, globalOpts PlaidOptions, args []string) {
-	cmdOpts, remaining := parsePlaidOptions(args)
+	cmdOpts, flags, image, cmdArgs := parseWrapperArgs(args)
 	opts := mergePlaidOptions(globalOpts, cmdOpts)
 	opts.EnsureDefaults()
-	flags, image, cmdArgs := splitImageAndCommand(remaining)
 
 	if image == "" || len(cmdArgs) == 0 {
 		// Passthrough or show apptainer exec help
@@ -254,7 +295,20 @@ func handleExec(apptainerBin string, globalOpts PlaidOptions, args []string) {
 
 	// Case A: target is an existing instance (e.g. instance://name)
 	if strings.HasPrefix(image, "instance://") {
-		passArgs := append([]string{"exec"}, remaining...)
+		var passArgs []string
+		passArgs = append(passArgs, "exec")
+		if opts.DNS != "" {
+			passArgs = append(passArgs, "--dns", opts.DNS)
+		}
+		for _, b := range opts.Binds {
+			passArgs = append(passArgs, "--bind", b)
+		}
+		if len(opts.Binds) == 0 && opts.Bind != "" {
+			passArgs = append(passArgs, "--bind", opts.Bind)
+		}
+		passArgs = append(passArgs, flags...)
+		passArgs = append(passArgs, image)
+		passArgs = append(passArgs, cmdArgs...)
 		code := runCommand(apptainerBin, passArgs)
 		os.Exit(code)
 	}
@@ -287,7 +341,7 @@ func handleExec(apptainerBin string, globalOpts PlaidOptions, args []string) {
 		os.Exit(1)
 	}
 
-	containerID := fmt.Sprintf("plaidtainer-exec-%d", time.Now().UnixNano()%10000000)
+	containerID := randomID("plaidtainer-exec")
 	ipStr := opts.IP
 	dynamicallyAllocated := false
 	if ipStr == "" {
@@ -340,14 +394,22 @@ func handleExec(apptainerBin string, globalOpts PlaidOptions, args []string) {
 	apptainerArgs = append(apptainerArgs, image)
 
 	// Wrap execution with plaid exec to configure TAP before running target command
-	apptainerArgs = append(apptainerArgs,
+	execArgs := []string{
 		opts.Binary, "exec",
 		"--ip", ipStr,
 		"--gateway", gwStr,
 		"--socket", opts.Socket,
 		"--container-id", containerID,
-		"--",
-	)
+	}
+	effectiveMTU := opts.MTU
+	if effectiveMTU <= 0 && status != nil && status.MTU > 0 {
+		effectiveMTU = status.MTU
+	}
+	if effectiveMTU > 0 {
+		execArgs = append(execArgs, "--mtu", strconv.Itoa(effectiveMTU))
+	}
+	execArgs = append(execArgs, "--")
+	apptainerArgs = append(apptainerArgs, execArgs...)
 	apptainerArgs = append(apptainerArgs, cmdArgs...)
 
 	code := runCommandWithCleanup(apptainerBin, apptainerArgs, cleanup)
@@ -355,10 +417,9 @@ func handleExec(apptainerBin string, globalOpts PlaidOptions, args []string) {
 }
 
 func handleRun(apptainerBin string, globalOpts PlaidOptions, args []string) {
-	cmdOpts, remaining := parsePlaidOptions(args)
+	cmdOpts, flags, image, cmdArgs := parseWrapperArgs(args)
 	opts := mergePlaidOptions(globalOpts, cmdOpts)
 	opts.EnsureDefaults()
-	flags, image, cmdArgs := splitImageAndCommand(remaining)
 
 	if image == "" {
 		code := runCommand(apptainerBin, append([]string{"run"}, args...))
@@ -392,7 +453,7 @@ func handleRun(apptainerBin string, globalOpts PlaidOptions, args []string) {
 		os.Exit(1)
 	}
 
-	containerID := fmt.Sprintf("plaidtainer-run-%d", time.Now().UnixNano()%10000000)
+	containerID := randomID("plaidtainer-run")
 	ipStr := opts.IP
 	dynamicallyAllocated := false
 	if ipStr == "" {
@@ -423,16 +484,12 @@ func handleRun(apptainerBin string, globalOpts PlaidOptions, args []string) {
 		}
 	}
 
+	// Use apptainer exec with plaid exec to initialize TAP before running target runscript/entrypoint
 	apptainerArgs := []string{
-		"run",
+		"exec",
 		"--net", "--network=none",
 		"--dns", dnsStr,
 		"--bind", filepath.Dir(opts.Socket),
-		"--env", "PLAID_IP=" + ipStr,
-		"--env", "PLAID_GATEWAY_IP=" + gwStr,
-		"--env", "PLAID_DNS_IP=" + dnsStr,
-		"--env", "PLAID_SOCKET_PATH=" + opts.Socket,
-		"--env", "PLAID_CONTAINER_ID=" + containerID,
 	}
 	if os.Geteuid() != 0 && !hasFakeroot(flags) {
 		apptainerArgs = append(apptainerArgs, "--fakeroot")
@@ -449,39 +506,63 @@ func handleRun(apptainerBin string, globalOpts PlaidOptions, args []string) {
 	apptainerArgs = append(apptainerArgs, flags...)
 	apptainerArgs = append(apptainerArgs, image)
 
-	if len(cmdArgs) > 0 {
-		// Use plaid exec to initialize TAP and run user command
-		apptainerArgs = append(apptainerArgs,
-			opts.Binary, "exec",
-			"--ip", ipStr,
-			"--gateway", gwStr,
-			"--socket", opts.Socket,
-			"--container-id", containerID,
-			"--",
-		)
-		apptainerArgs = append(apptainerArgs, cmdArgs...)
+	// Wrap execution with plaid exec to configure TAP before running target runscript
+	execCommand := []string{
+		opts.Binary, "exec",
+		"--ip", ipStr,
+		"--gateway", gwStr,
+		"--socket", opts.Socket,
+		"--container-id", containerID,
 	}
+	effectiveMTU := opts.MTU
+	if effectiveMTU <= 0 && status != nil && status.MTU > 0 {
+		effectiveMTU = status.MTU
+	}
+	if effectiveMTU > 0 {
+		execCommand = append(execCommand, "--mtu", strconv.Itoa(effectiveMTU))
+	}
+	execCommand = append(execCommand, "--", "/.singularity.d/runscript")
+	execCommand = append(execCommand, cmdArgs...)
+	apptainerArgs = append(apptainerArgs, execCommand...)
 
 	code := runCommandWithCleanup(apptainerBin, apptainerArgs, cleanup)
 	os.Exit(code)
 }
 
 func handleShell(apptainerBin string, globalOpts PlaidOptions, args []string) {
-	cmdOpts, remaining := parsePlaidOptions(args)
+	cmdOpts, flags, target, _ := parseWrapperArgs(args)
 	opts := mergePlaidOptions(globalOpts, cmdOpts)
 	opts.EnsureDefaults()
-	flags, posArgs := splitFlagsAndPositional(remaining)
 
-	if len(posArgs) == 0 {
+	if target == "" {
 		code := runCommand(apptainerBin, append([]string{"shell"}, args...))
 		os.Exit(code)
 	}
 
-	target := posArgs[0]
 	if strings.HasPrefix(target, "instance://") || opts.HostNetworking {
-		apptainerArgs := append([]string{"shell"}, remaining...)
+		apptainerArgs := append([]string{"shell"}, args...)
 		code := runCommand(apptainerBin, apptainerArgs)
 		os.Exit(code)
+	}
+
+	// Determine shell binary to use
+	shellBin := ""
+	for i := 0; i < len(flags); i++ {
+		if flags[i] == "--shell" && i+1 < len(flags) {
+			shellBin = flags[i+1]
+			break
+		}
+		if strings.HasPrefix(flags[i], "--shell=") {
+			shellBin = strings.TrimPrefix(flags[i], "--shell=")
+			break
+		}
+	}
+	if shellBin == "" {
+		if envShell := os.Getenv("SHELL"); envShell != "" {
+			shellBin = envShell
+		} else {
+			shellBin = "/bin/sh"
+		}
 	}
 
 	// Plaid User-Space Networking
@@ -492,7 +573,7 @@ func handleShell(apptainerBin string, globalOpts PlaidOptions, args []string) {
 		os.Exit(1)
 	}
 
-	containerID := fmt.Sprintf("plaidtainer-shell-%d", time.Now().UnixNano()%10000000)
+	containerID := randomID("plaidtainer-shell")
 	ipStr := opts.IP
 	dynamicallyAllocated := false
 	if ipStr == "" {
@@ -544,15 +625,22 @@ func handleShell(apptainerBin string, globalOpts PlaidOptions, args []string) {
 	}
 	apptainerArgs = append(apptainerArgs, flags...)
 	apptainerArgs = append(apptainerArgs, target)
-	apptainerArgs = append(apptainerArgs,
+	execArgs := []string{
 		opts.Binary, "exec",
 		"--ip", ipStr,
 		"--gateway", gwStr,
 		"--socket", opts.Socket,
 		"--container-id", containerID,
-		"--",
-		"/bin/sh",
-	)
+	}
+	effectiveMTU := opts.MTU
+	if effectiveMTU <= 0 && status != nil && status.MTU > 0 {
+		effectiveMTU = status.MTU
+	}
+	if effectiveMTU > 0 {
+		execArgs = append(execArgs, "--mtu", strconv.Itoa(effectiveMTU))
+	}
+	execArgs = append(execArgs, "--", shellBin)
+	apptainerArgs = append(apptainerArgs, execArgs...)
 
 	code := runCommandWithCleanup(apptainerBin, apptainerArgs, cleanup)
 	os.Exit(code)
@@ -629,8 +717,8 @@ func splitImageAndCommand(args []string) (flags []string, image string, cmdArgs 
 func takesArg(flag string) bool {
 	knownValFlags := map[string]bool{
 		"-B": true, "--bind": true,
-		"-b": true,
-		"-c": true, "--cwd": true, "--pwd": true,
+		"-b":    true,
+		"--cwd": true, "--pwd": true,
 		"-H": true, "--home": true,
 		"-W": true, "--workdir": true,
 		"-S": true, "--scratch": true,
@@ -653,6 +741,7 @@ func takesArg(flag string) bool {
 		"--memory-swap":        true,
 		"--pids-limit":         true,
 		"--pem-path":           true,
+		"--shell":              true,
 	}
 	return knownValFlags[flag]
 }
