@@ -1,4 +1,5 @@
 #!/bin/bash
+set -euo pipefail
 
 # Redirect all stdout and stderr to /var/log/entrypoint.log while keeping terminal output
 mkdir -p /var/log /tmp/.skiff/.apptainer/tmp /root/.skiff/.apptainer/cache
@@ -6,7 +7,7 @@ exec > >(tee -a /var/log/entrypoint.log) 2>&1
 
 # Default values if not provided
 HOST_IP=${HOST_IP:-$(ip route get 1 | awk '{print $7; exit}')}
-CONTROLLER_IP=${CONTROLLER_IP:-$HOST_IP}
+SKIFF_ROLE=${SKIFF_ROLE:-controller}
 
 echo "Starting Skiff Bubble..."
 echo "  Public IP:     ${HOST_IP}"
@@ -18,22 +19,33 @@ sysctl -w net.ipv4.ip_forward=1
 
 # Wait for tap0 interface to appear (created by slirp4netns)
 echo "Waiting for tap0 interface..."
+TAP_WAIT=0
+TAP_TIMEOUT=30
 while ! ip link show tap0 >/dev/null 2>&1; do
+    if [ "$TAP_WAIT" -ge "$TAP_TIMEOUT" ]; then
+        echo "ERROR: Timed out waiting for tap0 interface after ${TAP_TIMEOUT}s" >&2
+        exit 1
+    fi
     sleep 0.1
+    TAP_WAIT=$((TAP_WAIT + 1))
 done
+
 # Ensure it is up
 ip link set tap0 up
 
 # Add Host IP as secondary address to tap0
-ip addr add ${HOST_IP}/32 dev tap0 2>/dev/null || true
+ip addr add "${HOST_IP}/32" dev tap0 2>/dev/null || true
+
+K3S_PID=""
+CSR_SIGN_PID=""
 
 # Start K3s if Controller
 if [ "$SKIFF_ROLE" = "controller" ]; then
     echo "Starting K3s Server..."
     k3s server \
       --bind-address 0.0.0.0 \
-      --advertise-address ${HOST_IP} \
-      --tls-san ${HOST_IP} \
+      --advertise-address "${HOST_IP}" \
+      --tls-san "${HOST_IP}" \
       --tls-san 0.0.0.0 \
       --tls-san 127.0.0.1 \
       --tls-san localhost \
@@ -51,14 +63,19 @@ if [ "$SKIFF_ROLE" = "controller" ]; then
       --kube-apiserver-arg=kubelet-certificate-authority=/var/lib/rancher/k3s/server/tls/server-ca.crt \
       --kube-apiserver-arg=kubelet-preferred-address-types=InternalIP,ExternalIP,Hostname \
       >> /var/log/k3s.log 2>&1 &
+    K3S_PID=$!
     
-    # Wait for K3s to create kubeconfig and node-token
+    # Wait for K3s to initialize kubeconfig
     echo "Waiting for K3s to initialize..."
+    K3S_WAIT=0
+    K3S_TIMEOUT=120
     while [ ! -f /etc/rancher/k3s/k3s.yaml ]; do
+        if [ "$K3S_WAIT" -ge "$K3S_TIMEOUT" ]; then
+            echo "ERROR: Timed out waiting for k3s server to initialize after ${K3S_TIMEOUT}s" >&2
+            exit 1
+        fi
         sleep 1
-    done
-    while [ ! -f /var/lib/rancher/k3s/server/node-token ]; do
-        sleep 1
+        K3S_WAIT=$((K3S_WAIT + 1))
     done
     
     # Export server-ca.crt to shared directory for node certificates FIRST (CA key is NOT exported)
@@ -68,15 +85,13 @@ if [ "$SKIFF_ROLE" = "controller" ]; then
     chmod 644 /var/lib/skiff/tls/server-ca.crt.tmp
     mv /var/lib/skiff/tls/server-ca.crt.tmp /var/lib/skiff/tls/server-ca.crt
 
-    # Copy kubeconfig and node-token to shared directory AFTER server-ca is ready
-    echo "Copying kubeconfig and node-token to /var/lib/skiff..."
+    # Copy kubeconfig to shared directory AFTER server-ca is ready
+    echo "Copying kubeconfig to /var/lib/skiff..."
     cp /etc/rancher/k3s/k3s.yaml /var/lib/skiff/kubeconfig.tmp
     # Replace 0.0.0.0 or 127.0.0.1 in kubeconfig server URL with actual HOST_IP
     sed -i "s|https://0.0.0.0:6443|https://${HOST_IP}:6443|g" /var/lib/skiff/kubeconfig.tmp
     sed -i "s|https://127.0.0.1:6443|https://${HOST_IP}:6443|g" /var/lib/skiff/kubeconfig.tmp
-    cp /var/lib/rancher/k3s/server/node-token /var/lib/skiff/node-token.tmp
-    chmod 600 /var/lib/skiff/kubeconfig.tmp /var/lib/skiff/node-token.tmp
-    mv /var/lib/skiff/node-token.tmp /var/lib/skiff/node-token
+    chmod 600 /var/lib/skiff/kubeconfig.tmp
     mv /var/lib/skiff/kubeconfig.tmp /var/lib/skiff/kubeconfig
 
     # Make CoreDNS inherit the bubble resolver instead of the cluster DNS service IP.
@@ -155,13 +170,15 @@ EOF
             sleep 1
         done
     ) &
+    CSR_SIGN_PID=$!
 fi
 
-# Wait for kubeconfig, node-token, and server-ca, ensuring server-ca matches kubeconfig's cluster CA
-echo "Waiting for /var/lib/skiff/kubeconfig, /var/lib/skiff/node-token, and matching server-ca..."
-while true; do
-  if [ -f /var/lib/skiff/kubeconfig ] && [ -f /var/lib/skiff/node-token ] && \
-     [ -f /var/lib/skiff/tls/server-ca.crt ]; then
+# Wait for kubeconfig and server-ca, ensuring server-ca matches kubeconfig's cluster CA
+echo "Waiting for /var/lib/skiff/kubeconfig and matching server-ca..."
+CA_WAIT=0
+CA_TIMEOUT=120
+while [ "$CA_WAIT" -lt "$CA_TIMEOUT" ]; do
+  if [ -f /var/lib/skiff/kubeconfig ] && [ -f /var/lib/skiff/tls/server-ca.crt ]; then
     KUBECONFIG_CA_HASH=$(grep 'certificate-authority-data:' /var/lib/skiff/kubeconfig 2>/dev/null | awk '{print $2}' | base64 -d 2>/dev/null | sha256sum | awk '{print $1}')
     SERVER_CA_HASH=$(sha256sum /var/lib/skiff/tls/server-ca.crt 2>/dev/null | awk '{print $1}')
     if [ -n "$KUBECONFIG_CA_HASH" ] && [ -n "$SERVER_CA_HASH" ] && [ "$KUBECONFIG_CA_HASH" = "$SERVER_CA_HASH" ]; then
@@ -169,7 +186,13 @@ while true; do
     fi
   fi
   sleep 1
+  CA_WAIT=$((CA_WAIT + 1))
 done
+
+if [ "$CA_WAIT" -ge "$CA_TIMEOUT" ]; then
+  echo "ERROR: Timed out waiting for /var/lib/skiff/kubeconfig and matching server-ca after ${CA_TIMEOUT}s" >&2
+  exit 1
+fi
 
 # Generate per-node webhook certificate for skifflet with node IP SAN via CSR signed by controller
 NODE_NAME="$(hostname)"
@@ -222,47 +245,101 @@ chmod 600 "${NODE_CERT_DIR}/kubelet.crt"
 # Wait for kube-dns service (Controller creates it via K3s, Nodes wait for it)
 echo "Waiting for kube-dns service..."
 export KUBECONFIG=/var/lib/skiff/kubeconfig
+DNS_WAIT=0
+DNS_TIMEOUT=120
 while ! k3s kubectl get service -n kube-system kube-dns >/dev/null 2>&1; do
-  sleep 1
+    if [ "$DNS_WAIT" -ge "$DNS_TIMEOUT" ]; then
+        echo "ERROR: Timed out waiting for kube-dns service after ${DNS_TIMEOUT}s" >&2
+        exit 1
+    fi
+    sleep 1
+    DNS_WAIT=$((DNS_WAIT + 1))
 done
 
 echo "Starting skifflet..."
 # Using --apptainer=plaidtainer to use our networking wrapper
-
-PAUSE_IMAGE=""
+PAUSE_IMAGE_OPT=()
+if [ -n "${PAUSE_IMAGE:-}" ]; then
+    PAUSE_IMAGE_OPT=(--pause-image="${PAUSE_IMAGE}")
+fi
 
 KUBECONFIG=/var/lib/skiff/kubeconfig \
 APISERVER_KEY_LOCATION="${NODE_CERT_DIR}/kubelet.key" \
 APISERVER_CERT_LOCATION="${NODE_CERT_DIR}/kubelet.crt" \
-VKUBELET_ADDRESS=${HOST_IP} \
+VKUBELET_ADDRESS="${HOST_IP}" \
 skifflet \
   --apptainer=plaidtainer \
-  --nodename=$(hostname) \
+  --nodename="$(hostname)" \
   --disable-taint=true \
-  ${PAUSE_IMAGE:+--pause-image=$PAUSE_IMAGE} \
+  "${PAUSE_IMAGE_OPT[@]}" \
   >> /var/log/skifflet.log 2>&1 &
+SKIFFLET_PID=$!
 
 echo "Starting plaidd..."
 mkdir -p /run/plaid
 plaidd \
   --kubeconfig=/var/lib/skiff/kubeconfig \
-  --node-name=$(hostname) \
+  --node-name="$(hostname)" \
   >> /var/log/plaidd.log 2>&1 &
+PLAIDD_PID=$!
 
 echo "Starting kube-proxy..."
 kube-proxy \
   --kubeconfig /var/lib/skiff/kubeconfig \
   --proxy-mode iptables \
-  --hostname-override $(hostname) \
+  --hostname-override "$(hostname)" \
   --conntrack-max-per-core=0 \
   --conntrack-tcp-timeout-established=0 \
   --conntrack-tcp-timeout-close-wait=0 \
   >> /var/log/kube-proxy.log 2>&1 &
+KUBE_PROXY_PID=$!
 
-# Keep the container running
-if [ "$#" -eq 0 ]; then
-    # Default to bash
-    exec /bin/bash
-else
+shutdown_daemons() {
+    trap - EXIT INT TERM
+    echo "Terminating cluster daemons..."
+    kill -TERM "$SKIFFLET_PID" "$PLAIDD_PID" "$KUBE_PROXY_PID" 2>/dev/null || true
+    if [ -n "$K3S_PID" ]; then
+        kill -TERM "$K3S_PID" 2>/dev/null || true
+    fi
+    if [ -n "$CSR_SIGN_PID" ]; then
+        kill -TERM "$CSR_SIGN_PID" 2>/dev/null || true
+    fi
+    sleep 2
+    kill -KILL "$SKIFFLET_PID" "$PLAIDD_PID" "$KUBE_PROXY_PID" 2>/dev/null || true
+    if [ -n "$K3S_PID" ]; then
+        kill -KILL "$K3S_PID" 2>/dev/null || true
+    fi
+    if [ -n "$CSR_SIGN_PID" ]; then
+        kill -KILL "$CSR_SIGN_PID" 2>/dev/null || true
+    fi
+    wait 2>/dev/null || true
+}
+trap shutdown_daemons EXIT INT TERM
+
+# If explicit arguments were passed, run them; otherwise run daemon supervisor loop
+if [ "$#" -gt 0 ]; then
     exec "$@"
 fi
+
+echo "All daemons started successfully. Supervising cluster processes..."
+while true; do
+    if [ "$SKIFF_ROLE" = "controller" ] && [ -n "$K3S_PID" ]; then
+        if ! kill -0 "$K3S_PID" 2>/dev/null; then
+            echo "FATAL: k3s server (PID $K3S_PID) exited unexpectedly!" >&2
+            exit 1
+        fi
+    fi
+    if ! kill -0 "$SKIFFLET_PID" 2>/dev/null; then
+        echo "FATAL: skifflet (PID $SKIFFLET_PID) exited unexpectedly!" >&2
+        exit 1
+    fi
+    if ! kill -0 "$PLAIDD_PID" 2>/dev/null; then
+        echo "FATAL: plaidd (PID $PLAIDD_PID) exited unexpectedly!" >&2
+        exit 1
+    fi
+    if ! kill -0 "$KUBE_PROXY_PID" 2>/dev/null; then
+        echo "FATAL: kube-proxy (PID $KUBE_PROXY_PID) exited unexpectedly!" >&2
+        exit 1
+    fi
+    sleep 2
+done

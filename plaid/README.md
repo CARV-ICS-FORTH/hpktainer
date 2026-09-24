@@ -216,7 +216,7 @@ plaidctl route add 10.244.3.0/24 192.168.64.20
 
 # Manage packet filter rules
 plaidctl filter list
-plaidctl filter add --src 10.244.1.0/24 --action DROP
+plaidctl filter del <rule-id>
 ```
 
 ---
@@ -232,26 +232,26 @@ go test -v ./...
 ```
 
 ### 2. Multi-Node VM Test Environment
-Plaid includes an automated 2-node cluster (Controller `10.244.1.0/24` + Worker Node `10.244.2.0/24`) provisioned with Vagrant in `vagrant/`:
+Plaid includes an automated 2-node cluster (Controller `10.244.1.0/24` + Worker Node `10.244.2.0/24`) provisioned with Vagrant in `test/vagrant/`:
 
 ```bash
-cd vagrant
+cd test/vagrant
 vagrant up
 ```
 
 ### 3. Individual Test Suites
 
-- **Privileged CNI Suite (`test_e2e_apptainer.sh`)**:
+- **Privileged CNI Suite (`test/test-plaid-e2e.sh`)**:
   Tests standard root CNI container networking (`sudo apptainer --network=plaid`):
   ```bash
-  vagrant ssh controller -c "sudo bash /home/vagrant/test_e2e_apptainer.sh"
+  vagrant ssh controller -c "sudo bash /home/vagrant/skiff/test/test-plaid-e2e.sh"
   ```
   Verifies intra-node communication, cross-host VXLAN (UDP 8472), host loopback access, and outbound internet access.
 
-- **Unprivileged Apptainer Suite (`test_unprivileged_apptainer.sh`)**:
+- **Unprivileged Apptainer Suite (`test/test-plaid-unprivileged.sh`)**:
   Tests rootless workflows without `sudo` as regular user `vagrant`:
   ```bash
-  vagrant ssh controller -c "bash /home/vagrant/test_unprivileged_apptainer.sh"
+  vagrant ssh controller -c "bash /home/vagrant/skiff/test/test-plaid-unprivileged.sh"
   ```
   Verifies:
   - **Persistent Instances**: `plaidtainer instance start / run / stop` with dynamic IPAM on stock `alpine.sif`.
@@ -262,10 +262,10 @@ vagrant up
   - **Internet NAT**: Outbound HTTP traffic via `slirp4netns`.
   - **Inter-Node Overlay**: Cross-host VXLAN ping between unprivileged containers on `controller` and `node`.
 
-### 4. Master Unattended Test Suite (`test_all.sh`)
+### 4. Master Unattended Test Suite (`test/test-plaid-all.sh`)
 To run **all workflows unattended in a single run** and generate a consolidated report card:
 ```bash
-vagrant ssh controller -c "bash /home/vagrant/test_all.sh"
+vagrant ssh controller -c "bash /home/vagrant/skiff/test/test-plaid-all.sh"
 ```
 
 The master script automatically verifies prerequisites, runs both the privileged and unprivileged test suites across nodes, cleans up all instances, and produces an execution matrix:

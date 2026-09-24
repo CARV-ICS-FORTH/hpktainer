@@ -12,12 +12,12 @@ NS_ADDR="$CIDR_PREFIX.100"
 
 # Detect Host IP (first non-loopback)
 HOST_IP_DETECTED=$(ip route get 1 | awk '{print $7; exit}')
-# Use provided CONTROLLER_IP or default to detected host IP
-CONTROLLER_IP=${CONTROLLER_IP:-$HOST_IP_DETECTED}
 
 SOCAT_PID_6443=""
 SOCAT_PID_10250=""
 SLIRP_PID=""
+SLIRP_SOCK="$HOME/.skiff/slirp-${NAME}.sock"
+SKIFF_ROLE=${SKIFF_ROLE:-controller}
 
 start_socat_relays() {
     if ! command -v socat >/dev/null 2>&1; then
@@ -25,18 +25,22 @@ start_socat_relays() {
         return 0
     fi
 
-    socat TCP4-LISTEN:6443,bind="${HOST_IP_DETECTED}",reuseaddr,fork TCP4:127.0.0.1:6443 &
-    SOCAT_PID_6443=$!
+    # Only controller relays K3s 6443
+    if [ "$SKIFF_ROLE" = "controller" ]; then
+        socat TCP4-LISTEN:6443,bind="${HOST_IP_DETECTED}",reuseaddr,fork TCP4:127.0.0.1:6443 &
+        SOCAT_PID_6443=$!
+        echo "Started K3s socat relay on ${HOST_IP_DETECTED}:6443/tcp"
+    fi
 
+    # All nodes relay kubelet 10250
     socat TCP4-LISTEN:10250,bind="${HOST_IP_DETECTED}",reuseaddr,fork TCP4:127.0.0.1:10250 &
     SOCAT_PID_10250=$!
-
-    echo "Started socat relays on ${HOST_IP_DETECTED} (6443/tcp, 10250/tcp)"
+    echo "Started kubelet socat relay on ${HOST_IP_DETECTED}:10250/tcp"
 }
 
 cleanup() {
     trap - EXIT INT TERM
-    echo "Cleaning up..."
+    echo "Cleaning up Bubble $NAME..."
     if [[ -n ${SOCAT_PID_6443:-} ]]; then
         kill "$SOCAT_PID_6443" 2>/dev/null || true
         wait "$SOCAT_PID_6443" 2>/dev/null || true
@@ -51,7 +55,7 @@ cleanup() {
         wait "$SLIRP_PID" 2>/dev/null || true
     fi
     apptainer instance stop "$NAME" 2>/dev/null || true
-    [ -e "$NAME-slirp4netns.sock" ] && rm -f "$NAME-slirp4netns.sock" || true
+    rm -f "$SLIRP_SOCK" 2>/dev/null || true
 }
 
 trap cleanup EXIT INT TERM
@@ -59,14 +63,17 @@ trap cleanup EXIT INT TERM
 mkdir -p "$HOME/.skiff"
 mkdir -p "$HOME/.skiff/.apptainer/tmp"
 mkdir -p "$HOME/.skiff/.apptainer/cache"
+mkdir -p "/tmp/.skiff/.apptainer/tmp"
+rm -f "$SLIRP_SOCK"
+
 echo "Starting Bubble $NAME..."
+echo "  Role: $SKIFF_ROLE"
 echo "  CIDR: $CIDR"
 echo "  Host IP: $HOST_IP_DETECTED"
-echo "  Controller IP: $CONTROLLER_IP"
 
 # Determine image source
 if [ "${SKIFF_DEV:-0}" = "1" ]; then
-    echo "  Development mode: using local images"
+    echo "  Development mode: using local image"
     IMAGE_DIR="$HOME/.skiff/images"
     IMAGE_SIF="$IMAGE_DIR/skiff-bubble.sif"
     
@@ -80,29 +87,7 @@ else
     BUBBLE_IMAGE="docker://docker.io/chazapis/skiff-bubble:latest"
 fi
 
-# Ensure required Apptainer cache and tmp directories exist
-mkdir -p /tmp/.skiff/.apptainer/tmp "$HOME/.skiff/.apptainer/cache" "$HOME/.apptainer/cache"
-
-BIN_BINDS=()
-for b in skifflet plaidd plaid plaidctl plaidtainer; do
-    if [ -f "$HOME/.skiff/bin/$b" ]; then
-        BIN_BINDS+=(
-            --bind "$HOME/.skiff/bin/$b:/usr/bin/$b"
-            --bind "$HOME/.skiff/bin/$b:/usr/local/bin/$b"
-        )
-    fi
-done
-if [ -f "$HOME/skiff/scripts/entrypoint.sh" ]; then
-    BIN_BINDS+=(
-        --bind "$HOME/skiff/scripts/entrypoint.sh:/entrypoint.sh"
-    )
-elif [ -f "$HOME/skiff/images/skiff-bubble/entrypoint.sh" ]; then
-    BIN_BINDS+=(
-        --bind "$HOME/skiff/images/skiff-bubble/entrypoint.sh:/entrypoint.sh"
-    )
-fi
-
-# Pass IPs as env variables
+# Pass IPs as env variables - pure image execution without host binary overrides
 apptainer instance run \
 	--fakeroot \
 	--no-mount home \
@@ -113,23 +98,21 @@ apptainer instance run \
 	--dns "$DNS_ADDR" \
 	--bind "$HOME/.skiff:/var/lib/skiff" \
     --bind "$HOME/.skiff:/root/.skiff" \
-    --bind "$HOME/.apptainer/cache:/root/.apptainer/cache" \
-    "${BIN_BINDS[@]}" \
+    --bind "$HOME/.skiff/.apptainer/cache:/root/.apptainer/cache" \
     --env APPTAINER_CACHEDIR=/root/.skiff/.apptainer/cache \
     --env APPTAINER_TMPDIR=/tmp/.skiff/.apptainer/tmp \
     --env SINGULARITY_CACHEDIR=/root/.skiff/.apptainer/cache \
     --env SINGULARITY_TMPDIR=/tmp/.skiff/.apptainer/tmp \
     --env TMPDIR=/tmp/.skiff/.apptainer/tmp \
 	--env HOST_IP="$HOST_IP_DETECTED" \
-	--env CONTROLLER_IP="$CONTROLLER_IP" \
+	--env SKIFF_ROLE="$SKIFF_ROLE" \
 	--env SKIFF_DEV="${SKIFF_DEV:-0}" \
-    --env BUBBLE_ID="$BUBBLE_ID" \
 	"$BUBBLE_IMAGE" \
 	"$NAME"
 
 PID=""
-for i in {1..10}; do
-    PID=$(apptainer instance list -j "$NAME" 2>/dev/null | jq -r '.instances[]? | select(.instance=="'"$NAME"'") | .pid // empty')
+for i in {1..20}; do
+    PID=$(apptainer instance list -j "$NAME" 2>/dev/null | jq -r '.instances[]? | select(.instance=="'"$NAME"'") | .pid // empty' 2>/dev/null || true)
     if [ -n "$PID" ] && [ "$PID" != "null" ]; then
         break
     fi
@@ -142,7 +125,7 @@ if [ -z "$PID" ] || [ "$PID" = "null" ]; then
 fi
 
 # Userlevel networking
-slirp4netns --configure --cidr="$CIDR/24" --mtu=1500 --api-socket "$NAME-slirp4netns.sock" "$PID" tap0 &
+slirp4netns --configure --cidr="$CIDR/24" --mtu=1500 --api-socket "$SLIRP_SOCK" "$PID" tap0 &
 SLIRP_PID=$!
 
 # Forward ports based on Role
@@ -150,32 +133,53 @@ SLIRP_PID=$!
 # 10250: Kubelet (TCP) - All
 # 6443: K3s API (TCP) - Controller
 
-# Construct JSON for hostfwd
-# Always forward 8472 UDP to the container's Host IP address (which Plaid listens on)
 FWD_JSON_VXLAN='{"execute": "add_hostfwd", "arguments": {"proto": "udp", "host_addr": "0.0.0.0", "host_port": 8472, "guest_addr": "'$HOST_IP_DETECTED'", "guest_port": 8472}}'
-
-# Always forward 10250 TCP (kubelet)
 FWD_JSON_KUBELET='{"execute": "add_hostfwd", "arguments": {"proto": "tcp", "host_addr": "127.0.0.1", "host_port": 10250, "guest_addr": "'$NS_ADDR'", "guest_port": 10250}}'
 
-SKIFF_ROLE=${SKIFF_ROLE:-controller}
-
 if [ "$SKIFF_ROLE" = "controller" ]; then
-    # Add K3s 6443
     FWD_JSON_K3S='{"execute": "add_hostfwd", "arguments": {"proto": "tcp", "host_addr": "127.0.0.1", "host_port": 6443, "guest_addr": "'$NS_ADDR'", "guest_port": 6443}}'
 fi
 
-# Wait for slirp4netns socket to be ready and accept connections
-while ! echo -n "$FWD_JSON_VXLAN" | nc -U "$NAME-slirp4netns.sock" 2>/dev/null; do
-    sleep 0.5
-done
-sleep 0.1
-echo -n "$FWD_JSON_KUBELET" | nc -U "$NAME-slirp4netns.sock"
+send_slirp_command() {
+    local cmd="$1"
+    local desc="$2"
+    local wait_time=0
+    local max_wait=30
+    local resp=""
+    while [ "$wait_time" -lt "$max_wait" ]; do
+        if [ -S "$SLIRP_SOCK" ]; then
+            resp=$(printf '%s' "$cmd" | nc -U "$SLIRP_SOCK" 2>/dev/null || true)
+            if echo "$resp" | grep -q '"return"'; then
+                return 0
+            fi
+            if echo "$resp" | grep -q '"error"'; then
+                echo "Error configuring slirp forwarding for $desc: $resp" >&2
+                return 1
+            fi
+        fi
+        sleep 0.5
+        wait_time=$((wait_time + 1))
+    done
+    echo "Error: Timed out configuring slirp host forwarding for $desc (last response: $resp)" >&2
+    return 1
+}
+
+echo "Configuring slirp4netns host forwarding..."
+send_slirp_command "$FWD_JSON_VXLAN" "VXLAN (UDP 8472)"
+send_slirp_command "$FWD_JSON_KUBELET" "Kubelet (TCP 10250)"
 if [ "$SKIFF_ROLE" = "controller" ]; then
-    sleep 0.1
-    echo -n "$FWD_JSON_K3S" | nc -U "$NAME-slirp4netns.sock"
+    send_slirp_command "$FWD_JSON_K3S" "K3s (TCP 6443)"
 fi
 
 start_socat_relays
 
-echo "Bubble started. Press Ctrl+C to stop."
-wait "$SLIRP_PID"
+echo "Bubble $NAME started successfully."
+
+# Supervise both slirp and container instance
+while kill -0 "$SLIRP_PID" 2>/dev/null; do
+    if ! apptainer instance list 2>/dev/null | grep -q "\b$NAME\b"; then
+        echo "Apptainer instance $NAME terminated."
+        break
+    fi
+    sleep 2
+done

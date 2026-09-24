@@ -7,6 +7,7 @@ import (
 	"strconv"
 
 	"plaid/pkg/api"
+	"plaid/pkg/version"
 )
 
 func main() {
@@ -18,6 +19,11 @@ func main() {
 	if len(args) == 0 {
 		printUsage()
 		os.Exit(1)
+	}
+
+	if args[0] == "version" || args[0] == "--version" || args[0] == "-v" {
+		fmt.Printf("plaidctl version %s (commit: %s, built: %s)\n", version.Version, version.GitCommit, version.BuildTime)
+		os.Exit(0)
 	}
 
 	client := api.NewClient(socketPath)
@@ -130,6 +136,7 @@ Usage:
   plaidctl [-socket <path>] <command> [arguments]
 
 Commands:
+  version                                         Display version information
   status                                          Display daemon status & endpoints
   route add <subnet> <remote-host> [vni] [port]   Add a cross-host overlay route
   route del <subnet>                              Remove an overlay route

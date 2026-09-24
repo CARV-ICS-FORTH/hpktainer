@@ -28,13 +28,17 @@ remote_node() {
     ssh -i /home/vagrant/.ssh/id_ed25519 -o StrictHostKeyChecking=no vagrant@node "$@"
 }
 
+HOST_HTTP_PID=""
+
 cleanup() {
     info "Cleaning up instances..."
     plaidtainer instance stop u1 >/dev/null 2>&1 || true
     plaidtainer instance stop u2 >/dev/null 2>&1 || true
     if [ "$(cat /etc/vagrant_role 2>/dev/null || hostname)" = "controller" ]; then
         remote_node "plaidtainer instance stop u3 >/dev/null 2>&1 || true" 2>/dev/null || true
-        pkill -f "python3 -m http.server 9092" 2>/dev/null || true
+    fi
+    if [ -n "${HOST_HTTP_PID:-}" ]; then
+        kill "$HOST_HTTP_PID" 2>/dev/null || true
     fi
     rm -rf "${TEST_TMP}" 2>/dev/null || true
 }
@@ -187,9 +191,9 @@ echo ""
 info "=== TEST 3: Host Loopback Reachability ==="
 
 info "Starting test service on host 127.0.0.1:9092..."
-pkill -f "python3 -m http.server 9092" 2>/dev/null || true
 echo "PLAID_HOST_ACCESS_OK" > "${TEST_TMP}/host_flag.txt"
-(cd "${TEST_TMP}" && python3 -m http.server 9092 --bind 127.0.0.1 >/dev/null 2>&1 &)
+python3 -m http.server 9092 --bind 127.0.0.1 --directory "${TEST_TMP}" >/dev/null 2>&1 &
+HOST_HTTP_PID=$!
 sleep 1
 
 if apptainer exec instance://u1 wget -q -T 3 -O - http://10.244.1.2:9092/host_flag.txt 2>/dev/null | grep -q "PLAID_HOST_ACCESS_OK"; then
@@ -200,7 +204,10 @@ else
     fail "Could not reach host loopback service from unprivileged container"
 fi
 
-pkill -f "python3 -m http.server 9092" 2>/dev/null || true
+if [ -n "$HOST_HTTP_PID" ]; then
+    kill "$HOST_HTTP_PID" 2>/dev/null || true
+    HOST_HTTP_PID=""
+fi
 
 # ========================================================
 # TEST 4: Outbound Internet Access via slirp4netns
@@ -249,6 +256,10 @@ if ping -c 1 node.local &>/dev/null; then
 
     remote_node "plaidtainer instance stop u3"
     pass "Remote instance u3 stopped"
+    echo "PASS" > /tmp/plaid_overlay_status.txt 2>/dev/null || true
+else
+    info "Multi-node (node.local) not reachable; skipping cross-host overlay test."
+    echo "SKIP" > /tmp/plaid_overlay_status.txt 2>/dev/null || true
 fi
 
 # Teardown u1

@@ -2,10 +2,11 @@
 ARG REGISTRY=docker.io/chazapis
 ARG BASE_IMAGE=ubuntu:24.04
 FROM ${REGISTRY}/skiff-builder:latest AS builder
+ARG TARGETARCH
 WORKDIR /src
 COPY . .
-RUN CGO_ENABLED=0 make -C skifflet build
-RUN CGO_ENABLED=0 make -C plaid build
+RUN CGO_ENABLED=0 GOARCH=${TARGETARCH} make -C skifflet build
+RUN CGO_ENABLED=0 GOARCH=${TARGETARCH} make -C plaid build
 
 FROM ${BASE_IMAGE}
 WORKDIR /
@@ -27,21 +28,46 @@ RUN apt-get update && \
 
 # CNI plugins (host-local IPAM plugin used by Plaid)
 ARG TARGETARCH
-RUN curl -LO https://github.com/containernetworking/plugins/releases/download/v1.9.0/cni-plugins-linux-${TARGETARCH}-v1.9.0.tgz && \
+RUN if [ "${TARGETARCH}" = "amd64" ]; then \
+        CNI_SHA="58c03705426e929658f45a851df15a86d06ef680cacbf3f2dc127731ca265c28"; \
+    elif [ "${TARGETARCH}" = "arm64" ]; then \
+        CNI_SHA="2596ef56329dd1269026f46b8df262f09ba43c92dbfb940e1e69fbccccd30a29"; \
+    else \
+        echo "Unsupported architecture: ${TARGETARCH}" && exit 1; \
+    fi && \
+    curl -LO https://github.com/containernetworking/plugins/releases/download/v1.9.0/cni-plugins-linux-${TARGETARCH}-v1.9.0.tgz && \
+    echo "${CNI_SHA}  cni-plugins-linux-${TARGETARCH}-v1.9.0.tgz" | sha256sum -c - && \
     mkdir -p /opt/cni/bin && \
     (cd /opt/cni/bin && tar -zxvf /cni-plugins-linux-${TARGETARCH}-v1.9.0.tgz ./host-local) && \
     rm /cni-plugins-linux-${TARGETARCH}-v1.9.0.tgz
 
 # K3s
 ARG K3S_VERSION=v1.35.0+k3s1
-RUN if [ "${TARGETARCH}" = "amd64" ]; then K3S_ARCH=""; else K3S_ARCH="-${TARGETARCH}"; fi; \
+RUN if [ "${TARGETARCH}" = "amd64" ]; then \
+        K3S_ARCH=""; \
+        K3S_SHA="959c9310a6ab893958d1c95bc5d7609de9d7884630c8832180f059369b6dc331"; \
+    elif [ "${TARGETARCH}" = "arm64" ]; then \
+        K3S_ARCH="-${TARGETARCH}"; \
+        K3S_SHA="c0b1673a1f2b740cb7bb08355c885efb6a4aa5c8022e5bb306c621c8c1492883"; \
+    else \
+        echo "Unsupported architecture: ${TARGETARCH}" && exit 1; \
+    fi && \
     curl -sfL "https://github.com/k3s-io/k3s/releases/download/${K3S_VERSION}/k3s${K3S_ARCH}" -o /usr/local/bin/k3s && \
+    echo "${K3S_SHA}  /usr/local/bin/k3s" | sha256sum -c - && \
     chmod +x /usr/local/bin/k3s
 RUN mkdir -p /var/lib/rancher/k3s /etc/rancher/k3s
 
 # kube-proxy
 ARG KUBE_VERSION=v1.35.0
-RUN curl -L "https://dl.k8s.io/release/${KUBE_VERSION}/bin/linux/${TARGETARCH}/kube-proxy" -o /usr/local/bin/kube-proxy && \
+RUN if [ "${TARGETARCH}" = "amd64" ]; then \
+        KUBE_SHA="6489ece90b0400cc275204601126d797f86b4b3642672227460280ee659c8f54"; \
+    elif [ "${TARGETARCH}" = "arm64" ]; then \
+        KUBE_SHA="d7254f50c4aea1963c534dbdbae58ac16087667ebb129bfa781bcdd9f7920972"; \
+    else \
+        echo "Unsupported architecture: ${TARGETARCH}" && exit 1; \
+    fi && \
+    curl -L "https://dl.k8s.io/release/${KUBE_VERSION}/bin/linux/${TARGETARCH}/kube-proxy" -o /usr/local/bin/kube-proxy && \
+    echo "${KUBE_SHA}  /usr/local/bin/kube-proxy" | sha256sum -c - && \
     chmod +x /usr/local/bin/kube-proxy
 
 COPY --from=builder /src/skifflet/bin/skifflet /usr/bin/skifflet

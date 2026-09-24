@@ -57,13 +57,13 @@ func NewRootCommand() *cobra.Command {
 }
 
 // NewVersionCommand creates a new version subcommand command
-func NewVersionCommand(version, buildTime string) *cobra.Command {
+func NewVersionCommand(version, buildTime, gitCommit string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "version",
 		Short: "Show the version of the program",
 		Long:  `Show the version of the program`,
 		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Printf("skifflet version: %s (built: %s)\n", version, buildTime)
+			fmt.Printf("skifflet version: %s (commit: %s, built: %s)\n", version, gitCommit, buildTime)
 		},
 	}
 }
@@ -81,7 +81,7 @@ func main() {
 	var opts root.Opts
 
 	rootCmd := root.NewCommand(ctx, filepath.Base(os.Args[0]), opts)
-	rootCmd.AddCommand(NewVersionCommand(commands.BuildVersion, commands.BuildTime), NewRootCommand())
+	rootCmd.AddCommand(NewVersionCommand(commands.BuildVersion, commands.BuildTime, commands.GitCommit), NewRootCommand())
 	preRun := rootCmd.PreRunE
 
 	var logLevel string

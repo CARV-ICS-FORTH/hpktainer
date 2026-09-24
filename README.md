@@ -37,7 +37,7 @@ skiff/
 ├── plaid/                   # First-class networking module
 │   ├── cmd/                 # plaid, plaidd, plaidctl, plaidtainer
 │   ├── pkg/                 # api, bridge, ipam, packet, slirp, tap, vxlan
-│   ├── go.mod               # module github.com/forth-ics/plaid
+│   ├── go.mod               # module plaid
 │   └── Makefile             # Local module build & unit tests
 │
 ├── images/                  # Container definitions
@@ -65,7 +65,7 @@ skiff/
 `skifflet` is a Kubernetes [Virtual Kubelet](https://github.com/virtual-kubelet/virtual-kubelet) provider tailored for HPC environments:
 - Registers as a standard Kubernetes node in K3s.
 - Materializes Pods in unprivileged user space using [Apptainer](https://apptainer.org/) and `plaidtainer`.
-- Uses the standard Kubernetes pause container (`registry.k8s.io/pause:3.10`) to hold network namespaces and reap processes without requiring custom pause images.
+- Uses the standard Kubernetes pause container (`registry.k8s.io/pause:3.10`) to hold network namespaces, while Skifflet manages workload processes and lifecycle without requiring custom pause images.
 - Mounts Kubernetes volumes (ConfigMaps, Secrets, EmptyDir, HostPath, DownwardAPI, Projected) directly into unprivileged container filesystems.
 
 ### 2. Plaid (`plaid/`)

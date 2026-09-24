@@ -14,9 +14,8 @@ import (
 
 	"plaid/pkg/api"
 	"plaid/pkg/ipam"
+	"plaid/pkg/version"
 )
-
-const version = "0.1.0"
 
 func randomID(prefix string) string {
 	b := make([]byte, 8)
@@ -62,7 +61,7 @@ func main() {
 
 	switch cmd {
 	case "version", "--version", "-v":
-		fmt.Printf("plaidtainer version %s (Plaid Apptainer execution wrapper)\n", version)
+		fmt.Printf("plaidtainer version %s (Plaid Apptainer execution wrapper)\n", version.Version)
 		// Also invoke underlying apptainer version
 		_ = runCommand(apptainerBin, []string{"version"})
 		os.Exit(0)

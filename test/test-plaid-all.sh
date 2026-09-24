@@ -131,11 +131,12 @@ info "PART 2: Running Unprivileged Test Suite (Workflows A & B, rootless)..."
 echo "========================================================================"
 if [ -f "${UNPRIVILEGED_TEST}" ]; then
     # Must run as regular non-root user
+    rm -f /tmp/plaid_overlay_status.txt
     if bash "${UNPRIVILEGED_TEST}"; then
         pass "Part 2: Unprivileged workflows passed completely"
         STATUS_UNPRIVILEGED_A="PASS"
         STATUS_UNPRIVILEGED_B="PASS"
-        STATUS_OVERLAY="PASS"
+        STATUS_OVERLAY=$(cat /tmp/plaid_overlay_status.txt 2>/dev/null || echo "PASS")
     else
         fail "Part 2: Unprivileged workflows failed"
         STATUS_UNPRIVILEGED_A="FAIL"

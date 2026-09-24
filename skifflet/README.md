@@ -7,7 +7,7 @@
 Rather than running standard rootful container runtimes (like `containerd` or `dockerd`), `skifflet`:
 - Registers as a standard Kubernetes Node with custom capacity and attributes.
 - Schedules Pods directly as unprivileged Apptainer containers on HPC nodes.
-- Uses the standard Kubernetes pause container (`registry.k8s.io/pause:3.10`) to hold network namespaces and reap processes.
+- Uses the standard Kubernetes pause container (`registry.k8s.io/pause:3.10`) to hold the shared pod network namespace, while Skifflet supervises application processes and lifecycle.
 - Interacts with Plaid's execution wrapper (`plaidtainer`) to give each Pod its own IP on the cluster overlay network without requiring root or host network reconfiguration.
 - Supports volume mounts (ConfigMaps, Secrets, EmptyDir, HostPath, DownwardAPI, Projected volumes) directly inside unprivileged Apptainer user namespaces.
 
@@ -42,5 +42,5 @@ make test
 | `--working-dir` | `$HOME` | Base working directory for Skiff runtime files (`~/.skiff`) |
 | `--pods-dir` | `/tmp/.skiff/.pods` | Ephemeral directory for pod job state and volume mounts |
 | `--disable-taint` | `false` | Whether to disable the default `virtual-kubelet.io/provider=skiff` taint |
-| `--certificate` | `$APISERVER_CERT_LOCATION` | Client certificate for Kubernetes API authentication |
-| `--key` | `$APISERVER_KEY_LOCATION` | Client private key for Kubernetes API authentication |
+| `--certificate` | `$APISERVER_CERT_LOCATION` | Server TLS certificate for Kubelet HTTPS serving endpoint (logs/exec) |
+| `--key` | `$APISERVER_KEY_LOCATION` | Server TLS private key for Kubelet HTTPS serving endpoint (logs/exec) |

@@ -10,24 +10,68 @@
 # Node 0: Controller Bubble (ID 1)
 # Node 1..N-1: Node (Worker) Bubbles (ID 2..N)
 
-NODES=($(scontrol show hostnames $SLURM_JOB_NODELIST))
+set -euo pipefail
+
+NODES=($(scontrol show hostnames "$SLURM_JOB_NODELIST"))
 NUM_NODES=${#NODES[@]}
 
 if [ "$NUM_NODES" -eq 0 ]; then
-    echo "This script must be run via sbatch/srun."
+    echo "This script must be run via sbatch/srun." >&2
     exit 1
 fi
 
 CONTROLLER_NODE=${NODES[0]}
-CONTROLLER_IP=$(srun --nodes=1 -w $CONTROLLER_NODE ip route get 1 | awk '{print $7; exit}')
+CONTROLLER_IP=$(srun --nodes=1 -w "$CONTROLLER_NODE" ip route get 1 | awk '{print $7; exit}')
 
 echo "Cluster Setup:"
 echo "  Controller Node: $CONTROLLER_NODE ($CONTROLLER_IP)"
-echo "  Nodes: ${NODES[@]}"
+echo "  Nodes: ${NODES[*]}"
 
-# Clean up stale config files (but keep images for dev mode)
-echo "Cleaning up stale configuration in ~/.skiff..."
-rm -rf $HOME/.skiff/kubeconfig $HOME/.skiff/node-token $HOME/.skiff/tls $HOME/.skiff/.certs
+# --- Preflight Collision Checks (Single-Cluster Contract) ---
+echo "Running preflight checks..."
+
+# Check if another Skiff Slurm job is already active for this user
+if command -v squeue >/dev/null 2>&1; then
+    ACTIVE_JOBS=$(squeue -u "$USER" --name=skiff-cluster --noheader -o "%i" | grep -v "^${SLURM_JOB_ID:-}$$" || true)
+    if [ -n "$ACTIVE_JOBS" ]; then
+        echo "ERROR: Another Skiff cluster job is already running (Job IDs: $ACTIVE_JOBS)." >&2
+        echo "Only one active Skiff cluster job is allowed. Cancel it with 'scancel <job>' first." >&2
+        exit 1
+    fi
+fi
+
+# Check for port collisions on controller and worker nodes
+check_port_free() {
+    local node="$1"
+    local proto="$2"
+    local port="$3"
+    if srun --nodes=1 -w "$node" ss -l"${proto}"n 2>/dev/null | grep -q ":${port} "; then
+        echo "ERROR: Port ${port}/${proto} is already occupied on node $node!" >&2
+        return 1
+    fi
+    return 0
+}
+
+echo "Checking required cluster ports..."
+if ! check_port_free "$CONTROLLER_NODE" "u" "8472" || \
+   ! check_port_free "$CONTROLLER_NODE" "t" "10250" || \
+   ! check_port_free "$CONTROLLER_NODE" "t" "6443"; then
+    echo "ERROR: Port conflict detected on controller node $CONTROLLER_NODE." >&2
+    exit 1
+fi
+
+for ((i=1; i<NUM_NODES; i++)); do
+    WORKER_NODE=${NODES[$i]}
+    if ! check_port_free "$WORKER_NODE" "u" "8472" || \
+       ! check_port_free "$WORKER_NODE" "t" "10250"; then
+        echo "ERROR: Port conflict detected on worker node $WORKER_NODE." >&2
+        exit 1
+    fi
+done
+
+# Safe cleanup of old cluster credentials (only after verifying no active job)
+echo "Preparing ~/.skiff for cluster startup..."
+rm -rf "$HOME/.skiff/kubeconfig" "$HOME/.skiff/tls" "$HOME/.skiff/.certs" "$HOME/.skiff"/slirp-*.sock
 
 # Pre-process images
 echo "Pre-processing images..."
@@ -35,20 +79,21 @@ IMAGE_DIR="$HOME/.skiff/images"
 mkdir -p "$IMAGE_DIR"
 
 if [ "${SKIFF_DEV:-0}" = "1" ]; then
-    echo "Development mode: ensuring local .tar images are converted to .sif..."
-    for img in skiff-bubble; do
-        IMAGE_TAR="$IMAGE_DIR/${img}.tar"
-        IMAGE_SIF="$IMAGE_DIR/${img}.sif"
-        if [ -f "$IMAGE_TAR" ]; then
-            if [ ! -f "$IMAGE_SIF" ] || [ "$IMAGE_TAR" -nt "$IMAGE_SIF" ]; then
-                echo "Converting $IMAGE_TAR to $IMAGE_SIF..."
-                apptainer build --force "$IMAGE_SIF" "docker-archive://$IMAGE_TAR"
+    echo "Development mode: ensuring local .tar image is converted to .sif..."
+    IMAGE_TAR="$IMAGE_DIR/skiff-bubble.tar"
+    IMAGE_SIF="$IMAGE_DIR/skiff-bubble.sif"
+    if [ -f "$IMAGE_TAR" ]; then
+        if [ ! -f "$IMAGE_SIF" ] || [ "$IMAGE_TAR" -nt "$IMAGE_SIF" ]; then
+            echo "Converting $IMAGE_TAR to $IMAGE_SIF..."
+            if ! apptainer build --force "$IMAGE_SIF" "docker-archive://$IMAGE_TAR"; then
+                echo "ERROR: Failed to convert $IMAGE_TAR to $IMAGE_SIF!" >&2
+                exit 1
             fi
-        else
-            echo "Warning: $IMAGE_TAR not found!"
         fi
-    done
-    
+    elif [ ! -f "$IMAGE_SIF" ]; then
+        echo "ERROR: Neither $IMAGE_TAR nor $IMAGE_SIF exists! Run 'make develop' first." >&2
+        exit 1
+    fi
 else
     echo "Production mode: pre-warming Apptainer cache..."
     apptainer exec docker://docker.io/chazapis/skiff-bubble:latest /bin/true 2>/dev/null || true
@@ -64,21 +109,40 @@ elif [ ! -f "$SCRIPT_DIR/skiff-bubble.sh" ]; then
     SCRIPT_DIR="$HOME/skiff"
 fi
 
+BG_PIDS=()
+
+cleanup_slurm() {
+    trap - EXIT INT TERM
+    echo "Shutting down Skiff cluster (Job ID: ${SLURM_JOB_ID:-})..."
+    for pid in "${BG_PIDS[@]}"; do
+        kill -TERM "$pid" 2>/dev/null || true
+    done
+    sleep 2
+    for pid in "${BG_PIDS[@]}"; do
+        kill -KILL "$pid" 2>/dev/null || true
+    done
+    rm -rf "$HOME/.skiff/kubeconfig" "$HOME/.skiff/tls" "$HOME/.skiff/.certs" "$HOME/.skiff"/slirp-*.sock 2>/dev/null || true
+    wait 2>/dev/null || true
+    echo "Cluster cleanup complete."
+}
+trap cleanup_slurm EXIT INT TERM
+
 # Start Controller Bubble
 echo "Starting Controller on $CONTROLLER_NODE..."
-export SKIFF_ROLE="controller"
-export CONTROLLER_IP=$CONTROLLER_IP
-export SKIFF_DEV=${SKIFF_DEV:-0}
-export NUM_NODES=$NUM_NODES
-srun --nodes=1 -w $CONTROLLER_NODE --exclusive "$SCRIPT_DIR/skiff-bubble.sh" 1 &
+(
+    export SKIFF_ROLE="controller"
+    export SKIFF_DEV=${SKIFF_DEV:-0}
+    srun --nodes=1 -w "$CONTROLLER_NODE" --exclusive "$SCRIPT_DIR/skiff-bubble.sh" 1
+) &
+BG_PIDS+=($!)
 
-# Wait for Controller initialization
+# Wait for Controller initialization (kubeconfig & server-ca)
 echo "Waiting for Controller initialization..."
 WAIT_TIME=0
 MAX_WAIT=300
-while [ ! -f "$HOME/.skiff/kubeconfig" ] || [ ! -f "$HOME/.skiff/node-token" ] || [ ! -f "$HOME/.skiff/tls/server-ca.crt" ]; do
+while [ ! -f "$HOME/.skiff/kubeconfig" ] || [ ! -f "$HOME/.skiff/tls/server-ca.crt" ]; do
     if [ $WAIT_TIME -ge $MAX_WAIT ]; then
-        echo "Error: Controller failed to initialize within ${MAX_WAIT} seconds." >&2
+        echo "ERROR: Controller failed to initialize within ${MAX_WAIT} seconds." >&2
         exit 1
     fi
     sleep 1
@@ -94,14 +158,26 @@ for ((i=1; i<NUM_NODES; i++)); do
     
     (
         export SKIFF_ROLE="node"
-        export CONTROLLER_IP=$CONTROLLER_IP
         export SKIFF_DEV=${SKIFF_DEV:-0}
-        export NUM_NODES=$NUM_NODES
-        srun --nodes=1 -w $NODE --exclusive "$SCRIPT_DIR/skiff-bubble.sh" $BUBBLE_ID
+        srun --nodes=1 -w "$NODE" --exclusive "$SCRIPT_DIR/skiff-bubble.sh" "$BUBBLE_ID"
     ) &
+    BG_PIDS+=($!)
     
     ((BUBBLE_ID++))
 done
 
-# Wait for all background jobs
-wait
+# Active supervision of all background bubble processes
+echo "Cluster nodes started. Supervising job steps..."
+while true; do
+    for pid in "${BG_PIDS[@]}"; do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            wait "$pid"
+            EXIT_CODE=$?
+            if [ "$EXIT_CODE" -ne 0 ]; then
+                echo "ERROR: A Skiff bubble process (PID $pid) terminated unexpectedly with exit code $EXIT_CODE!" >&2
+                exit "$EXIT_CODE"
+            fi
+        fi
+    done
+    sleep 2
+done

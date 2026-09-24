@@ -220,7 +220,6 @@ func setTerminationConditions(pod *corev1.Pod) {
 	})
 }
 
-
 // HumanReadableCode translates the exit code into a human-readable form.
 func HumanReadableCode(code int) string {
 	switch code {

@@ -28,13 +28,17 @@ remote_node() {
     ssh -i /home/vagrant/.ssh/id_ed25519 -o StrictHostKeyChecking=no vagrant@node "$@"
 }
 
+HOST_HTTP_PID=""
+
 cleanup() {
     info "Cleaning up container instances..."
     ${APPTAINER} instance stop -F c1 >/dev/null 2>&1 || true
     ${APPTAINER} instance stop -F c2 >/dev/null 2>&1 || true
     if [ "$(cat /etc/vagrant_role 2>/dev/null || hostname)" = "controller" ]; then
         remote_node "sudo apptainer instance stop -F c3 >/dev/null 2>&1 || true" 2>/dev/null || true
-        pkill -f "python3 -m http.server 9090" 2>/dev/null || true
+    fi
+    if [ -n "${HOST_HTTP_PID:-}" ]; then
+        kill "$HOST_HTTP_PID" 2>/dev/null || true
     fi
     rm -rf "${TEST_TMP}" 2>/dev/null || true
 }
@@ -151,9 +155,9 @@ echo ""
 info "=== TEST 3: Localhost & Host Reachability ==="
 
 info "Starting test HTTP service on host 127.0.0.1:9090..."
-pkill -f "python3 -m http.server 9090" 2>/dev/null || true
 echo "PLAID_HOST_LOOPBACK_TEST" > "${TEST_TMP}/host_test.txt"
-(cd "${TEST_TMP}" && python3 -m http.server 9090 --bind 127.0.0.1 >/dev/null 2>&1 &)
+python3 -m http.server 9090 --bind 127.0.0.1 --directory "${TEST_TMP}" >/dev/null 2>&1 &
+HOST_HTTP_PID=$!
 sleep 1
 
 info "Testing container loopback isolation (127.0.0.1 inside C1)..."
@@ -173,7 +177,10 @@ elif ${APPTAINER} exec instance://c1 wget -q -T 3 -O - http://controller.local:9
     HOST_ACCESSIBLE=true
 fi
 
-pkill -f "python3 -m http.server 9090" 2>/dev/null || true
+if [ -n "$HOST_HTTP_PID" ]; then
+    kill "$HOST_HTTP_PID" 2>/dev/null || true
+    HOST_HTTP_PID=""
+fi
 
 if [ "$HOST_ACCESSIBLE" = true ]; then
     pass "Test 3 Passed: Host / localhost accessibility verified"
