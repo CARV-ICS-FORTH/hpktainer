@@ -30,15 +30,10 @@ const (
 	JobIDTypeProcess JobIDType = "pid://"
 )
 
+// SetPodID records the job ID annotation on a pod, normalizing the prefix to prevent pid://pid:// duplication.
 func SetPodID(pod *corev1.Pod, idType JobIDType, value string) {
-	metav1.SetMetaDataAnnotation(&pod.ObjectMeta, "pod.skiff/id", string(idType)+value)
-}
-
-func SetContainerStatusID(status *corev1.ContainerStatus, typedValue string) {
-	// ensure that the value follows an expected format.
-	_ = parseIDType(typedValue)
-
-	status.ContainerID = typedValue
+	cleanVal := strings.TrimPrefix(strings.TrimSpace(value), string(idType))
+	metav1.SetMetaDataAnnotation(&pod.ObjectMeta, "pod.skiff/id", string(idType)+cleanVal)
 }
 
 func GetPodID(pod *corev1.Pod) string {
@@ -50,19 +45,7 @@ func GetPodID(pod *corev1.Pod) string {
 
 func HasJobID(pod *corev1.Pod) bool {
 	_, exists := pod.GetAnnotations()["pod.skiff/id"]
-
 	return exists
-}
-
-func parseIDType(raw string) string {
-	if strings.HasPrefix(raw, string(JobIDTypeProcess)) {
-		parts := strings.Split(raw, string(JobIDTypeProcess))
-		if len(parts) > 1 {
-			return parts[1]
-		}
-	}
-
-	return strings.TrimSpace(raw)
 }
 
 // FormatProcessJobID formats a PID and start time into a typed job ID string "pid://<pid>:<starttime>" or "pid://<pid>".
@@ -74,7 +57,7 @@ func FormatProcessJobID(pid int, startTime uint64) string {
 }
 
 // ParseProcessJobID parses a process job ID string (e.g. "pid://12345:67890", "12345:67890", "pid://12345", or "12345")
-// into a PID and optional start time.
+// into a PID and optional start time. PIDs <= 1 are strictly rejected.
 func ParseProcessJobID(raw string) (pid int, startTime uint64, err error) {
 	val := strings.TrimSpace(raw)
 	if strings.HasPrefix(val, string(JobIDTypeProcess)) {
@@ -91,8 +74,8 @@ func ParseProcessJobID(raw string) (pid int, startTime uint64, err error) {
 	}
 
 	p, err := strconv.Atoi(parts[0])
-	if err != nil || p <= 0 {
-		return 0, 0, fmt.Errorf("invalid pid '%s'", parts[0])
+	if err != nil || p <= 1 {
+		return 0, 0, fmt.Errorf("invalid pid '%s': PID must be > 1", parts[0])
 	}
 
 	var st uint64

@@ -166,6 +166,36 @@ func GetPodIPFromNetns(pausePID int) (string, error) {
 	return "", fmt.Errorf("timeout waiting for pod IP in netns of PID %d", pausePID)
 }
 
+// SafeRemovePodDirectory removes a pod directory, retrying for NFS file handle release
+// and safely handling permissions without modifying symlink targets on the host.
+func SafeRemovePodDirectory(podDir string) error {
+	var removeErr error
+	for attempt := 0; attempt < 10; attempt++ {
+		removeErr = os.RemoveAll(podDir)
+		if removeErr == nil || errors.Is(removeErr, fs.ErrNotExist) {
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	if errors.Is(removeErr, fs.ErrPermission) {
+		// Walk with Lstat awareness: never chmod symlinks or external hostpath targets
+		_ = filepath.Walk(podDir, func(path string, info os.FileInfo, err error) error {
+			if err != nil || info == nil {
+				return nil
+			}
+			if info.Mode()&os.ModeSymlink != 0 {
+				_ = os.Remove(path)
+				return nil
+			}
+			_ = os.Chmod(path, 0700)
+			return nil
+		})
+		return os.RemoveAll(podDir)
+	}
+	return removeErr
+}
+
 // DeletePod terminates all processes associated with a Pod and removes its directory structure.
 func DeletePod(podKey client.ObjectKey, localPod *corev1.Pod) bool {
 	logger := compute.DefaultLogger.WithValues("pod", podKey)
@@ -212,14 +242,16 @@ func DeletePod(podKey client.ObjectKey, localPod *corev1.Pod) bool {
 	}
 
 	// 3. Terminate processes
-	if pausePIDStr != "" || len(secondaryPIDs) > 0 {
-		gracePeriod := 30 * time.Second
-		if localPod != nil && localPod.Spec.TerminationGracePeriodSeconds != nil && *localPod.Spec.TerminationGracePeriodSeconds >= 0 {
-			gracePeriod = time.Duration(*localPod.Spec.TerminationGracePeriodSeconds) * time.Second
-		}
-		timeout := gracePeriod + 5*time.Second
+	gracePeriod := 30 * time.Second
+	if localPod != nil && localPod.Spec.TerminationGracePeriodSeconds != nil && *localPod.Spec.TerminationGracePeriodSeconds >= 0 {
+		gracePeriod = time.Duration(*localPod.Spec.TerminationGracePeriodSeconds) * time.Second
+	}
 
-		out, err := runtime.KillPodProcessesWithTimeout(pausePIDStr, secondaryPIDs, timeout)
+	if pl := GlobalRegistry.GetByKey(podKey); pl != nil {
+		pl.Terminate(gracePeriod)
+		GlobalRegistry.Delete(pl.UID())
+	} else if pausePIDStr != "" || len(secondaryPIDs) > 0 {
+		out, err := runtime.KillPodProcessesWithTimeout(pausePIDStr, secondaryPIDs, gracePeriod)
 		if err != nil && !errors.Is(err, runtime.ErrInvalidJob) {
 			logger.Info("WARNING: Failed to kill process by PID, proceeding to remove pod directory", "pid", pausePIDStr, "pod", podKey, "err", err, "out", out)
 		} else {
@@ -228,33 +260,9 @@ func DeletePod(podKey client.ObjectKey, localPod *corev1.Pod) bool {
 	}
 
 	// 4. Remove Pod Directory (with retry for NFS file handle release)
-	var removeErr error
-	for attempt := 0; attempt < 10; attempt++ {
-		removeErr = os.RemoveAll(podDir.String())
-		if removeErr == nil || errors.Is(removeErr, fs.ErrNotExist) {
-			removeErr = nil
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-
-	if removeErr != nil {
-		if errors.Is(removeErr, fs.ErrPermission) {
-			logger.Info(" * Failed to remove directory from host due to permissions, attempting chmod before removal", "err", removeErr)
-			_ = filepath.Walk(podDir.String(), func(path string, info os.FileInfo, err error) error {
-				if err == nil {
-					_ = os.Chmod(path, 0777)
-				}
-				return nil
-			})
-			if err := os.RemoveAll(podDir.String()); err != nil {
-				logger.Error(err, "failed to remove pod directory after chmod cleanup", "directory", podDir)
-				return false
-			}
-		} else {
-			logger.Error(removeErr, "failed to remove pod directory", "directory", podDir)
-			return false
-		}
+	if err := SafeRemovePodDirectory(podDir.String()); err != nil {
+		logger.Error(err, "failed to remove pod directory", "directory", podDir)
+		return false
 	}
 
 	logger.Info(" * Pod directory is removed")
@@ -287,6 +295,19 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, notify func(*corev1.Pod)) {
 	podKey := client.ObjectKeyFromObject(pod)
 	logger := compute.DefaultLogger.WithValues("pod", podKey)
 
+	// Pre-flight capability validation (B8)
+	if err := ValidatePodCapabilities(pod); err != nil {
+		compute.PodError(pod, compute.ReasonUnsupportedFeatures, "capability validation failed: %v", err)
+		if notify != nil {
+			notify(pod)
+		}
+		return
+	}
+
+	if ctx.Err() != nil {
+		return
+	}
+
 	podEnvVars, err := FromServicesForPod(ctx, pod)
 	if err != nil {
 		compute.PodError(pod, "EnvVarError", "failed to list services when setting up env vars: %v", err)
@@ -296,10 +317,12 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, notify func(*corev1.Pod)) {
 		return
 	}
 
+	podDir := compute.Skiff.PodWithUID(podKey, pod.GetUID())
+
 	h := PodHandler{
 		Pod:             pod,
 		podKey:          podKey,
-		podDirectory:    compute.Skiff.Pod(podKey),
+		podDirectory:    podDir,
 		logger:          logger,
 		podEnvVariables: podEnvVars,
 	}
@@ -505,15 +528,24 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, notify func(*corev1.Pod)) {
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 		logFile, err := os.Create(c.LogsPath)
-		if err == nil {
-			cmd.Stdout = logFile
-			cmd.Stderr = logFile
+		if err != nil {
+			_ = pauseCmd.Process.Kill()
+			_ = pauseCmd.Wait()
+			compute.PodError(pod, "LogFileError", "failed to create container log file %s: %v", c.LogsPath, err)
+			if notify != nil {
+				notify(pod)
+			}
+			return
 		}
+		cmd.Stdout = logFile
+		cmd.Stderr = logFile
 
 		if err := cmd.Start(); err != nil {
 			if logFile != nil {
 				logFile.Close()
 			}
+			_ = pauseCmd.Process.Kill()
+			_ = pauseCmd.Wait()
 			SetContainerTerminated(initStatus, 128)
 			UpdateStatusFromRuntime(pod)
 			if notify != nil {
@@ -548,6 +580,8 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, notify func(*corev1.Pod)) {
 		}
 
 		if exitCode != 0 {
+			_ = pauseCmd.Process.Kill()
+			_ = pauseCmd.Wait()
 			logger.Error(fmt.Errorf("init container %s exited with %d", c.InstanceName, exitCode), "init container failed")
 			return
 		}

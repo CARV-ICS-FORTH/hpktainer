@@ -62,7 +62,7 @@ func FromServices(ctx context.Context, namespace string, enableServiceLinks bool
 		// We also add environment variables for other services in the same
 		// namespace, if enableServiceLinks is true.
 		isDefaultKubernetes := service.GetNamespace() == metav1.NamespaceDefault && service.GetName() == "kubernetes"
-		if isDefaultKubernetes || (enableLinks && (service.GetNamespace() == namespace || service.GetNamespace() == metav1.NamespaceDefault)) {
+		if isDefaultKubernetes || (enableLinks && service.GetNamespace() == namespace) {
 			services = append(services, &serviceList.Items[i])
 		}
 	}
@@ -72,35 +72,40 @@ func FromServices(ctx context.Context, namespace string, enableServiceLinks bool
 	 *---------------------------------------------------*/
 	var result []corev1.EnvVar
 	for _, service := range services {
-		// some headless services do not have ports.
+		// Headless services or services without ports do not expose host/port env vars
 		if len(service.Spec.Ports) == 0 {
 			continue
 		}
 
-		// Host
-		name := makeEnvVariableName(service.Name) + "_SERVICE_HOST"
-		if service.GetNamespace() == metav1.NamespaceDefault && service.GetName() == "kubernetes" {
-			// because kubernetes is not managed by Skiff, we must create the entry manually.
-			service.Spec.ClusterIP = compute.Environment.KubeMasterHost
+		svcCopy := service.DeepCopy()
+		if svcCopy.GetNamespace() == metav1.NamespaceDefault && svcCopy.GetName() == "kubernetes" {
+			// Master service override
+			if compute.Environment.KubeMasterHost != "" {
+				svcCopy.Spec.ClusterIP = compute.Environment.KubeMasterHost
+			}
 			if compute.Environment.KubeMasterPort != "" {
-				if port, err := strconv.Atoi(compute.Environment.KubeMasterPort); err == nil && len(service.Spec.Ports) > 0 {
-					service.Spec.Ports[0].Port = int32(port)
+				if p, err := strconv.Atoi(compute.Environment.KubeMasterPort); err == nil && len(svcCopy.Spec.Ports) > 0 {
+					svcCopy.Spec.Ports[0].Port = int32(p)
 				}
 			}
-		} else {
-			// Look it up by DNS name.
-			service.Spec.ClusterIP = service.GetName()
 		}
-		result = append(result, corev1.EnvVar{Name: name, Value: service.Spec.ClusterIP})
+
+		if svcCopy.Spec.ClusterIP == "" || svcCopy.Spec.ClusterIP == "None" {
+			continue
+		}
+
+		// Host
+		name := makeEnvVariableName(svcCopy.Name) + "_SERVICE_HOST"
+		result = append(result, corev1.EnvVar{Name: name, Value: svcCopy.Spec.ClusterIP})
 
 		// First port - give it the backwards-compatible name.
-		name = makeEnvVariableName(service.Name) + "_SERVICE_PORT"
-		portStr := strconv.Itoa(int(service.Spec.Ports[0].Port))
+		name = makeEnvVariableName(svcCopy.Name) + "_SERVICE_PORT"
+		portStr := strconv.Itoa(int(svcCopy.Spec.Ports[0].Port))
 		result = append(result, corev1.EnvVar{Name: name, Value: portStr})
 
 		// All named ports (only the first may be unnamed, checked in validation).
-		for i := range service.Spec.Ports {
-			sp := &service.Spec.Ports[i]
+		for i := range svcCopy.Spec.Ports {
+			sp := &svcCopy.Spec.Ports[i]
 			if sp.Name != "" {
 				pn := name + "_" + makeEnvVariableName(sp.Name)
 				result = append(result, corev1.EnvVar{Name: pn, Value: strconv.Itoa(int(sp.Port))})
@@ -108,7 +113,7 @@ func FromServices(ctx context.Context, namespace string, enableServiceLinks bool
 		}
 
 		// Docker-compatible vars.
-		result = append(result, makeLinkVariables(service)...)
+		result = append(result, makeLinkVariables(svcCopy)...)
 	}
 	return result, nil
 }

@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"sync"
@@ -37,9 +38,7 @@ import (
 	vkapi "github.com/virtual-kubelet/virtual-kubelet/node/api"
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
-	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/remotecommand"
 	statsv1alpha1 "k8s.io/kubelet/pkg/apis/stats/v1alpha1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -74,6 +73,7 @@ type VirtualK8S struct {
 	updatedPod func(*corev1.Pod)
 
 	pods sync.Map // map[client.ObjectKey]*corev1.Pod
+	lock *InstanceLock
 }
 
 // NewVirtualK8S reads a kubeconfig file and sets up a client to interact
@@ -86,6 +86,21 @@ func NewVirtualK8S(config InitConfig) (*VirtualK8S, error) {
 	 *---------------------------------------------------*/
 	if err := runtime.Initialize(config.PauseImage); err != nil {
 		return nil, fmt.Errorf("Failed to initialize Skiff paths '%s': %w", compute.Skiff.String(), err)
+	}
+
+	/*---------------------------------------------------
+	 * Acquire Advisory Runtime Instance Lock
+	 *---------------------------------------------------*/
+	lock, err := AcquireInstanceLock(compute.Skiff.String())
+	if err != nil {
+		return nil, fmt.Errorf("failed to acquire instance lock: %w", err)
+	}
+
+	/*---------------------------------------------------
+	 * Reconcile Surviving Workloads from Journal
+	 *---------------------------------------------------*/
+	if err := ReconcileSurvivingWorkloads(compute.Skiff.String()); err != nil {
+		logger.Error(err, "warning: error during surviving workloads reconciliation")
 	}
 
 	/*---------------------------------------------------
@@ -104,6 +119,7 @@ func NewVirtualK8S(config InitConfig) (*VirtualK8S, error) {
 	return &VirtualK8S{
 		InitConfig: config,
 		Logger:     logger,
+		lock:       lock,
 	}, nil
 }
 
@@ -119,6 +135,12 @@ func (v *VirtualK8S) CreatePod(ctx context.Context, pod *corev1.Pod) error {
 	}()
 
 	pod.Status.HostIP = v.InitConfig.InternalIP
+
+	podDir := compute.Skiff.PodWithUID(podKey, pod.GetUID())
+	pl := PodHandler.NewPodLifecycle(pod, podDir, func(p *corev1.Pod) {
+		v.saveAndNotifyPod("lifecycle", p)
+	})
+	PodHandler.GlobalRegistry.Register(pl)
 	v.pods.Store(podKey, pod)
 
 	go func() {
@@ -130,7 +152,7 @@ func (v *VirtualK8S) CreatePod(ctx context.Context, pod *corev1.Pod) error {
 			}
 		}()
 
-		PodHandler.CreatePod(context.Background(), pod, func(p *corev1.Pod) {
+		PodHandler.CreatePod(pl.Context(), pod, func(p *corev1.Pod) {
 			v.saveAndNotifyPod("podhandler", p)
 		})
 
@@ -151,6 +173,12 @@ func (v *VirtualK8S) UpdatePod(ctx context.Context, pod *corev1.Pod) error {
 	)
 
 	defer logger.Info("[K8s] <- UpdatePod")
+
+	if pl := PodHandler.GlobalRegistry.GetByKey(podKey); pl != nil {
+		pl.UpdateFromAPI(pod)
+		v.pods.Store(podKey, pl.GetPod())
+		return nil
+	}
 
 	val, ok := v.pods.Load(podKey)
 	if !ok {
@@ -196,22 +224,33 @@ func (v *VirtualK8S) DeletePod(ctx context.Context, pod *corev1.Pod) error {
 	}
 
 	var localPod *corev1.Pod
-	if val, ok := v.pods.Load(podKey); ok {
+	pl := PodHandler.GlobalRegistry.GetByKey(podKey)
+	if pl != nil {
+		localPod = pl.GetPod()
+	} else if val, ok := v.pods.Load(podKey); ok {
 		localPod = val.(*corev1.Pod)
-		if !isPodOwnedByNode(localPod, v.NodeName) {
-			logger.Info("[K8s] <- DeletePod (SKIPPED - local pod owned by another node)", "podNode", localPod.Spec.NodeName, "ownNode", v.NodeName)
-			return nil
-		}
 	} else {
 		localPod = pod
 	}
 
-	if !PodHandler.DeletePod(podKey, localPod) {
-		logger.Info("[K8s] <- DeletePod (POD NOT FOUND)")
-		return errdefs.NotFoundf("object not found")
+	if !isPodOwnedByNode(localPod, v.NodeName) {
+		logger.Info("[K8s] <- DeletePod (SKIPPED - local pod owned by another node)", "podNode", localPod.Spec.NodeName, "ownNode", v.NodeName)
+		return nil
+	}
+
+	gracePeriod := 30 * time.Second
+	if localPod.Spec.TerminationGracePeriodSeconds != nil && *localPod.Spec.TerminationGracePeriodSeconds >= 0 {
+		gracePeriod = time.Duration(*localPod.Spec.TerminationGracePeriodSeconds) * time.Second
+	}
+
+	if pl != nil {
+		pl.Terminate(gracePeriod)
+		PodHandler.GlobalRegistry.Delete(pl.UID())
 	}
 
 	v.pods.Delete(podKey)
+	_ = PodHandler.DeletePod(podKey, localPod)
+	RemoveJournalRecord(compute.Skiff.String(), localPod.GetUID())
 	logger.Info("[K8s] <- DeletePod (SUCCESS)")
 	return nil
 }
@@ -222,6 +261,15 @@ func (v *VirtualK8S) GetPod(ctx context.Context, namespace, name string) (*corev
 	logger := v.Logger.WithValues("obj", podKey)
 
 	logger.Info("[K8s] -> GetPod")
+
+	if pl := PodHandler.GlobalRegistry.GetByKey(podKey); pl != nil {
+		p := pl.GetPod()
+		logger.Info("[K8s] <- GetPod",
+			"version", p.GetResourceVersion(),
+			"phase", p.Status.Phase,
+		)
+		return p, nil
+	}
 
 	val, ok := v.pods.Load(podKey)
 	if !ok {
@@ -245,6 +293,14 @@ func (v *VirtualK8S) GetPodStatus(ctx context.Context, namespace, name string) (
 
 	logger.Info("[K8s] -> GetPodStatus")
 
+	if pl := PodHandler.GlobalRegistry.GetByKey(podKey); pl != nil {
+		s := pl.GetPodStatus()
+		logger.Info("[K8s] <- GetPodStatus",
+			"phase", s.Phase,
+		)
+		return s, nil
+	}
+
 	val, ok := v.pods.Load(podKey)
 	if !ok {
 		logger.Info("[K8s] <- GetPodStatus (POD NOT FOUND)")
@@ -264,6 +320,18 @@ func (v *VirtualK8S) GetPodStatus(ctx context.Context, namespace, name string) (
 func (v *VirtualK8S) GetPods(ctx context.Context) ([]*corev1.Pod, error) {
 	v.Logger.Info("[K8s] -> GetPods")
 	defer v.Logger.Info("[K8s] <- GetPods")
+
+	lifecycles := PodHandler.GlobalRegistry.All()
+	if len(lifecycles) > 0 {
+		var pods []*corev1.Pod
+		for _, pl := range lifecycles {
+			pod := pl.GetPod()
+			if isPodOwnedByNode(pod, v.NodeName) {
+				pods = append(pods, pod)
+			}
+		}
+		return pods, nil
+	}
 
 	var pods []*corev1.Pod
 	v.pods.Range(func(key, val interface{}) bool {
@@ -352,10 +420,8 @@ func (v *VirtualK8S) reconcileNonTerminalPods() {
 
 func (v *VirtualK8S) PortForward(ctx context.Context, namespace, pod string, port int32, stream io.ReadWriteCloser) error {
 	podKey := client.ObjectKey{Namespace: namespace, Name: pod}
-	logger := v.Logger.WithValues("obj", podKey)
-
-	logger.Info("[K8s] receive PortForward", "pod", pod)
-	return nil
+	v.Logger.Info("[K8s] receive PortForward (not supported)", "pod", podKey)
+	return errors.New("port-forward is not yet implemented in this provider")
 }
 
 func (v *VirtualK8S) GetStatsSummary(context.Context) (*statsv1alpha1.Summary, error) {
@@ -365,102 +431,213 @@ func (v *VirtualK8S) GetStatsSummary(context.Context) (*statsv1alpha1.Summary, e
 	return nil, errors.New("GetStatsSummary is not supported")
 }
 
+type followLogReader struct {
+	ctx     context.Context
+	file    *os.File
+	initial *bytes.Reader
+	offset  int64
+	closed  bool
+	mu      sync.Mutex
+}
+
+func newFollowLogReader(ctx context.Context, filePath string, initialBytes []byte) (*followLogReader, error) {
+	f, err := os.Open(filePath)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+
+	var initReader *bytes.Reader
+	if len(initialBytes) > 0 {
+		initReader = bytes.NewReader(initialBytes)
+	}
+
+	var offset int64
+	if f != nil {
+		offset, _ = f.Seek(0, io.SeekEnd)
+	}
+
+	return &followLogReader{
+		ctx:     ctx,
+		file:    f,
+		initial: initReader,
+		offset:  offset,
+	}, nil
+}
+
+func (r *followLogReader) Read(p []byte) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.closed {
+		return 0, io.EOF
+	}
+
+	if r.initial != nil && r.initial.Len() > 0 {
+		return r.initial.Read(p)
+	}
+
+	if r.file == nil {
+		select {
+		case <-r.ctx.Done():
+			return 0, r.ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+			return 0, nil
+		}
+	}
+
+	for {
+		if r.ctx.Err() != nil {
+			return 0, r.ctx.Err()
+		}
+
+		n, err := r.file.Read(p)
+		if n > 0 {
+			r.offset += int64(n)
+			return n, nil
+		}
+		if err != nil && !errors.Is(err, io.EOF) {
+			return 0, err
+		}
+
+		// At EOF: wait for new data or cancellation
+		select {
+		case <-r.ctx.Done():
+			return 0, r.ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+}
+
+func (r *followLogReader) Close() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.closed = true
+	if r.file != nil {
+		return r.file.Close()
+	}
+	return nil
+}
+
 // GetContainerLogs retrieves the logs of a container by name from the provider.
 func (v *VirtualK8S) GetContainerLogs(ctx context.Context, namespace, podName, containerName string, opts vkapi.ContainerLogOpts) (io.ReadCloser, error) {
 	podKey := client.ObjectKey{Namespace: namespace, Name: podName}
-	logger := v.Logger.WithValues("obj", podKey)
+	logger := v.Logger.WithValues("obj", podKey, "container", containerName)
 
-	logger.Info("[K8s] -> GetContainerLogs", "container", containerName)
-	defer logger.Info("[K8s] <- GetContainerLogs", "container", containerName)
+	logger.Info("[K8s] -> GetContainerLogs")
+	defer logger.Info("[K8s] <- GetContainerLogs")
 
-	logfilePath := compute.Skiff.Pod(podKey).Container(containerName).LogsPath()
-
-	if opts.Follow {
-		v.Logger.Info("[K8s] WARNING -- Log with \"follow\" is not yet supported by Skiff")
+	// Validate pod existence
+	pl := PodHandler.GlobalRegistry.GetByKey(podKey)
+	var pod *corev1.Pod
+	if pl != nil {
+		pod = pl.GetPod()
+	} else if val, ok := v.pods.Load(podKey); ok {
+		pod = val.(*corev1.Pod)
+	} else {
+		return nil, errdefs.NotFoundf("pod %s/%s not found", namespace, podName)
 	}
 
-	if opts.Tail <= 0 {
-		logs, err := os.Open(logfilePath)
+	// Validate container existence in pod spec
+	containerFound := false
+	for _, c := range pod.Spec.Containers {
+		if c.Name == containerName {
+			containerFound = true
+			break
+		}
+	}
+	if !containerFound {
+		for _, c := range pod.Spec.InitContainers {
+			if c.Name == containerName {
+				containerFound = true
+				break
+			}
+		}
+	}
+	if !containerFound {
+		return nil, errdefs.NotFoundf("container %s not found in pod %s/%s", containerName, namespace, podName)
+	}
+
+	var podDir endpoint.PodPath
+	if pl != nil {
+		podDir = pl.PodDir()
+	} else {
+		podDir = compute.Skiff.Pod(podKey)
+	}
+	logfilePath := podDir.Container(containerName).LogsPath()
+
+	var initialBytes []byte
+	if opts.Tail == 0 && !opts.Follow {
+		return io.NopCloser(bytes.NewReader([]byte{})), nil
+	} else if opts.Tail > 0 {
+		logs, err := container.GetTailLog(logfilePath, opts.Tail)
+		if err == nil {
+			var buf bytes.Buffer
+			for _, line := range logs {
+				buf.WriteString(line + "\n")
+			}
+			initialBytes = buf.Bytes()
+		}
+	} else if opts.Tail < 0 && !opts.Follow {
+		data, err := os.ReadFile(logfilePath)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				return io.NopCloser(bytes.NewReader([]byte{})), nil
 			}
-			return nil, fmt.Errorf("unable to batch logs: %w", err)
+			return nil, fmt.Errorf("unable to read logs: %w", err)
 		}
-		return logs, nil
+		return io.NopCloser(bytes.NewReader(data)), nil
 	}
 
-	if opts.Tail > 0 {
-		logs, err := container.GetTailLog(logfilePath, opts.Tail)
-		if err != nil {
-			return nil, fmt.Errorf("unable to batch logs: %w", err)
-		}
-
-		results := bytes.NewBuffer(nil)
-		for _, nll := range logs {
-			results.WriteString(nll + "\n")
-		}
-		return io.NopCloser(bytes.NewReader(results.Bytes())), nil
+	if opts.Follow {
+		return newFollowLogReader(ctx, logfilePath, initialBytes)
 	}
 
-	return io.NopCloser(bytes.NewReader([]byte{})), nil
+	return io.NopCloser(bytes.NewReader(initialBytes)), nil
 }
 
-// RunInContainer executes a command in a container in the pod.
+// RunInContainer executes a command in a live container in the pod locally without looping back through the API server.
 func (v *VirtualK8S) RunInContainer(ctx context.Context, namespace, podName, containerName string, cmd []string, attach vkapi.AttachIO) error {
 	podKey := client.ObjectKey{Namespace: namespace, Name: podName}
-	logger := v.Logger.WithValues("obj", podKey)
+	logger := v.Logger.WithValues("obj", podKey, "container", containerName)
 
-	logger.Info("[K8s] -> RunInContainer", "container", containerName)
-	defer logger.Info("[K8s] <- RunInContainer", "container", containerName)
+	logger.Info("[K8s] -> RunInContainer")
+	defer logger.Info("[K8s] <- RunInContainer")
 
 	defer func() {
-		if attach.Stdout() != nil {
-			attach.Stdout().Close()
-		}
-		if attach.Stderr() != nil {
-			attach.Stderr().Close()
+		if attach != nil {
+			if attach.Stdout() != nil {
+				attach.Stdout().Close()
+			}
+			if attach.Stderr() != nil {
+				attach.Stderr().Close()
+			}
 		}
 	}()
 
-	req := compute.K8SClientset.RESTClient().
-		Post().
-		Namespace(namespace).
-		Resource("pods").
-		Name(podName).
-		SubResource("exec").
-		Timeout(0).
-		VersionedParams(&corev1.PodExecOptions{
-			Container: containerName,
-			Command:   cmd,
-			Stdin:     attach.Stdin() != nil,
-			Stdout:    attach.Stdout() != nil,
-			Stderr:    attach.Stderr() != nil,
-			TTY:       attach.TTY(),
-		}, scheme.ParameterCodec)
-
-	exec, err := remotecommand.NewSPDYExecutor(v.InitConfig.RestConfig, "POST", req.URL())
-	if err != nil {
-		return fmt.Errorf("could not make remote command: %w", err)
+	pl := PodHandler.GlobalRegistry.GetByKey(podKey)
+	if pl == nil {
+		return errdefs.NotFoundf("pod %s/%s not found", namespace, podName)
 	}
 
-	return exec.Stream(remotecommand.StreamOptions{
-		Stdin:             attach.Stdin(),
-		Stdout:            attach.Stdout(),
-		Stderr:            attach.Stderr(),
-		Tty:               attach.TTY(),
-		TerminalSizeQueue: &termSize{attach: attach},
-	})
-}
-
-type termSize struct {
-	attach vkapi.AttachIO
-}
-
-func (t *termSize) Next() *remotecommand.TerminalSize {
-	resize := <-t.attach.Resize()
-	return &remotecommand.TerminalSize{
-		Height: resize.Height,
-		Width:  resize.Width,
+	cr, ok := pl.GetContainer(containerName)
+	if !ok || cr.PID <= 1 || runtime.IsProcessDead(cr.PID) {
+		return errdefs.NotFoundf("container %s is not running in pod %s/%s", containerName, namespace, podName)
 	}
+
+	// Execute command locally into the container's namespaces using nsenter
+	nsenterArgs := []string{
+		"-t", strconv.Itoa(cr.PID),
+		"-m", "-u", "-i", "-n", "-p",
+		"--",
+	}
+	nsenterArgs = append(nsenterArgs, cmd...)
+
+	execCmd := exec.CommandContext(ctx, "nsenter", nsenterArgs...)
+	if attach != nil {
+		execCmd.Stdin = attach.Stdin()
+		execCmd.Stdout = attach.Stdout()
+		execCmd.Stderr = attach.Stderr()
+	}
+
+	return execCmd.Run()
 }

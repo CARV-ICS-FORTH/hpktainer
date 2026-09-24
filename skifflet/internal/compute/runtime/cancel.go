@@ -26,7 +26,15 @@ import (
 	"time"
 )
 
-var ErrInvalidJob = errors.New("invalid job id")
+var (
+	ErrInvalidJob = errors.New("invalid job id")
+	ErrPIDTooLow  = errors.New("pid must be greater than 1")
+)
+
+type trackedPID struct {
+	pid       int
+	startTime uint64
+}
 
 // IsProcessDead checks whether a process has exited or is in zombie state ('Z').
 func IsProcessDead(pid int) bool {
@@ -34,6 +42,9 @@ func IsProcessDead(pid int) bool {
 }
 
 func isProcessDead(pid int) bool {
+	if pid <= 1 {
+		return true
+	}
 	err := syscall.Kill(pid, 0)
 	if errors.Is(err, syscall.ESRCH) {
 		return true
@@ -67,6 +78,9 @@ func isProcessDead(pid int) bool {
 
 // GetProcessStartTime returns the process start time (field 22 of /proc/<pid>/stat) in clock ticks since boot.
 func GetProcessStartTime(pid int) (uint64, error) {
+	if pid <= 1 {
+		return 0, fmt.Errorf("%w: cannot get start time for pid %d", ErrPIDTooLow, pid)
+	}
 	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
 	if err != nil {
 		return 0, err
@@ -93,6 +107,9 @@ func GetProcessStartTime(pid int) (uint64, error) {
 // verifyProcessIdentity checks whether a process with the given PID matches the recorded process identity.
 // If /proc is present and recordedStartTime > 0, it verifies that current start time matches recordedStartTime.
 func verifyProcessIdentity(pid int, recordedStartTime uint64) bool {
+	if pid <= 1 {
+		return false
+	}
 	// If /proc is not present (e.g. non-Linux systems), skip check
 	if _, err := os.Stat("/proc"); os.IsNotExist(err) {
 		return true
@@ -124,33 +141,34 @@ func KillProcessByPIDWithTimeout(pidStr string, timeout time.Duration) (string, 
 
 // sweepSecondaryPIDs sends SIGTERM to secondary container process groups (-pgid) and PIDs,
 // waits briefly, and then sends SIGKILL to clean up any orphaned container processes.
-func sweepSecondaryPIDs(secondaryPIDs []int) {
+// Start time identity is revalidated before both SIGTERM and SIGKILL.
+func sweepSecondaryPIDs(secondaryPIDs []trackedPID) {
 	if len(secondaryPIDs) == 0 {
 		return
 	}
-	for _, secPID := range secondaryPIDs {
-		if secPID > 1 {
-			_ = syscall.Kill(-secPID, syscall.SIGTERM)
-			_ = syscall.Kill(secPID, syscall.SIGTERM)
+	for _, sec := range secondaryPIDs {
+		if sec.pid > 1 && verifyProcessIdentity(sec.pid, sec.startTime) {
+			_ = syscall.Kill(-sec.pid, syscall.SIGTERM)
+			_ = syscall.Kill(sec.pid, syscall.SIGTERM)
 		}
 	}
 
-	// 200 ms wait is intentionally short because the grace-period supervisor (pause) is already gone when sweeping secondary PIDs.
 	time.Sleep(200 * time.Millisecond)
 
-	for _, secPID := range secondaryPIDs {
-		if secPID > 1 {
-			_ = syscall.Kill(-secPID, syscall.SIGKILL)
-			_ = syscall.Kill(secPID, syscall.SIGKILL)
+	for _, sec := range secondaryPIDs {
+		if sec.pid > 1 && verifyProcessIdentity(sec.pid, sec.startTime) {
+			_ = syscall.Kill(-sec.pid, syscall.SIGKILL)
+			_ = syscall.Kill(sec.pid, syscall.SIGKILL)
 		}
 	}
 }
 
 // KillPodProcessesWithTimeout sends SIGTERM to primaryPIDStr and polls for process exit until timeout.
-// It uses adaptive polling (50 ms for the first second, then 250 ms) to reduce CPU overhead during grace periods.
-// If timeout is reached, SIGKILL is sent to primaryPIDStr AND to all process groups (-pgid) and PIDs in secondaryPIDStrs.
+// It uses adaptive polling to reduce CPU overhead during grace periods.
+// If timeout is reached, process identities are revalidated before escalating to SIGKILL.
+// All PIDs <= 1 are strictly rejected at all signaling boundaries.
 func KillPodProcessesWithTimeout(primaryPIDStr string, secondaryPIDStrs []string, timeout time.Duration) (string, error) {
-	var secondaryPIDs []int
+	var secondaryPIDs []trackedPID
 	for _, s := range secondaryPIDStrs {
 		s = strings.TrimSpace(s)
 		if s == "" {
@@ -158,7 +176,7 @@ func KillPodProcessesWithTimeout(primaryPIDStr string, secondaryPIDStrs []string
 		}
 		if p, secStartTime, err := ParseProcessJobID(s); err == nil && p > 1 {
 			if verifyProcessIdentity(p, secStartTime) {
-				secondaryPIDs = append(secondaryPIDs, p)
+				secondaryPIDs = append(secondaryPIDs, trackedPID{pid: p, startTime: secStartTime})
 			}
 		}
 	}
@@ -173,6 +191,10 @@ func KillPodProcessesWithTimeout(primaryPIDStr string, secondaryPIDStrs []string
 	if err != nil {
 		sweepSecondaryPIDs(secondaryPIDs)
 		return "", fmt.Errorf("%w: invalid pid '%s': %v", ErrInvalidJob, primaryPIDStr, err)
+	}
+	if primaryPID <= 1 {
+		sweepSecondaryPIDs(secondaryPIDs)
+		return "", fmt.Errorf("%w: invalid primary pid %d: must be > 1", ErrInvalidJob, primaryPID)
 	}
 
 	// Verify PID is the expected process by start time identity to prevent stale PID signaling on recycled host PIDs
@@ -197,10 +219,10 @@ func KillPodProcessesWithTimeout(primaryPIDStr string, secondaryPIDStrs []string
 		return "", fmt.Errorf("could not kill process '%d': %w", primaryPID, err)
 	}
 
-	for _, secPID := range secondaryPIDs {
-		if secPID > 1 {
-			_ = syscall.Kill(-secPID, syscall.SIGTERM)
-			_ = syscall.Kill(secPID, syscall.SIGTERM)
+	for _, sec := range secondaryPIDs {
+		if sec.pid > 1 && verifyProcessIdentity(sec.pid, sec.startTime) {
+			_ = syscall.Kill(-sec.pid, syscall.SIGTERM)
+			_ = syscall.Kill(sec.pid, syscall.SIGTERM)
 		}
 	}
 
@@ -208,8 +230,8 @@ func KillPodProcessesWithTimeout(primaryPIDStr string, secondaryPIDStrs []string
 		if !isProcessDead(primaryPID) {
 			return false
 		}
-		for _, secPID := range secondaryPIDs {
-			if !isProcessDead(secPID) {
+		for _, sec := range secondaryPIDs {
+			if !isProcessDead(sec.pid) {
 				return false
 			}
 		}
@@ -235,19 +257,19 @@ func KillPodProcessesWithTimeout(primaryPIDStr string, secondaryPIDStrs []string
 		time.Sleep(pollInterval)
 	}
 
-	// Timeout reached: escalate to SIGKILL for primary PID and secondary PIDs
-	_ = syscall.Kill(-primaryPID, syscall.SIGKILL)
-	if err := syscall.Kill(primaryPID, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
-		return "", fmt.Errorf("could not SIGKILL process '%d': %w", primaryPID, err)
+	// Timeout reached: revalidate identities before escalating to SIGKILL
+	if verifyProcessIdentity(primaryPID, primaryStartTime) {
+		_ = syscall.Kill(-primaryPID, syscall.SIGKILL)
+		if err := syscall.Kill(primaryPID, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+			return "", fmt.Errorf("could not SIGKILL process '%d': %w", primaryPID, err)
+		}
 	}
 
-	// Escalate SIGKILL to secondary container process groups (-pgid) and PIDs as second-tier fallback
-	for _, secPID := range secondaryPIDs {
-		if secPID > 1 {
-			// Signal process group leadership first (-secPID)
-			_ = syscall.Kill(-secPID, syscall.SIGKILL)
-			// Signal container PID directly
-			_ = syscall.Kill(secPID, syscall.SIGKILL)
+	// Escalate SIGKILL to secondary container process groups (-pgid) and PIDs with start time revalidation
+	for _, sec := range secondaryPIDs {
+		if sec.pid > 1 && verifyProcessIdentity(sec.pid, sec.startTime) {
+			_ = syscall.Kill(-sec.pid, syscall.SIGKILL)
+			_ = syscall.Kill(sec.pid, syscall.SIGKILL)
 		}
 	}
 

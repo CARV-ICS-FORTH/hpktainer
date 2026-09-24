@@ -9,11 +9,6 @@ import (
 	"skifflet/internal/compute/image"
 )
 
-var (
-	// DefaultPauseImage is an actionable object of the pause container.
-	DefaultPauseImage *image.Image
-)
-
 func Initialize(pauseImage string) error {
 	if compute.Environment.PodsDirectory != "" {
 		compute.Skiff = endpoint.SkiffWithPods(compute.Environment.WorkingDirectory, compute.Environment.PodsDirectory)
@@ -41,17 +36,15 @@ func Initialize(pauseImage string) error {
 		compute.DefaultLogger.Error(err, "failed to cleanup temp image files")
 	}
 
-	img, err := image.Pull(compute.Skiff.ImageDir(), image.Docker, pauseImage)
-	if err != nil {
-		return fmt.Errorf("failed to get pause container image: %w", err)
+	if pauseImage != "" {
+		if _, err := image.Pull(compute.Skiff.ImageDir(), image.Docker, pauseImage); err != nil {
+			compute.DefaultLogger.Info("Preflight pause image warmup skipped or deferred", "image", pauseImage, "err", err)
+		}
 	}
-
-	DefaultPauseImage = img
 
 	compute.DefaultLogger.Info("Runtime info",
 		"WorkingDirectory", compute.Skiff.String(),
 		"PodsDirectory", compute.Skiff.PodsDir(),
-		"PauseImagePath", DefaultPauseImage,
 	)
 
 	return nil

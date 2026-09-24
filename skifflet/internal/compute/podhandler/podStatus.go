@@ -17,12 +17,10 @@ package podhandler
 import (
 	"fmt"
 	"sort"
-	"strings"
 
 	"skifflet/internal/compute"
 	"skifflet/pkg/crdtools"
 
-	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -39,7 +37,8 @@ func UpdateStatusFromRuntime(pod *corev1.Pod) {
 	switch pod.Status.Phase {
 	case "":
 		/*-- If met for first time, check for unsupported fields --*/
-		if podWithExplicitlyUnsupportedFields(logger, pod) {
+		if err := ValidatePodCapabilities(pod); err != nil {
+			compute.PodError(pod, compute.ReasonUnsupportedFeatures, "%v", err)
 			return
 		}
 	case corev1.PodSucceeded, corev1.PodFailed:
@@ -221,60 +220,6 @@ func setTerminationConditions(pod *corev1.Pod) {
 	})
 }
 
-func podWithExplicitlyUnsupportedFields(logger logr.Logger, pod *corev1.Pod) bool {
-	var unsupportedFields []string
-
-	/*---------------------------------------------------
-	 * Unsupported Pod-Level Fields
-	 *---------------------------------------------------*/
-	if pod.GetNamespace() == "kube-system" {
-		unsupportedFields = append(unsupportedFields, ".Meta.Namespace == 'kube-system'")
-	}
-
-	if pod.Spec.Affinity != nil {
-		logger.Info("Ignore .Spec.Affinity")
-	}
-
-	if pod.Spec.DNSConfig != nil {
-		unsupportedFields = append(unsupportedFields, ".Spec.DNSConfig")
-	}
-
-	if pod.Spec.SecurityContext != nil {
-		logger.Info("Ignore .Spec.SecurityContext")
-	}
-
-	/*---------------------------------------------------
-	 * Unsupported Container-Level Fields
-	 *---------------------------------------------------*/
-	for i, container := range pod.Spec.Containers {
-		if container.SecurityContext != nil {
-			logger.Info(fmt.Sprintf("Ignore .Spec.Containers[%d].SecurityContext", i))
-		}
-
-		if container.StartupProbe != nil {
-			logger.Info(fmt.Sprintf("Ignore .Spec.Containers[%d].StartupProbe", i))
-		}
-
-		if container.LivenessProbe != nil {
-			logger.Info(fmt.Sprintf("Ignore .Spec.Containers[%d].LivenessProbe", i))
-		}
-
-		if container.ReadinessProbe != nil {
-			logger.Info(fmt.Sprintf("Ignore .Spec.Containers[%d].ReadinessProbe", i))
-		}
-	}
-
-	/*---------------------------------------------------
-	 * Summary of Unsupported Fields
-	 *---------------------------------------------------*/
-	if len(unsupportedFields) > 0 {
-		compute.PodError(pod, compute.ReasonUnsupportedFeatures, "UnsupportedFeatures: %s", strings.Join(unsupportedFields, ","))
-
-		return true
-	}
-
-	return false
-}
 
 // HumanReadableCode translates the exit code into a human-readable form.
 func HumanReadableCode(code int) string {

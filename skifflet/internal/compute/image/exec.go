@@ -14,25 +14,8 @@
 
 package image
 
-import (
-	"skifflet/internal/compute"
-	"skifflet/pkg/process"
-)
-
 // Image is an actionable object of a container image.
 type Image struct {
 	// Filepath points to the location where the image is stored.
 	Filepath string
-}
-
-// FakerootExec uses Apptainer to instantiate the image and run a command.
-func (p *Image) FakerootExec(apptainerArgs []string, cmd []string) (string, error) {
-	execCmd := []string{"exec", "--fakeroot"}
-	execCmd = append(execCmd, apptainerArgs...)
-	execCmd = append(execCmd, p.Filepath)
-	execCmd = append(execCmd, cmd...)
-
-	out, err := process.Execute(compute.Environment.ApptainerBin, execCmd...)
-
-	return string(out), err
 }

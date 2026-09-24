@@ -4,11 +4,12 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"skifflet/internal/compute/image"
 )
 
-func Test_ParseImageName(t *testing.T) {
+func Test_FormatPullReference_DigestPreserved(t *testing.T) {
 	tests := []struct {
 		name  string
 		image string
@@ -17,50 +18,99 @@ func Test_ParseImageName(t *testing.T) {
 		{
 			name:  "tagWithDigest",
 			image: "registry.k8s.io/ingress-nginx/kube-webhook-certgen:v20230407@sha256:543c40fd093964bc9ab509d3e791f9989963021f1e9e4c9c7b6700b02bfb227b",
-			want:  "/registry.k8s.io_ingress-nginx_kube-webhook-certgen_v20230407_sha256_543c40fd093964bc9ab509d3e791f9989963021f1e9e4c9c7b6700b02bfb227b.sif",
+			want:  "registry.k8s.io/ingress-nginx/kube-webhook-certgen@sha256:543c40fd093964bc9ab509d3e791f9989963021f1e9e4c9c7b6700b02bfb227b",
 		},
 		{
 			name:  "imageWithDigestNoTag",
 			image: "img@sha256:123456",
-			want:  "/img_latest_sha256_123456.sif",
+			want:  "img@sha256:123456",
 		},
 		{
-			name:  "StrangeTag",
+			name:  "registryWithPortAndTagAndDigest",
+			image: "localhost:5000/team/app:v1@sha256:abcdef",
+			want:  "localhost:5000/team/app@sha256:abcdef",
+		},
+		{
+			name:  "tagOnlyNoDigest",
 			image: "docker.io/istio/examples-bookinfo-details-v1:1.16.2",
-			want:  "/docker.io_istio_examples-bookinfo-details-v1_1.16.2.sif",
+			want:  "docker.io/istio/examples-bookinfo-details-v1:1.16.2",
 		},
 	}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := image.ParseImageName(tt.image); got != tt.want {
-				t.Errorf("parseImageName() = %v, want %v", got, tt.want)
+			if got := image.FormatPullReference(tt.image); got != tt.want {
+				t.Errorf("FormatPullReference(%q) = %q, want %q", tt.image, got, tt.want)
 			}
 		})
 	}
 }
 
-func Test_CleanupTempFiles(t *testing.T) {
+func Test_ParseImageName_CollisionResistance(t *testing.T) {
+	// 1. Registry with port and different tags must NOT collide
+	v1 := image.ParseImageName("localhost:5000/team/app:v1")
+	v2 := image.ParseImageName("localhost:5000/team/app:v2")
+	if v1 == v2 {
+		t.Errorf("cache key collision for v1 and v2: %s", v1)
+	}
+
+	// 2. Separators / vs _ must NOT collide
+	slashPath := image.ParseImageName("team/app:latest")
+	underscorePath := image.ParseImageName("team_app:latest")
+	if slashPath == underscorePath {
+		t.Errorf("cache key collision between slash and underscore: %s", slashPath)
+	}
+
+	// 3. Different architectures must NOT collide
+	amd64 := image.ParseImageNameForArch("alpine:latest", "amd64")
+	arm64 := image.ParseImageNameForArch("alpine:latest", "arm64")
+	if amd64 == arm64 {
+		t.Errorf("cache key collision between amd64 and arm64: %s", amd64)
+	}
+
+	// 4. Digest pinned images must have distinct keys from untagged/tagged
+	plain := image.ParseImageName("alpine:latest")
+	pinned := image.ParseImageName("alpine:latest@sha256:543c40fd093964bc9ab509d3e791f9989963021f1e9e4c9c7b6700b02bfb227b")
+	if plain == pinned {
+		t.Errorf("cache key collision between plain and digest pinned image: %s", plain)
+	}
+}
+
+func Test_CleanupTempFiles_PreservesRecentFiles(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	// Create a normal sif file, a temp file, and a directory
 	normalFile := filepath.Join(tmpDir, "image_latest.sif")
-	tempFile := filepath.Join(tmpDir, "image_latest.sif.tmp-123456789")
+	activeTempFile := filepath.Join(tmpDir, "image_latest.sif.tmp-active")
+	oldTempFile := filepath.Join(tmpDir, "image_latest.sif.tmp-old")
 	subDir := filepath.Join(tmpDir, "sub.tmp-dir")
 
 	_ = os.WriteFile(normalFile, []byte("data"), 0644)
-	_ = os.WriteFile(tempFile, []byte("temp"), 0644)
+	_ = os.WriteFile(activeTempFile, []byte("active temp"), 0644)
+	_ = os.WriteFile(oldTempFile, []byte("old temp"), 0644)
 	_ = os.Mkdir(subDir, 0755)
 
+	// Make oldTempFile appear 3 hours old
+	oldTime := time.Now().Add(-3 * time.Hour)
+	_ = os.Chtimes(oldTempFile, oldTime, oldTime)
+
+	// Clean up abandoned temp files (older than 2 hours)
 	if err := image.CleanupTempFiles(tmpDir); err != nil {
 		t.Fatalf("CleanupTempFiles failed: %v", err)
 	}
 
+	// normal file should remain
 	if _, err := os.Stat(normalFile); os.IsNotExist(err) {
 		t.Errorf("normal file should not be removed")
 	}
-	if _, err := os.Stat(tempFile); !os.IsNotExist(err) {
-		t.Errorf("temp file should have been removed")
+	// active temp file (< 2 hours) should NOT be removed (protects concurrent NFS pulls)
+	if _, err := os.Stat(activeTempFile); os.IsNotExist(err) {
+		t.Errorf("recent active temp file should be preserved")
 	}
+	// old temp file (> 2 hours) SHOULD be removed
+	if _, err := os.Stat(oldTempFile); !os.IsNotExist(err) {
+		t.Errorf("old abandoned temp file should have been removed")
+	}
+	// subdirectory should remain
 	if _, err := os.Stat(subDir); os.IsNotExist(err) {
 		t.Errorf("subdirectory should not be removed")
 	}

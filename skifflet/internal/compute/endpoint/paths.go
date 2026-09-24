@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -119,6 +120,15 @@ func (p SkiffPath) WalkPodDirectories(f WalkPodFunc) error {
 func (p SkiffPath) Pod(podRef client.ObjectKey) PodPath {
 	path := filepath.Join(p.PodsDir(), podRef.Namespace, podRef.Name)
 
+	return PodPath(path)
+}
+
+// PodWithUID generates an isolated, UID-qualified path for a pod generation.
+func (p SkiffPath) PodWithUID(podRef client.ObjectKey, uid types.UID) PodPath {
+	if uid == "" {
+		return p.Pod(podRef)
+	}
+	path := filepath.Join(p.PodsDir(), podRef.Namespace, fmt.Sprintf("%s_%s", podRef.Name, uid))
 	return PodPath(path)
 }
 

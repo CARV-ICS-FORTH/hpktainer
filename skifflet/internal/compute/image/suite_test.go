@@ -6,26 +6,22 @@ import (
 	"testing"
 
 	"skifflet/internal/compute"
-	"skifflet/internal/compute/runtime"
+	"skifflet/internal/compute/endpoint"
 )
 
 func TestMain(m *testing.M) {
-	tmpDir, err := os.MkdirTemp("", "randomuser")
+	tmpDir, err := os.MkdirTemp("", "skiff-image-test-*")
 	if err != nil {
 		panic(err)
 	}
 
-	if err := setup(tmpDir); err != nil {
-		compute.DefaultLogger.Info("Skipping image package tests: runtime.Initialize failed", "err", err)
-		shutdown(tmpDir)
-		os.Exit(0)
-	}
+	setup(tmpDir)
 	code := m.Run()
 	shutdown(tmpDir)
 	os.Exit(code)
 }
 
-func setup(tmpDir string) error {
+func setup(tmpDir string) {
 	compute.Environment = compute.HostEnvironment{
 		KubeMasterHost:    "",
 		ContainerRegistry: "",
@@ -34,10 +30,11 @@ func setup(tmpDir string) error {
 		PodsDirectory:     filepath.Join(tmpDir, ".skiff", ".pods"),
 		KubeDNS:           "",
 	}
-
-	return runtime.Initialize("registry.k8s.io/pause:3.10")
+	compute.Skiff = endpoint.SkiffWithPods(tmpDir, compute.Environment.PodsDirectory)
+	_ = os.MkdirAll(compute.Skiff.PodsDir(), 0755)
+	_ = os.MkdirAll(compute.Skiff.ImageDir(), 0755)
 }
 
 func shutdown(tmpDir string) {
-	os.RemoveAll(tmpDir)
+	_ = os.RemoveAll(tmpDir)
 }

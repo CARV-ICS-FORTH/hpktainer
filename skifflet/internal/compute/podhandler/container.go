@@ -32,6 +32,59 @@ import (
 	mounter "k8s.io/utils/mount"
 )
 
+// ResolveContainerEnvironment resolves the final container environment by:
+// 1. Starting with cluster/service-derived variables (lower precedence)
+// 2. Applying container-specific environment variables (higher precedence)
+// 3. Resolving deferred runtime FieldRefs (status.podIP, status.hostIP, metadata.name, metadata.namespace, metadata.uid)
+func ResolveContainerEnvironment(pod *corev1.Pod, container *corev1.Container, serviceEnvs []corev1.EnvVar) []corev1.EnvVar {
+	envMap := make(map[string]string)
+	var order []string
+
+	// 1. Lower precedence: service-derived environment variables
+	for _, envVar := range serviceEnvs {
+		if _, exists := envMap[envVar.Name]; !exists {
+			order = append(order, envVar.Name)
+		}
+		envMap[envVar.Name] = envVar.Value
+	}
+
+	// 2. Higher precedence: container.Env (user-specified, envFrom, etc.)
+	for _, envVar := range container.Env {
+		val := envVar.Value
+		// Deferred FieldRef resolution
+		if envVar.ValueFrom != nil && envVar.ValueFrom.FieldRef != nil {
+			switch envVar.ValueFrom.FieldRef.FieldPath {
+			case "status.podIP":
+				val = pod.Status.PodIP
+			case "status.hostIP":
+				val = pod.Status.HostIP
+			case "metadata.name":
+				val = pod.Name
+			case "metadata.namespace":
+				val = pod.Namespace
+			case "metadata.uid":
+				val = string(pod.UID)
+			}
+		} else if val == ".status.podIP" { // legacy skifflet convention
+			val = pod.Status.PodIP
+		}
+
+		if _, exists := envMap[envVar.Name]; !exists {
+			order = append(order, envVar.Name)
+		}
+		envMap[envVar.Name] = val
+	}
+
+	resolved := make([]corev1.EnvVar, len(order))
+	for i, name := range order {
+		resolved[i] = corev1.EnvVar{
+			Name:  name,
+			Value: envMap[name],
+		}
+	}
+	return resolved
+}
+
 // buildContainer replicates the container preparation behavior.
 func (h *PodHandler) buildContainer(container *corev1.Container, containerStatus *corev1.ContainerStatus) (Container, error) {
 	/*---------------------------------------------------
@@ -41,16 +94,16 @@ func (h *PodHandler) buildContainer(container *corev1.Container, containerStatus
 	uid, gid := DetermineEffectiveRunAsUser(effectiSecurityContext)
 
 	/*---------------------------------------------------
+	 * Resolve Container Environment Pipeline
+	 *---------------------------------------------------*/
+	resolvedEnvs := ResolveContainerEnvironment(h.Pod, container, h.podEnvVariables)
+
+	/*---------------------------------------------------
 	 * Generate Environment Variables File
 	 *---------------------------------------------------*/
 	var b strings.Builder
-	allEnvs := append(container.Env, h.podEnvVariables...)
-	for _, envVar := range allEnvs {
-		val := envVar.Value
-		if val == ".status.podIP" {
-			val = h.Pod.Status.PodIP
-		}
-		fmt.Fprintf(&b, "%s=%s\n", envVar.Name, EscapeSingleQuote(val))
+	for _, envVar := range resolvedEnvs {
+		fmt.Fprintf(&b, "%s=%s\n", envVar.Name, EscapeSingleQuote(envVar.Value))
 	}
 
 	envfilePath := h.podDirectory.Container(container.Name).EnvFilePath()
@@ -69,7 +122,7 @@ func (h *PodHandler) buildContainer(container *corev1.Container, containerStatus
 		subPath := mount.SubPath
 		var err error
 		if mount.SubPathExpr != "" {
-			subPath, err = kubecontainer.ExpandContainerVolumeMounts(mount, h.podEnvVariables)
+			subPath, err = kubecontainer.ExpandContainerVolumeMounts(mount, resolvedEnvs)
 			if err != nil {
 				return Container{}, fmt.Errorf("cannot expand env variables for container '%s' of pod '%s': %w", container.Name, h.podKey, err)
 			}
@@ -88,11 +141,15 @@ func (h *PodHandler) buildContainer(container *corev1.Container, containerStatus
 			}
 
 			if !subPathFileExists {
-				if mount.SubPath == "0" {
+				// If subpath ends with a slash or has no extension, create dir placeholder safely
+				if strings.HasSuffix(subPath, "/") || filepath.Ext(subPath) == "" {
 					if err := hostutil.SafeMakeDir(subPath, hostPath, endpoint.PodGlobalDirectoryPermissions); err != nil {
 						return Container{}, fmt.Errorf("failed to create dir placeholder. subpath:'%s': %w", subPathFile, err)
 					}
 				} else {
+					if err := os.MkdirAll(filepath.Dir(subPathFile), endpoint.PodGlobalDirectoryPermissions); err != nil {
+						return Container{}, fmt.Errorf("failed to create parent dir for subpath:'%s': %w", subPathFile, err)
+					}
 					if err = os.WriteFile(subPathFile, []byte{}, endpoint.PodGlobalDirectoryPermissions); err != nil {
 						return Container{}, fmt.Errorf("failed to create placeholder. subpath:'%s': %w", subPathFile, err)
 					}
@@ -144,8 +201,8 @@ func (h *PodHandler) buildContainer(container *corev1.Container, containerStatus
 		ImageFilePath: img.Filepath,
 		EnvFilePath:   containerPath.EnvFilePath(),
 		Binds:         binds,
-		Command:       kubecontainer.ExpandContainerCommandOnlyStatic(container.Command, container.Env),
-		Args:          kubecontainer.ExpandContainerCommandOnlyStatic(container.Args, container.Env),
+		Command:       kubecontainer.ExpandContainerCommandOnlyStatic(container.Command, resolvedEnvs),
+		Args:          kubecontainer.ExpandContainerCommandOnlyStatic(container.Args, resolvedEnvs),
 		ExecutionMode: executionMode,
 		LogsPath:      containerPath.LogsPath(),
 	}
@@ -223,17 +280,8 @@ func SyncContainerStatuses(pod *corev1.Pod) {
 		}
 
 		if containerStatus.State.Running != nil {
-			// Check if process has died in /proc
-			if containerStatus.ContainerID != "" {
-				pid, startTime, err := runtime.ParseProcessJobID(containerStatus.ContainerID)
-				if err == nil && pid > 0 {
-					if runtime.IsProcessDead(pid) {
-						SetContainerTerminated(containerStatus, 137)
-						return
-					}
-					_ = startTime
-				}
-			}
+			// Do not synthesize exit code 137; command waiters are authoritative for exit status.
+			// Liveness polling only confirms process liveness without altering exit accounting.
 			return
 		}
 

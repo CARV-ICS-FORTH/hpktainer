@@ -2,6 +2,7 @@ package podhandler
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -9,21 +10,41 @@ import (
 	"skifflet/internal/compute/endpoint"
 )
 
-func TestEscapeSingleQuote(t *testing.T) {
-	tests := []struct {
+func TestEscapeSingleQuote_ShellRoundTrip(t *testing.T) {
+	testCases := []struct {
+		name  string
 		input string
-		want  string
 	}{
-		{"simple", "'simple'"},
-		{"foo'bar", "'foo'\\''bar'"},
-		{"hello world", "'hello world'"},
+		{"simple", "simple"},
+		{"spaces", "hello world"},
+		{"single_quote", "foo'bar"},
+		{"double_quote", `foo"bar`},
+		{"dollar_sign", "foo$bar"},
+		{"env_expansion_attempt", "$PATH ${VAR}"},
+		{"backticks", "foo`whoami`bar"},
+		{"backslashes", `foo\bar\baz`},
+		{"newlines", "line1\nline2\nline3"},
+		{"tabs", "col1\tcol2"},
+		{"semicolon_and_pipes", "foo; bar | baz && qux || exit 1"},
+		{"glob_chars", "* ? [a-z] {1..5}"},
+		{"mixed_all", `echo "hello '$USER'" && \` + "\n" + `\` + "`whoami`" + ` $PATH`},
 	}
 
-	for _, tt := range tests {
-		got := EscapeSingleQuote(tt.input)
-		if got != tt.want {
-			t.Errorf("EscapeSingleQuote(%q) = %q; want %q", tt.input, got, tt.want)
-		}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			escaped := EscapeSingleQuote(tc.input)
+
+			// Execute a real shell command that outputs the escaped argument via printf '%s'
+			cmd := exec.Command("sh", "-c", "printf '%s' "+escaped)
+			out, err := cmd.Output()
+			if err != nil {
+				t.Fatalf("shell execution failed for input %q (escaped %q): %v", tc.input, escaped, err)
+			}
+
+			if string(out) != tc.input {
+				t.Errorf("Round-trip mismatch for %s:\ninput:   %q\nescaped: %q\ngot:     %q", tc.name, tc.input, escaped, string(out))
+			}
+		})
 	}
 }
 

@@ -412,6 +412,12 @@ func handleExec(apptainerBin string, globalOpts PlaidOptions, args []string) {
 	apptainerArgs = append(apptainerArgs, execArgs...)
 	apptainerArgs = append(apptainerArgs, cmdArgs...)
 
+	if opts.ReadinessFile != "" {
+		readinessData := fmt.Sprintf(`{"pause_pid":%d,"netns_path":"/proc/%d/ns/net","endpoint_id":"%s","ip":"%s","gateway":"%s"}`+"\n",
+			os.Getpid(), os.Getpid(), containerID, ipStr, gwStr)
+		_ = os.WriteFile(opts.ReadinessFile, []byte(readinessData), 0644)
+	}
+
 	code := runCommandWithCleanup(apptainerBin, apptainerArgs, cleanup)
 	os.Exit(code)
 }
@@ -742,6 +748,7 @@ func takesArg(flag string) bool {
 		"--pids-limit":         true,
 		"--pem-path":           true,
 		"--shell":              true,
+		"--readiness-file":     true,
 	}
 	return knownValFlags[flag]
 }

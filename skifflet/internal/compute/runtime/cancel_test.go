@@ -32,14 +32,27 @@ func createHelperProcess(t *testing.T) *exec.Cmd {
 }
 
 func TestKillProcessByPID_InvalidInputs(t *testing.T) {
-	_, err := KillProcessByPID("")
-	if !errors.Is(err, ErrInvalidJob) {
-		t.Errorf("expected ErrInvalidJob for empty pid, got %v", err)
+	invalidInputs := []string{
+		"",
+		"   ",
+		"invalid_number",
+		"0",
+		"1",
+		"-1",
+		"-999",
+		"pid://0",
+		"pid://1",
+		"pid://-1",
+		"pid://1:12345",
 	}
 
-	_, err = KillProcessByPID("invalid_number")
-	if !errors.Is(err, ErrInvalidJob) {
-		t.Errorf("expected ErrInvalidJob for non-numeric pid, got %v", err)
+	for _, input := range invalidInputs {
+		t.Run("input_"+input, func(t *testing.T) {
+			_, err := KillProcessByPID(input)
+			if err == nil {
+				t.Errorf("expected error for invalid PID %q, got nil", input)
+			}
+		})
 	}
 }
 

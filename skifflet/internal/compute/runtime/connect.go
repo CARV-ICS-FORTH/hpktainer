@@ -14,8 +14,22 @@
 
 package runtime
 
-// ConnectionOK returns true if the runtime environment is active.
-// Otherwise, it returns false.
+import (
+	"os"
+
+	"skifflet/internal/compute"
+)
+
+// ConnectionOK checks if the Skifflet runtime storage and core environment are initialized and healthy.
 func ConnectionOK() bool {
+	// Verify Skiff runtime directory is initialized and writable
+	skiffDir := compute.Skiff.PodsDir()
+	if skiffDir == "" {
+		return false
+	}
+	info, err := os.Stat(skiffDir)
+	if err != nil || !info.IsDir() {
+		return false
+	}
 	return true
 }

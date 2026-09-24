@@ -1,15 +1,20 @@
 package provider
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"skifflet/internal/compute"
 	"skifflet/internal/compute/endpoint"
 	PodHandler "skifflet/internal/compute/podhandler"
 
+	"github.com/virtual-kubelet/virtual-kubelet/errdefs"
+	vkapi "github.com/virtual-kubelet/virtual-kubelet/node/api"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -161,5 +166,111 @@ func TestNodeNameFiltering(t *testing.T) {
 		if name == "pod-b" {
 			t.Fatalf("reconcileNonTerminalPods processed pod-b which belongs to node-b")
 		}
+	}
+}
+
+func TestGetContainerLogs_OptionsAndErrors(t *testing.T) {
+	tmpDir := t.TempDir()
+	compute.Skiff = endpoint.SkiffWithPods(tmpDir, filepath.Join(tmpDir, ".skiff", ".pods"))
+
+	podKey := client.ObjectKey{Namespace: "default", Name: "log-pod"}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: podKey.Namespace,
+			Name:      podKey.Name,
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{Name: "app", Image: "alpine"},
+			},
+		},
+	}
+
+	podDir := compute.Skiff.Pod(podKey)
+	_ = os.MkdirAll(podDir.LogDir(), 0755)
+	logFile := podDir.Container("app").LogsPath()
+	_ = os.WriteFile(logFile, []byte("line1\nline2\nline3\nline4\n"), 0644)
+
+	vk := &VirtualK8S{}
+	vk.pods.Store(podKey, pod)
+
+	// 1. Missing pod returns NotFound
+	_, err := vk.GetContainerLogs(context.Background(), "default", "nonexistent-pod", "app", vkapi.ContainerLogOpts{})
+	if err == nil || !errdefs.IsNotFound(err) {
+		t.Fatalf("expected NotFound for missing pod, got: %v", err)
+	}
+
+	// 2. Missing container returns NotFound
+	_, err = vk.GetContainerLogs(context.Background(), "default", "log-pod", "nonexistent-container", vkapi.ContainerLogOpts{})
+	if err == nil || !errdefs.IsNotFound(err) {
+		t.Fatalf("expected NotFound for missing container, got: %v", err)
+	}
+
+	// 3. Tail 0 returns 0 bytes
+	rc, err := vk.GetContainerLogs(context.Background(), "default", "log-pod", "app", vkapi.ContainerLogOpts{Tail: 0})
+	if err != nil {
+		t.Fatalf("unexpected error with Tail 0: %v", err)
+	}
+	defer rc.Close()
+	data, _ := io.ReadAll(rc)
+	if len(data) != 0 {
+		t.Fatalf("expected 0 bytes for Tail 0, got %d bytes: %q", len(data), string(data))
+	}
+
+	// 4. Tail 2 returns last 2 lines
+	rc, err = vk.GetContainerLogs(context.Background(), "default", "log-pod", "app", vkapi.ContainerLogOpts{Tail: 2})
+	if err != nil {
+		t.Fatalf("unexpected error with Tail 2: %v", err)
+	}
+	defer rc.Close()
+	data, _ = io.ReadAll(rc)
+	expectedTail := "line3\nline4\n"
+	if string(data) != expectedTail {
+		t.Fatalf("expected %q for Tail 2, got %q", expectedTail, string(data))
+	}
+
+	// 5. Follow streams new data until context cancellation
+	ctx, cancel := context.WithCancel(context.Background())
+	rc, err = vk.GetContainerLogs(ctx, "default", "log-pod", "app", vkapi.ContainerLogOpts{Follow: true, Tail: 1})
+	if err != nil {
+		t.Fatalf("unexpected error with Follow: %v", err)
+	}
+	defer rc.Close()
+
+	// Initial tail 1 line should be available
+	buf := make([]byte, 64)
+	n, err := rc.Read(buf)
+	if err != nil {
+		t.Fatalf("failed to read initial follow byte: %v", err)
+	}
+	if !bytes.Contains(buf[:n], []byte("line4")) {
+		t.Fatalf("expected initial line4, got %q", string(buf[:n]))
+	}
+
+	// Cancel context to stop follow
+	cancel()
+	time.Sleep(50 * time.Millisecond)
+	_, _ = rc.Read(buf) // Must unblock without hang
+}
+
+func TestProvider_UnsupportedOperations(t *testing.T) {
+	vk := &VirtualK8S{}
+
+	// Port-forward must return an error rather than empty success
+	err := vk.PortForward(context.Background(), "default", "p1", 8080, nil)
+	if err == nil {
+		t.Fatalf("expected error from unsupported PortForward, got nil")
+	}
+
+	// StatsSummary must return an error
+	_, err = vk.GetStatsSummary(context.Background())
+	if err == nil {
+		t.Fatalf("expected error from unsupported GetStatsSummary, got nil")
+	}
+
+	// RunInContainer on missing pod must return NotFound
+	err = vk.RunInContainer(context.Background(), "default", "p1", "c1", []string{"ls"}, nil)
+	if err == nil || !errdefs.IsNotFound(err) {
+		t.Fatalf("expected NotFound for RunInContainer on missing pod, got: %v", err)
 	}
 }

@@ -17,6 +17,9 @@ package image
 import (
 	"bufio"
 	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -28,8 +31,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"skifflet/internal/compute"
 	"skifflet/pkg/process"
 )
@@ -59,12 +64,6 @@ func ResolveLocal(imageDir string, imageName string) (*Image, error) {
 }
 
 // pullLocks protects concurrent pulls of the same image within a single process.
-// Note: across multiple processes (e.g. multiple kubelets sharing an NFS image directory),
-// concurrent pulls are safe because downloads write to unique .tmp-* files before performing
-// an atomic rename to the target SIF path. While safe, concurrent NFS pulls of the same image
-// are wasteful.
-// Note: pullLocks entries remain in the sync.Map for the lifetime of the process. Since the
-// number of unique images referenced by a node daemon is bounded in practice, this growth is harmless.
 var pullLocks sync.Map
 
 func getPullLock(targetPath string) *sync.Mutex {
@@ -72,32 +71,108 @@ func getPullLock(targetPath string) *sync.Mutex {
 	return l.(*sync.Mutex)
 }
 
-func Pull(imageDir string, transport Transport, imageName string) (*Image, error) {
-	img, err := ResolveLocal(imageDir, imageName)
-	if err == nil {
-		return img, nil
+// FormatPullReference prepares an image reference for Apptainer.
+// When an image contains both a tag and a digest, Apptainer fails.
+// To preserve cryptographic digest pinning, the tag is stripped and the digest is preserved.
+func FormatPullReference(rawImageName string) string {
+	partsAt := strings.SplitN(rawImageName, "@", 2)
+	if len(partsAt) == 2 {
+		digest := partsAt[1]
+		namePart := partsAt[0]
+
+		slashIdx := strings.LastIndex(namePart, "/")
+		colonIdx := -1
+		if slashIdx == -1 {
+			colonIdx = strings.LastIndex(namePart, ":")
+		} else {
+			rel := namePart[slashIdx+1:]
+			if idx := strings.LastIndex(rel, ":"); idx != -1 {
+				colonIdx = slashIdx + 1 + idx
+			}
+		}
+
+		repo := namePart
+		if colonIdx != -1 {
+			repo = namePart[:colonIdx]
+		}
+		return repo + "@" + digest
+	}
+	return rawImageName
+}
+
+// ParseImageName generates a collision-resistant, architecture-specific cache filename for an image.
+func ParseImageName(rawImageName string) string {
+	return ParseImageNameForArch(rawImageName, runtime.GOARCH)
+}
+
+// ParseImageNameForArch generates a collision-resistant cache filename for the given architecture.
+func ParseImageNameForArch(rawImageName string, arch string) string {
+	if rawImageName == "" {
+		return "/unnamed_" + arch + ".sif"
 	}
 
-	img = &Image{Filepath: imageDir + ParseImageName(imageName)}
+	reg := regexp.MustCompile(`[^a-zA-Z0-9.-]+`)
+	cleanPrefix := reg.ReplaceAllString(rawImageName, "_")
+	if len(cleanPrefix) > 64 {
+		cleanPrefix = cleanPrefix[:64]
+	}
 
+	// 16-hex sha256 hash of the exact canonical raw reference to ensure collision resistance
+	// across ports (registry:5000/app:v1 vs registry:5000/app:v2) and path separators (a/b vs a_b).
+	h := sha256.Sum256([]byte(rawImageName))
+	hashSuffix := hex.EncodeToString(h[:8])
+
+	return fmt.Sprintf("/%s_%s_%s.sif", cleanPrefix, hashSuffix, arch)
+}
+
+// Pull downloads an image if not present using default pull policy.
+func Pull(imageDir string, transport Transport, imageName string) (*Image, error) {
+	return PullWithPolicy(context.Background(), imageDir, transport, imageName, corev1.PullIfNotPresent)
+}
+
+// PullWithPolicy downloads an image honoring ImagePullPolicy and caller context.
+func PullWithPolicy(ctx context.Context, imageDir string, transport Transport, imageName string, policy corev1.PullPolicy) (*Image, error) {
+	if policy == corev1.PullNever {
+		return ResolveLocal(imageDir, imageName)
+	}
+
+	if policy != corev1.PullAlways {
+		if img, err := ResolveLocal(imageDir, imageName); err == nil {
+			return img, nil
+		}
+	}
+
+	img := &Image{Filepath: imageDir + ParseImageName(imageName)}
+
+	// 1. Process-local synchronization
 	lock := getPullLock(img.Filepath)
 	lock.Lock()
 	defer lock.Unlock()
 
-	// Re-check after acquiring lock in case another goroutine completed the pull.
-	if checkedImg, err := ResolveLocal(imageDir, imageName); err == nil {
-		return checkedImg, nil
+	// 2. Inter-process / multi-node flock synchronization on shared NFS
+	flockPath := img.Filepath + ".flock"
+	flockFile, flockErr := os.OpenFile(flockPath, os.O_CREATE|os.O_RDWR, 0600)
+	if flockErr == nil {
+		defer flockFile.Close()
+		_ = syscall.Flock(int(flockFile.Fd()), syscall.LOCK_EX)
+		defer syscall.Flock(int(flockFile.Fd()), syscall.LOCK_UN)
+	}
+
+	// Re-check after acquiring locks
+	if policy != corev1.PullAlways {
+		if checkedImg, err := ResolveLocal(imageDir, imageName); err == nil {
+			return checkedImg, nil
+		}
 	}
 
 	tmpFile := img.Filepath + ".tmp-" + strconv.FormatInt(time.Now().UnixNano(), 10)
 
-	// Remove the digest from the image name passed to Apptainer, because Apptainer fails with
-	// "Docker references with both a tag and digest are currently not supported".
-	pullImageName := strings.Split(imageName, "@")[0]
+	// Format pull reference: preserve digest, discard tag if both present
+	pullImageName := FormatPullReference(imageName)
 
-	// otherwise, download a fresh copy
-	compute.DefaultLogger.Info(" * Downloading image...", "image", imageName, "dir", imageDir)
+	compute.DefaultLogger.Info(" * Downloading image...", "image", imageName, "dir", imageDir, "pullRef", pullImageName)
 	if _, err := executePullWithProgress(
+		ctx,
 		imageName,
 		compute.Environment.ApptainerBin,
 		"pull",
@@ -109,6 +184,7 @@ func Pull(imageDir string, transport Transport, imageName string) (*Image, error
 		return nil, fmt.Errorf("downloading has failed: %w", err)
 	}
 
+	// Atomic rename to published SIF
 	if err := os.Rename(tmpFile, img.Filepath); err != nil {
 		_ = os.Remove(tmpFile)
 		return nil, fmt.Errorf("failed to rename downloaded image: %w", err)
@@ -119,8 +195,8 @@ func Pull(imageDir string, transport Transport, imageName string) (*Image, error
 	return img, nil
 }
 
-func executePullWithProgress(imageName string, command string, arguments ...string) ([]byte, error) {
-	cmd := exec.Command(command, arguments...)
+func executePullWithProgress(ctx context.Context, imageName string, command string, arguments ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, command, arguments...)
 	cmd.Env = os.Environ()
 	cmd.Env = append(cmd.Env, process.GoEnviron...)
 
@@ -151,6 +227,9 @@ func executePullWithProgress(imageName string, command string, arguments ...stri
 			return
 		}
 
+		mu.Lock()
+		defer mu.Unlock()
+
 		bucket := p / 5
 		if p != 100 && bucket <= lastBucket {
 			return
@@ -165,6 +244,8 @@ func executePullWithProgress(imageName string, command string, arguments ...stri
 		compute.DefaultLogger.Info(" * Pull progress", "image", imageName, "progress", fmt.Sprintf("%3d%% [%s]", p, bar))
 	}
 
+	const maxOutputBytes = 64 * 1024
+
 	scanStream := func(r io.Reader) {
 		defer wg.Done()
 
@@ -176,8 +257,10 @@ func executePullWithProgress(imageName string, command string, arguments ...stri
 			line := scanner.Text()
 
 			mu.Lock()
-			output.WriteString(line)
-			output.WriteByte('\n')
+			if output.Len() < maxOutputBytes {
+				output.WriteString(line)
+				output.WriteByte('\n')
+			}
 			mu.Unlock()
 
 			matches := progressRe.FindAllStringSubmatch(line, -1)
@@ -192,8 +275,10 @@ func executePullWithProgress(imageName string, command string, arguments ...stri
 
 		if err := scanner.Err(); err != nil {
 			mu.Lock()
-			output.WriteString(err.Error())
-			output.WriteByte('\n')
+			if output.Len() < maxOutputBytes {
+				output.WriteString(err.Error())
+				output.WriteByte('\n')
+			}
 			mu.Unlock()
 		}
 	}
@@ -213,65 +298,47 @@ func executePullWithProgress(imageName string, command string, arguments ...stri
 
 	for {
 		select {
+		case <-ctx.Done():
+			_ = cmd.Process.Kill()
+			wg.Wait()
+			return nil, ctx.Err()
+
 		case err := <-done:
 			wg.Wait()
 
 			mu.Lock()
 			out := output.Bytes()
+			curPercent := lastPercent
 			mu.Unlock()
 
 			if err != nil {
 				return out, fmt.Errorf("process error: %w\noutput: %s", err, string(out))
 			}
 
-			if lastPercent >= 0 && lastPercent < 100 {
+			if curPercent >= 0 && curPercent < 100 {
 				reportProgress(100)
 			}
 
 			return out, nil
 
 		case <-ticker.C:
-			if lastPercent < 0 {
+			mu.Lock()
+			curPercent := lastPercent
+			mu.Unlock()
+			if curPercent < 0 {
 				compute.DefaultLogger.Info(" * Pull still in progress", "image", imageName, "elapsed", time.Since(start).Round(time.Second).String())
 			}
 		}
 	}
 }
 
-func ParseImageName(rawImageName string) string {
-	if rawImageName == "" {
-		return "/unnamed.sif"
-	}
-
-	reg := regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
-
-	partsAt := strings.SplitN(rawImageName, "@", 2)
-	nameWithoutDigest := partsAt[0]
-	var digestSuffix string
-	if len(partsAt) > 1 && partsAt[1] != "" {
-		cleanDigest := reg.ReplaceAllString(partsAt[1], "_")
-		if cleanDigest != "" {
-			digestSuffix = "_" + cleanDigest
-		}
-	}
-
-	// Split name and tag
-	parts := strings.Split(nameWithoutDigest, ":")
-	imageRef := parts[0]
-	tag := "latest"
-	if len(parts) > 1 {
-		tag = parts[1]
-	}
-
-	// Clean imageRef and tag by replacing non-alphanumeric characters with underscores
-	cleanRef := reg.ReplaceAllString(imageRef, "_")
-	cleanTag := reg.ReplaceAllString(tag, "_")
-
-	return "/" + cleanRef + "_" + cleanTag + digestSuffix + ".sif"
+// CleanupTempFiles removes only abandoned .tmp-* files (older than 2 hours and unlocked).
+func CleanupTempFiles(imageDir string) error {
+	return CleanupAbandonedTempFiles(imageDir, 2*time.Hour)
 }
 
-// CleanupTempFiles removes any leftover .tmp-* files in the image directory left by interrupted pulls.
-func CleanupTempFiles(imageDir string) error {
+// CleanupAbandonedTempFiles removes .tmp-* files older than maxAge whose lock is not held.
+func CleanupAbandonedTempFiles(imageDir string, maxAge time.Duration) error {
 	entries, err := os.ReadDir(imageDir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -283,10 +350,30 @@ func CleanupTempFiles(imageDir string) error {
 	for _, entry := range entries {
 		if !entry.IsDir() && strings.Contains(entry.Name(), ".tmp-") {
 			path := filepath.Join(imageDir, entry.Name())
+			info, err := entry.Info()
+			if err != nil {
+				continue
+			}
+
+			if maxAge > 0 && time.Since(info.ModTime()) < maxAge {
+				continue // active or recent file, do not remove
+			}
+
+			// Verify file is not actively locked
+			f, err := os.OpenFile(path, os.O_RDWR, 0)
+			if err == nil {
+				if flockErr := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); flockErr != nil {
+					_ = f.Close()
+					continue // actively locked
+				}
+				_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+				_ = f.Close()
+			}
+
 			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-				compute.DefaultLogger.Error(err, "failed to remove temp image file", "path", path)
+				compute.DefaultLogger.Error(err, "failed to remove abandoned temp image file", "path", path)
 			} else {
-				compute.DefaultLogger.Info("Cleaned up leftover temp image file", "path", path)
+				compute.DefaultLogger.Info("Cleaned up abandoned temp image file", "path", path)
 			}
 		}
 	}

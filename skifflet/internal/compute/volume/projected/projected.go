@@ -18,6 +18,7 @@ package projected
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"skifflet/internal/compute"
 	"skifflet/internal/compute/volume"
@@ -54,12 +55,13 @@ func (b *VolumeMounter) SetUpAt(ctx context.Context, dir string) error {
 	}
 
 	var data map[string]util.FileProjection
+	var earliestExpiry time.Time
 	var errCollect error
 
 	if err := retry.OnError(volume.NotFoundBackoff,
 		k8errors.IsNotFound, // retry condition
 		func() error { // execution
-			data, errCollect = b.collectData(ctx)
+			data, earliestExpiry, errCollect = b.collectDataWithExpiry(ctx)
 			return errCollect
 		},
 	); err != nil { // error checking
@@ -84,13 +86,16 @@ func (b *VolumeMounter) SetUpAt(ctx context.Context, dir string) error {
 		return fmt.Errorf("Error writing payload to dir: %w", err)
 	}
 
-	// fixme: add permissions
+	if !earliestExpiry.IsZero() {
+		go b.startTokenRefreshLoop(ctx, dir, writer, earliestExpiry)
+	}
 
 	return nil
 }
 
-func (b *VolumeMounter) collectData(ctx context.Context) (map[string]util.FileProjection, error) {
+func (b *VolumeMounter) collectDataWithExpiry(ctx context.Context) (map[string]util.FileProjection, time.Time, error) {
 	var errlist []error
+	var earliestExpiry time.Time
 	payload := make(map[string]util.FileProjection)
 
 	for _, source := range b.Volume.Projected.Sources {
@@ -225,11 +230,80 @@ func (b *VolumeMounter) collectData(ctx context.Context) (map[string]util.FilePr
 				continue
 			}
 
+			if !tokenRequest.Status.ExpirationTimestamp.IsZero() {
+				if earliestExpiry.IsZero() || tokenRequest.Status.ExpirationTimestamp.Time.Before(earliestExpiry) {
+					earliestExpiry = tokenRequest.Status.ExpirationTimestamp.Time
+				}
+			}
+
 			payload[source.ServiceAccountToken.Path] = util.FileProjection{
 				Data: []byte(tokenRequest.Status.Token),
 				Mode: *b.Volume.Projected.DefaultMode,
 			}
 		}
 	}
-	return payload, utilerrors.NewAggregate(errlist)
+	return payload, earliestExpiry, utilerrors.NewAggregate(errlist)
+}
+
+func (b *VolumeMounter) collectData(ctx context.Context) (map[string]util.FileProjection, error) {
+	data, _, err := b.collectDataWithExpiry(ctx)
+	return data, err
+}
+
+func (b *VolumeMounter) startTokenRefreshLoop(ctx context.Context, dir string, writer *util.AtomicWriter, initialExpiry time.Time) {
+	currentExpiry := initialExpiry
+
+	for {
+		now := time.Now()
+		totalLifetime := currentExpiry.Sub(now)
+		if totalLifetime <= 0 {
+			totalLifetime = 10 * time.Minute
+		}
+
+		// Rotate at 80% of total lifetime
+		refreshDelay := time.Duration(float64(totalLifetime) * 0.8)
+		if refreshDelay <= 0 {
+			refreshDelay = 30 * time.Second
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(refreshDelay):
+		}
+
+		var data map[string]util.FileProjection
+		var nextExpiry time.Time
+		var err error
+
+		// Retry with bounded backoff in case of temporary API outages
+		for attempt := 0; attempt < 5; attempt++ {
+			if ctx.Err() != nil {
+				return
+			}
+			data, nextExpiry, err = b.collectDataWithExpiry(ctx)
+			if err == nil {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(time.Duration(attempt+1) * 2 * time.Second):
+			}
+		}
+
+		if err != nil {
+			b.Logger.Error(err, "Failed to refresh projected service account token after retries")
+			continue
+		}
+
+		if err := writer.Write(data); err != nil {
+			b.Logger.Error(err, "Failed to write refreshed projected token atomically")
+			continue
+		}
+
+		if !nextExpiry.IsZero() {
+			currentExpiry = nextExpiry
+		}
+	}
 }

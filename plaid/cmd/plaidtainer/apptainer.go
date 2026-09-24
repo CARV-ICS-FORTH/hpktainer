@@ -23,6 +23,7 @@ type PlaidOptions struct {
 	Binds          []string
 	Binary         string
 	MTU            int
+	ReadinessFile  string
 }
 
 // EnsureDefaults sets default socket and binary paths if not explicitly configured.
@@ -32,6 +33,11 @@ func (opts *PlaidOptions) EnsureDefaults() {
 	}
 	if opts.Binary == "" {
 		opts.Binary = "/usr/local/bin/plaid"
+	}
+	if opts.ReadinessFile == "" {
+		if env := os.Getenv("PLAID_READINESS_FILE"); env != "" {
+			opts.ReadinessFile = env
+		}
 	}
 	if opts.MTU <= 0 {
 		if envMTU := os.Getenv("PLAID_MTU"); envMTU != "" {
@@ -71,6 +77,9 @@ func mergePlaidOptions(base, override PlaidOptions) PlaidOptions {
 	}
 	if override.MTU > 0 {
 		res.MTU = override.MTU
+	}
+	if override.ReadinessFile != "" {
+		res.ReadinessFile = override.ReadinessFile
 	}
 	return res
 }
@@ -166,6 +175,15 @@ func parseWrapperArgs(args []string) (opts PlaidOptions, apptainerFlags []string
 			if val, err := strconv.Atoi(args[i+1]); err == nil {
 				opts.MTU = val
 			}
+			i++
+			continue
+		}
+		if strings.HasPrefix(arg, "--readiness-file=") {
+			opts.ReadinessFile = strings.TrimPrefix(arg, "--readiness-file=")
+			continue
+		}
+		if arg == "--readiness-file" && i+1 < len(args) {
+			opts.ReadinessFile = args[i+1]
 			i++
 			continue
 		}
