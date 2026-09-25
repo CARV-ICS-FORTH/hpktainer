@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -136,11 +137,9 @@ func (v *VirtualK8S) CreatePod(ctx context.Context, pod *corev1.Pod) error {
 
 	pod.Status.HostIP = v.InitConfig.InternalIP
 
-	podDir := compute.Skiff.PodWithUID(podKey, pod.GetUID())
-	pl := PodHandler.NewPodLifecycle(pod, podDir, func(p *corev1.Pod) {
-		v.saveAndNotifyPod("lifecycle", p)
-	})
-	PodHandler.GlobalRegistry.Register(pl)
+	// CreatePod below owns the running containers and publishes their status.
+	// Registering a separate PodLifecycle here would expose its stale, Pending
+	// snapshot through GetPod and hide the live container IDs from exec.
 	v.pods.Store(podKey, pod)
 
 	go func() {
@@ -152,7 +151,7 @@ func (v *VirtualK8S) CreatePod(ctx context.Context, pod *corev1.Pod) error {
 			}
 		}()
 
-		PodHandler.CreatePod(pl.Context(), pod, func(p *corev1.Pod) {
+		PodHandler.CreatePod(context.Background(), pod, func(p *corev1.Pod) {
 			v.saveAndNotifyPod("podhandler", p)
 		})
 
@@ -420,8 +419,40 @@ func (v *VirtualK8S) reconcileNonTerminalPods() {
 
 func (v *VirtualK8S) PortForward(ctx context.Context, namespace, pod string, port int32, stream io.ReadWriteCloser) error {
 	podKey := client.ObjectKey{Namespace: namespace, Name: pod}
-	v.Logger.Info("[K8s] receive PortForward (not supported)", "pod", podKey)
-	return errors.New("port-forward is not yet implemented in this provider")
+	if stream == nil {
+		return fmt.Errorf("port-forward stream is nil")
+	}
+	value, ok := v.pods.Load(podKey)
+	if !ok {
+		return errdefs.NotFoundf("pod %s/%s not found", namespace, pod)
+	}
+	podIP := value.(*corev1.Pod).Status.PodIP
+	if net.ParseIP(podIP) == nil || port <= 0 || port > 65535 {
+		return fmt.Errorf("pod %s/%s has no valid forwarding target", namespace, pod)
+	}
+	conn, err := (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, "tcp", net.JoinHostPort(podIP, strconv.Itoa(int(port))))
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	defer stream.Close()
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-stop:
+		}
+	}()
+	go func() {
+		_, _ = io.Copy(conn, stream)
+		if tcp, ok := conn.(*net.TCPConn); ok {
+			_ = tcp.CloseWrite()
+		}
+	}()
+	_, err = io.Copy(stream, conn)
+	return err
 }
 
 func (v *VirtualK8S) GetStatsSummary(context.Context) (*statsv1alpha1.Summary, error) {
@@ -561,7 +592,7 @@ func (v *VirtualK8S) GetContainerLogs(ctx context.Context, namespace, podName, c
 	if pl != nil {
 		podDir = pl.PodDir()
 	} else {
-		podDir = compute.Skiff.Pod(podKey)
+		podDir = compute.Skiff.PodWithUID(podKey, pod.GetUID())
 	}
 	logfilePath := podDir.Container(containerName).LogsPath()
 
@@ -614,20 +645,33 @@ func (v *VirtualK8S) RunInContainer(ctx context.Context, namespace, podName, con
 		}
 	}()
 
-	pl := PodHandler.GlobalRegistry.GetByKey(podKey)
-	if pl == nil {
+	value, ok := v.pods.Load(podKey)
+	if !ok {
 		return errdefs.NotFoundf("pod %s/%s not found", namespace, podName)
 	}
-
-	cr, ok := pl.GetContainer(containerName)
-	if !ok || cr.PID <= 1 || runtime.IsProcessDead(cr.PID) {
+	containerID := ""
+	for _, status := range value.(*corev1.Pod).Status.ContainerStatuses {
+		if status.Name == containerName && status.State.Running != nil {
+			containerID = status.ContainerID
+			break
+		}
+	}
+	launcherPID, startTime, err := runtime.ParseProcessJobID(containerID)
+	if err != nil || runtime.IsProcessDead(launcherPID) {
 		return errdefs.NotFoundf("container %s is not running in pod %s/%s", containerName, namespace, podName)
+	}
+	if currentStart, err := runtime.GetProcessStartTime(launcherPID); err != nil || (startTime > 0 && currentStart != startTime) {
+		return errdefs.NotFoundf("container %s process was replaced", containerName)
+	}
+	containerPID := PodHandler.FindContainerPID(launcherPID)
+	if containerPID == launcherPID || runtime.IsProcessDead(containerPID) {
+		return errdefs.NotFoundf("container %s payload is not running", containerName)
 	}
 
 	// Execute command locally into the container's namespaces using nsenter
 	nsenterArgs := []string{
-		"-t", strconv.Itoa(cr.PID),
-		"-m", "-u", "-i", "-n", "-p",
+		"-t", strconv.Itoa(containerPID),
+		"-m", "-n", "-p", "-r",
 		"--",
 	}
 	nsenterArgs = append(nsenterArgs, cmd...)

@@ -67,6 +67,9 @@ func PrepareDNS(pod *corev1.Pod, podDir endpoint.PodPath, kubeDNSIP string, podI
 
 	if pod.Spec.DNSPolicy == corev1.DNSDefault || isCoreDNS {
 		resolvConfContent = getHostResolvConf(kubeDNSIP, "/etc/resolv.conf")
+		if !hasNameserver(resolvConfContent) {
+			return fmt.Errorf("no usable upstream nameserver in bubble resolv.conf")
+		}
 	} else if pod.Spec.DNSPolicy == corev1.DNSNone {
 		resolvConfContent = ""
 	} else {
@@ -118,4 +121,14 @@ func PrepareDNS(pod *corev1.Pod, podDir endpoint.PodPath, kubeDNSIP string, podI
 	}
 
 	return nil
+}
+
+func hasNameserver(content string) bool {
+	for _, line := range strings.Split(content, "\n") {
+		parts := strings.Fields(line)
+		if len(parts) == 2 && parts[0] == "nameserver" && net.ParseIP(parts[1]) != nil {
+			return true
+		}
+	}
+	return false
 }

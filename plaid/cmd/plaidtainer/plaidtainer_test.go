@@ -7,6 +7,15 @@ import (
 	"plaid/pkg/api"
 )
 
+func TestTapResolverRequiresConfiguration(t *testing.T) {
+	status := &api.Response{GatewayMode: "tap", GatewayIP: "10.244.1.1"}
+	_, _, dns := resolveNetworkParams(status, "10.244.1.4/24", "", "")
+	if dns != "" { t.Fatalf("unexpected inner slirp resolver %q", dns) }
+	status.Resolver = "10.43.0.10"
+	_, _, dns = resolveNetworkParams(status, "10.244.1.4/24", "", "")
+	if dns != status.Resolver { t.Fatalf("expected published resolver, got %q", dns) }
+}
+
 func TestParsePlaidOptions(t *testing.T) {
 	args := []string{
 		"--host-networking",

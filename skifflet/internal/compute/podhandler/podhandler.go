@@ -38,7 +38,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-func findContainerPID(parentPID int) int {
+// FindContainerPID locates the live payload beneath an Apptainer launcher.
+func FindContainerPID(parentPID int) int {
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		entries, err := os.ReadDir("/proc")
@@ -201,6 +202,9 @@ func DeletePod(podKey client.ObjectKey, localPod *corev1.Pod) bool {
 	logger := compute.DefaultLogger.WithValues("pod", podKey)
 
 	podDir := compute.Skiff.Pod(podKey)
+	if localPod != nil {
+		podDir = compute.Skiff.PodWithUID(podKey, localPod.GetUID())
+	}
 	_, statErr := os.Stat(podDir.String())
 	logger.Info(" * DeletePod invoked", "podDir", podDir.String(), "dirExists", statErr == nil)
 
@@ -404,6 +408,20 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, notify func(*corev1.Pod)) {
 	h.logger.Info(" * All volumes have been mounted")
 
 	// Pull Pause Image
+	if err := waitForPodNetwork(ctx); err != nil {
+		compute.PodError(pod, "NetworkNotReady", "%v", err)
+		if notify != nil {
+			notify(pod)
+		}
+		return
+	}
+	if err := PrepareDNS(pod, h.podDirectory, compute.Environment.KubeDNS, ""); err != nil {
+		compute.PodError(pod, "DNSError", "failed to prepare pause DNS: %v", err)
+		if notify != nil {
+			notify(pod)
+		}
+		return
+	}
 	pauseImage, err := image.Pull(compute.Skiff.ImageDir(), image.Docker, compute.Environment.PauseImage)
 	if err != nil {
 		compute.PodError(pod, "ImagePullError", "ImagePull error. Image:%s: %v", compute.Environment.PauseImage, err)
@@ -416,6 +434,8 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, notify func(*corev1.Pod)) {
 	// Launch Pause Container via compute.Environment.ApptainerBin (without --host-networking)
 	pauseArgs := []string{
 		"exec",
+		"--dns", compute.Environment.KubeDNS,
+		"--bind", filepath.Join(h.podDirectory.JobDir(), "resolv.conf") + ":/etc/resolv.conf",
 		"--nv",
 		"--cleanenv",
 		"--writable-tmpfs",
@@ -436,7 +456,7 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, notify func(*corev1.Pod)) {
 	}
 
 	pausePID := pauseCmd.Process.Pid
-	containerPID := findContainerPID(pausePID)
+	containerPID := FindContainerPID(pausePID)
 	pauseStartTime, _ := runtime.GetProcessStartTime(pausePID)
 	pauseJobID := runtime.FormatProcessJobID(pausePID, pauseStartTime)
 
@@ -615,9 +635,16 @@ func CreatePod(ctx context.Context, pod *corev1.Pod, notify func(*corev1.Pod)) {
 
 		startTime, _ := runtime.GetProcessStartTime(cmd.Process.Pid)
 		SetContainerRunning(containerStatus, cmd.Process.Pid, startTime)
+		probe := pod.Spec.Containers[i].ReadinessProbe
+		if probe != nil {
+			containerStatus.Ready = false
+		}
 		UpdateStatusFromRuntime(pod)
 		if notify != nil {
 			notify(pod)
+		}
+		if probe != nil {
+			watchReadinessProbe(ctx, pod, containerStatus, probe, notify)
 		}
 
 		// Asynchronously wait for container termination

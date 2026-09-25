@@ -60,6 +60,7 @@ type FilterHandler func(frame *packet.EthernetFrame, srcEP Endpoint) bool
 type BridgeConfig struct {
 	GatewayIP   net.IP
 	GatewayMAC  net.HardwareAddr
+	GatewayMode string
 	NodeCIDR    *net.IPNet
 	ClusterCIDR *net.IPNet
 	FDBTTL      time.Duration
@@ -73,6 +74,9 @@ type Bridge struct {
 	fdb         *FDB
 	gatewayIP   net.IP
 	gatewayMAC  net.HardwareAddr
+	gatewayMode string
+	bubble      Endpoint
+	routeKnown  func(net.IP) bool
 	nodeCIDR    *net.IPNet
 	clusterCIDR *net.IPNet
 
@@ -94,11 +98,60 @@ func NewBridge(cfg BridgeConfig) *Bridge {
 		fdb:         NewFDB(fdbTTL),
 		gatewayIP:   cfg.GatewayIP,
 		gatewayMAC:  cfg.GatewayMAC,
+		gatewayMode: cfg.GatewayMode,
 		nodeCIDR:    cfg.NodeCIDR,
 		clusterCIDR: cfg.ClusterCIDR,
 	}
 
 	return b
+}
+
+// SetBubbleEndpoint attaches the bubble kernel without registering it as a pod.
+// GatewayMAC is Plaid's synthetic next-hop MAC; the endpoint MAC is the TAP's MAC.
+func (b *Bridge) SetBubbleEndpoint(ep Endpoint) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.bubble = ep
+}
+
+func (b *Bridge) SetRouteChecker(check func(net.IP) bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.routeKnown = check
+}
+
+func (b *Bridge) BubbleEndpoint() Endpoint {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.bubble
+}
+
+func (b *Bridge) knownRemote(ip net.IP) bool {
+	if b.clusterCIDR == nil || !b.clusterCIDR.Contains(ip) || (b.nodeCIDR != nil && b.nodeCIDR.Contains(ip)) {
+		return false
+	}
+	b.mu.RLock()
+	check := b.routeKnown
+	b.mu.RUnlock()
+	return check == nil || check(ip)
+}
+
+func (b *Bridge) writeBubble(frame *packet.EthernetFrame) error {
+	b.mu.RLock()
+	ep := b.bubble
+	b.mu.RUnlock()
+	if ep == nil {
+		return fmt.Errorf("bubble gateway is unavailable")
+	}
+	frame.DstMAC = ep.MAC()
+	if len(frame.SrcMAC) != 6 || bytes.Equal(frame.SrcMAC, ep.MAC()) {
+		frame.SrcMAC = b.gatewayMAC
+	}
+	raw, err := frame.Marshal()
+	if err != nil {
+		return err
+	}
+	return ep.Write(raw)
 }
 
 // SetOverlayHandler sets the handler for cross-host overlay packets.
@@ -217,7 +270,7 @@ func (b *Bridge) ProcessFrame(srcEP Endpoint, raw []byte) error {
 	}
 
 	// Dynamic MAC learning
-	if srcEP != nil && frame.SrcMAC != nil {
+	if srcEP != nil && srcEP != b.BubbleEndpoint() && frame.SrcMAC != nil && !bytes.Equal(frame.SrcMAC, b.gatewayMAC) {
 		b.fdb.Learn(frame.SrcMAC, srcEP)
 	}
 
@@ -253,8 +306,12 @@ func (b *Bridge) handleBroadcast(srcEP Endpoint, frame *packet.EthernetFrame, ra
 			// 2. Check if asking for Gateway IP, slirp host/DNS alias, or remote overlay pod
 			if b.gatewayMAC != nil {
 				// Gateway ARP
-				if b.gatewayIP != nil && arpPkt.TargetIP.Equal(b.gatewayIP) {
-					replyFrame, err := packet.NewARPReply(arpPkt, b.gatewayMAC, b.gatewayIP)
+				if b.gatewayIP != nil && arpPkt.TargetIP.Equal(b.gatewayIP) && srcEP != b.BubbleEndpoint() {
+					arpMAC := b.gatewayMAC
+					if b.gatewayMode == "tap" && b.BubbleEndpoint() != nil {
+						arpMAC = b.BubbleEndpoint().MAC()
+					}
+					replyFrame, err := packet.NewARPReply(arpPkt, arpMAC, b.gatewayIP)
 					if err == nil {
 						replyBytes, err := replyFrame.Marshal()
 						if err == nil && srcEP != nil {
@@ -264,7 +321,7 @@ func (b *Bridge) handleBroadcast(srcEP Endpoint, frame *packet.EthernetFrame, ra
 				}
 
 				// Slirp Host / DNS ARP (52:55:IP:IP:IP:IP)
-				if b.nodeCIDR != nil {
+				if b.gatewayMode != "tap" && b.nodeCIDR != nil {
 					baseIP := b.nodeCIDR.IP.Mask(b.nodeCIDR.Mask)
 					hostIP := ipAdd(baseIP, 2)
 					dnsIP := ipAdd(baseIP, 3)
@@ -282,8 +339,7 @@ func (b *Bridge) handleBroadcast(srcEP Endpoint, frame *packet.EthernetFrame, ra
 				}
 
 				// Overlay remote pod ARP
-				if b.clusterCIDR != nil && b.clusterCIDR.Contains(arpPkt.TargetIP) &&
-					(b.nodeCIDR == nil || !b.nodeCIDR.Contains(arpPkt.TargetIP)) {
+				if b.knownRemote(arpPkt.TargetIP) {
 					replyFrame, err := packet.NewARPReply(arpPkt, b.gatewayMAC, arpPkt.TargetIP)
 					if err == nil {
 						replyBytes, err := replyFrame.Marshal()
@@ -292,8 +348,15 @@ func (b *Bridge) handleBroadcast(srcEP Endpoint, frame *packet.EthernetFrame, ra
 						}
 					}
 				}
+				if b.gatewayMode == "tap" && b.nodeCIDR != nil && b.nodeCIDR.Contains(arpPkt.TargetIP) {
+					// An unknown local pod must not be resolved or flooded to the TAP.
+					return nil
+				}
 			}
 		}
+	}
+	if b.gatewayMode == "tap" {
+		return nil
 	}
 
 	// Flood to all other local endpoints
@@ -301,6 +364,13 @@ func (b *Bridge) handleBroadcast(srcEP Endpoint, frame *packet.EthernetFrame, ra
 }
 
 func (b *Bridge) handleUnicast(srcEP Endpoint, frame *packet.EthernetFrame, raw []byte) error {
+	if b.gatewayMode == "tap" && frame.EtherType == packet.EtherTypeIPv4 {
+		ipPkt, err := packet.ParseIPv4(frame.Payload)
+		if err != nil {
+			return err
+		}
+		return b.routeTapTraffic(srcEP, frame, ipPkt.Header.DstIP)
+	}
 	// 1. Direct local delivery: Lookup destination MAC in FDB
 	targetEP := b.fdb.Lookup(frame.DstMAC)
 	if targetEP != nil {
@@ -362,6 +432,43 @@ func (b *Bridge) handleUnicast(srcEP Endpoint, frame *packet.EthernetFrame, raw 
 
 	// Unknown unicast: flood to all other endpoints
 	return b.flood(srcEP, raw)
+}
+
+func (b *Bridge) routeTapTraffic(srcEP Endpoint, frame *packet.EthernetFrame, dstIP net.IP) error {
+	b.mu.RLock()
+	local := b.ipToEp[dstIP.String()]
+	overlay := b.overlayHandler
+	b.mu.RUnlock()
+	if local != nil {
+		if srcEP != nil && srcEP.ID() == local.ID() {
+			return nil
+		}
+		frame.DstMAC = local.MAC()
+		if srcEP == nil {
+			frame.SrcMAC = b.gatewayMAC
+		}
+		raw, err := frame.Marshal()
+		if err != nil {
+			return err
+		}
+		return local.Write(raw)
+	}
+	if b.gatewayIP != nil && dstIP.Equal(b.gatewayIP) {
+		return b.writeBubble(frame)
+	}
+	if b.knownRemote(dstIP) {
+		if overlay == nil {
+			return fmt.Errorf("overlay unavailable for %s", dstIP)
+		}
+		return overlay(frame, dstIP)
+	}
+	if b.clusterCIDR != nil && b.clusterCIDR.Contains(dstIP) {
+		return nil
+	}
+	if srcEP == b.BubbleEndpoint() {
+		return fmt.Errorf("bubble emitted non-overlay destination %s", dstIP)
+	}
+	return b.writeBubble(frame)
 }
 
 func (b *Bridge) routeGatewayTraffic(srcEP Endpoint, frame *packet.EthernetFrame, raw []byte) error {
@@ -431,6 +538,35 @@ func (b *Bridge) routeGatewayTraffic(srcEP Endpoint, frame *packet.EthernetFrame
 
 // InjectFrame injects a frame into the bridge (e.g. from VXLAN or slirp4netns return traffic).
 func (b *Bridge) InjectFrame(frame *packet.EthernetFrame) error {
+	if b.gatewayMode == "tap" {
+		if frame.EtherType != packet.EtherTypeIPv4 {
+			return nil
+		}
+		ipPkt, err := packet.ParseIPv4(frame.Payload)
+		if err != nil {
+			return err
+		}
+		if b.gatewayIP != nil && ipPkt.Header.DstIP.Equal(b.gatewayIP) {
+			frame.SrcMAC = b.gatewayMAC
+			return b.writeBubble(frame)
+		}
+		if b.nodeCIDR == nil || !b.nodeCIDR.Contains(ipPkt.Header.DstIP) {
+			return nil
+		}
+		b.mu.RLock()
+		target := b.ipToEp[ipPkt.Header.DstIP.String()]
+		b.mu.RUnlock()
+		if target == nil {
+			return nil
+		}
+		frame.DstMAC = target.MAC()
+		frame.SrcMAC = b.gatewayMAC
+		raw, err := frame.Marshal()
+		if err != nil {
+			return err
+		}
+		return target.Write(raw)
+	}
 	if frame.IsBroadcast() || frame.IsMulticast() {
 		raw, err := frame.Marshal()
 		if err != nil {

@@ -11,9 +11,9 @@ RUN CGO_ENABLED=0 GOARCH=${TARGETARCH} make -C plaid build
 FROM ${BASE_IMAGE}
 WORKDIR /
 
-# Basic utilities, iptables, nscd, and slirp4netns
+# Basic utilities, iptables, and nscd. Outer slirp4netns runs on the VM/HPC host.
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends vim-tiny curl iproute2 net-tools iputils-ping nano socat slirp4netns iptables nscd && \
+    apt-get install -y --no-install-recommends vim-tiny curl dnsutils iproute2 net-tools iputils-ping nano socat iptables nscd && \
     rm -rf /var/lib/apt/lists/*
 
 # Apptainer

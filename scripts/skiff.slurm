@@ -32,7 +32,7 @@ echo "Running preflight checks..."
 
 # Check if another Skiff Slurm job is already active for this user
 if command -v squeue >/dev/null 2>&1; then
-    ACTIVE_JOBS=$(squeue -u "$USER" --name=skiff-cluster --noheader -o "%i" | grep -v "^${SLURM_JOB_ID:-}$$" || true)
+    ACTIVE_JOBS=$(squeue -u "$USER" --name=skiff-cluster --noheader -o "%i" | awk -v self="${SLURM_JOB_ID:-}" '$1 != self' || true)
     if [ -n "$ACTIVE_JOBS" ]; then
         echo "ERROR: Another Skiff cluster job is already running (Job IDs: $ACTIVE_JOBS)." >&2
         echo "Only one active Skiff cluster job is allowed. Cancel it with 'scancel <job>' first." >&2

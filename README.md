@@ -79,7 +79,11 @@ skiff/
 A rootless Apptainer container deployed per HPC node:
 - One bubble acts as the Kubernetes control plane (running [K3s](https://k3s.io/)), while the others act as worker nodes.
 - For external access, each bubble uses [slirp4netns](https://github.com/rootless-containers/slirp4netns).
+- Inside each bubble, Plaid attaches a `plaid0` TAP to the bubble kernel. The first address of the node PodCIDR (for example `10.244.1.1`) belongs to that interface. PodIP traffic stays on Plaid's direct overlay, while bubble and Service traffic passes through the TAP.
+- Kube-proxy handles ClusterIP translation and Service masquerading. Plaid manages bubble-local forwarding, routes, and SNAT to the outer slirp guest address when pods reach external networks through `tap0`.
 - For internal pod-to-pod networking across nodes, bubbles forward UDP port 8472 to maintain Plaid VXLAN overlay tunnels.
+
+The controller still runs K3s and control-plane components in its bubble. Skifflet registers each Node before Plaid starts, then waits for the TAP gateway before launching networking-dependent pods. The bubble checks the Kubernetes API Service and cluster DNS before reporting startup success. K3s uses its default `10.43.0.0/16` Service CIDR and `cluster.local` domain explicitly; these are fixed deployment assumptions for now.
 
 ---
 
@@ -153,3 +157,5 @@ export KUBECONFIG=~/.skiff/kubeconfig
 kubectl get nodes
 bash ~/skiff/test/test-skiff-e2e.sh
 ```
+
+For deterministic local and remote Service checks, run `test/test-tap-acceptance.sh` in the controller VM after copying the script and `test/tap-acceptance.yaml` to `~/.skiff/`. The test pods use node selectors. The separate `test/test-tap-webhook.sh` checks API-server admission through local and remote Service backends.

@@ -27,6 +27,7 @@ func TestDeletePod_CleanRemoval(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        podKey.Name,
 			Namespace:   podKey.Namespace,
+			UID:         "delete-generation",
 			Annotations: map[string]string{"skiff.io/pause-pid": "999999"},
 		},
 		Spec: corev1.PodSpec{
@@ -39,7 +40,7 @@ func TestDeletePod_CleanRemoval(t *testing.T) {
 		},
 	}
 
-	podDir := compute.Skiff.Pod(podKey)
+	podDir := compute.Skiff.PodWithUID(podKey, pod.GetUID())
 	if err := os.MkdirAll(podDir.JobDir(), 0755); err != nil {
 		t.Fatalf("failed to create job dir: %v", err)
 	}

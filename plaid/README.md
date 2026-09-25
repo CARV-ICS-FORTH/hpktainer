@@ -4,9 +4,21 @@
 
 ---
 
-**Plaid** is a high-performance, user-space container network stack and CNI plugin. It combines the multi-node overlay concepts of **Flannel** with the rootless user-mode networking of **`slirp4netns`**, delivering full container networking without requiring root privileges, Linux kernel bridge modules, or `br_netfilter`.
+**Plaid** is a user-space container network stack and CNI plugin. It switches local pod frames and carries remote pod frames over a VXLAN socket. Its gateway backend can be `tap`, `slirp`, or `none`.
 
-Plaid is designed for HPC clusters, multi-tenant environments, and rootless container runtimes (such as Apptainer / Singularity, Slurm, and rootless Kubernetes) where traditional kernel-level networking (`br0`, `veth` pairs, iptables NAT) is either unavailable, restricted, or forbidden.
+Plaid is designed for HPC clusters and unprivileged Apptainer workloads. In a Skiff bubble, the TAP backend uses routes and iptables inside the bubble's private network namespace; it does not configure physical-host routes or NAT. Standalone slirp mode remains available when network-administration privileges are unavailable.
+
+### Gateway modes
+
+| Mode | Gateway and DNS behavior |
+| --- | --- |
+| `tap` | Creates `plaid0` at the node PodCIDR `.1`, routes the cluster PodCIDR through it, and forwards non-PodCIDR pod traffic to the bubble kernel. Kube-proxy owns Service NAT; Plaid owns the `PLAID-EGRESS`, `PLAID-FORWARD`, and `PLAID-INPUT` chains. Pass `--uplink=tap0`, `--uplink-address=<outer slirp guest IP>`, and `--resolver=<cluster DNS Service IP>` in Skiff. |
+| `slirp` | Standalone userspace gateway with the `.2` host alias and `.3` DNS alias. This is the default for direct Plaid use outside a Skiff bubble. |
+| `none` | No outbound gateway backend. |
+
+In TAP mode, `plaid0` has a real MAC (`--bubble-mac`, default `02:00:00:00:00:02`). Plaid answers neighbor requests for reachable remote PodCIDRs with a separate synthetic MAC (`--gateway-mac`, default `02:00:00:00:00:01`). Pods use the real TAP MAC for their local `.1` gateway. Pod addresses continue to start at `.4`; `.1` is never allocated to a pod. The daemon reports attachment readiness and addresses through `plaidctl status`.
+
+The Service CIDR in Skiff is `10.43.0.0/16`, matching the K3s default. It is fixed in the Skiff deployment, while the standalone daemon still accepts `--service-cidr` for overlap validation.
 
 ---
 
@@ -14,7 +26,7 @@ Plaid is designed for HPC clusters, multi-tenant environments, and rootless cont
 
 - **Pure User-Space L2/L3 Switching (`pkg/bridge`)**: In-memory virtual Ethernet switch featuring concurrent-safe dynamic MAC learning (FDB), proxy ARP responder, and L3 subnet routing.
 - **Cross-Host VXLAN Overlay (`pkg/vxlan`)**: Standards-compliant RFC 7348 VXLAN engine running in user space over UDP port 8472. Enables cross-node container-to-container communication without kernel VXLAN interfaces.
-- **Rootless Outbound & Host Access (`slirp4netns`)**: Integrates with `slirp4netns` over BESS UNIX domain sockets (`SOCK_SEQPACKET`), providing:
+- **Standalone Outbound & Host Access (`slirp4netns` mode)**: Integrates with `slirp4netns` over BESS UNIX domain sockets (`SOCK_SEQPACKET`), providing:
   - Transparent outbound Internet NAT.
   - Access to host loopback services (`127.0.0.1`) via a dedicated gateway alias (`10.244.x.2`).
   - Built-in DNS forwarding (`10.244.x.3`).
@@ -25,7 +37,7 @@ Plaid is designed for HPC clusters, multi-tenant environments, and rootless cont
 
 ---
 
-## Architecture
+## Standalone slirp architecture
 
 ```
 +-----------------------------------------------------------------------------------+
@@ -56,7 +68,7 @@ Plaid is designed for HPC clusters, multi-tenant environments, and rootless cont
 +-----------------------------------------------------------------------------------+
 ```
 
-### IP Addressing Convention (Per Node Subnet)
+### Standalone slirp IP addressing (per node subnet)
 On each node (e.g. `10.244.x.0/24`):
 - `10.244.x.1`: **Virtual Gateway IP** (served by `plaidd` user-space bridge).
 - `10.244.x.2`: **Host Loopback Alias** (connects to the host's `127.0.0.1` via `slirp4netns`).
@@ -81,7 +93,7 @@ make build-linux
 
 ## Quickstart
 
-### 1. Start the Plaid Daemon (`plaidd`)
+### 1. Start the Plaid Daemon (`plaidd`) in standalone slirp mode
 On node 1 (e.g. controller):
 ```bash
 plaidd \
@@ -90,7 +102,7 @@ plaidd \
   --cluster-cidr=10.244.0.0/16 \
   --gateway-ip=10.244.1.1 \
   --routes="10.244.2.0/24=node-2.local" \
-  --enable-slirp=true \
+  --gateway-mode=slirp \
   --slirp-host-loopback=true \
   --slirp-disable-dns=false
 ```
@@ -181,8 +193,8 @@ sudo apptainer instance start --net --network=plaid --network-args "IP=10.244.1.
 Plaid delegates IP management to the standard CNI `host-local` plugin:
 - **Subnet Reservation**:
   - `10.244.x.1`: Reserved for **Virtual Gateway** (served by `plaidd`).
-  - `10.244.x.2`: Reserved for **Host Loopback Alias** (`127.0.0.1` access).
-  - `10.244.x.3`: Reserved for **DNS Forwarder** (outbound DNS).
+  - `10.244.x.2`: Reserved for the **Host Loopback Alias** in standalone slirp mode.
+  - `10.244.x.3`: Reserved for the **DNS Forwarder** in standalone slirp mode.
   - `10.244.x.4` to `10.244.x.254`: **Container IP Pool** dynamically managed by `host-local`.
 - **Runtime IPAM Configuration**:
   On startup, `plaidd` creates `/run/plaid/ipam.json` with permissions `0777` containing the node's subnet definition:
@@ -201,7 +213,7 @@ Plaid delegates IP management to the standard CNI `host-local` plugin:
   }
   ```
 - **Kubernetes Subnet Coordination**:
-  In a Kubernetes cluster, `plaidd` connects directly to the Kubernetes API to discover the node's assigned Pod CIDR (`node.Spec.PodCIDR`), sets `NodeNetworkUnavailable = False`, watches peer nodes to maintain overlay routing in memory, and writes `/run/plaid/ipam.json` for intra-node container IP allocations starting at `.4`, ensuring zero IP collisions with gateway or Slirp aliases.
+  In a Kubernetes cluster, `plaidd` connects directly to the Kubernetes API to discover the node's assigned Pod CIDR (`node.Spec.PodCIDR`), watches peer nodes to maintain overlay routing in memory, and writes `/run/plaid/ipam.json` for intra-node container IP allocations starting at `.4`.
 
 ---
 

@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"time"
@@ -34,6 +35,7 @@ import (
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
@@ -213,6 +215,25 @@ func runRootCommand(ctx context.Context, c Opts) error {
 
 	StartAPIServer(c, virtualk8s)
 
+	// Register before pod execution so the controller can allocate a PodCIDR.
+	// The node stays NotReady until Plaid has attached the bubble gateway.
+	earlyNode := virtualk8s.NewVirtualNode(ctx, c.NodeName, nil)
+	setNodeNotReady(earlyNode)
+	if _, err := compute.K8SClientset.CoreV1().Nodes().Create(ctx, earlyNode, metav1.CreateOptions{}); err != nil && !k8serrors.IsAlreadyExists(err) {
+		return fmt.Errorf("register node before networking: %w", err)
+	}
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current, err := compute.K8SClientset.CoreV1().Nodes().Get(ctx, c.NodeName, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		setNodeNotReady(current)
+		_, err = compute.K8SClientset.CoreV1().Nodes().UpdateStatus(ctx, current, metav1.UpdateOptions{})
+		return err
+	}); err != nil {
+		return fmt.Errorf("set initial node network condition: %w", err)
+	}
+
 	DefaultLogger.Info("Virtual Node Provisioner is ready",
 		"Address", virtualk8s.InternalIP,
 		"DaemonPort", virtualk8s.DaemonPort,
@@ -296,6 +317,10 @@ func runRootCommand(ctx context.Context, c Opts) error {
 		}
 
 		virtualNode := virtualk8s.NewVirtualNode(ctx, c.NodeName, taint)
+		setNodeNotReady(virtualNode)
+		if err := waitForPlaid(ctx, 3*time.Minute); err != nil {
+			return err
+		}
 
 		nc, err := node.NewNodeController(
 			np,
@@ -375,6 +400,34 @@ func setNodeReady(n *corev1.Node) {
 		c.Status = corev1.ConditionTrue
 		n.Status.Conditions[i] = c
 		return
+	}
+}
+
+func setNodeNotReady(n *corev1.Node) {
+	for i := range n.Status.Conditions {
+		if n.Status.Conditions[i].Type == corev1.NodeReady {
+			n.Status.Conditions[i].Status = corev1.ConditionFalse
+			n.Status.Conditions[i].Reason = "NetworkPending"
+			n.Status.Conditions[i].Message = "Waiting for Plaid gateway"
+			return
+		}
+	}
+}
+
+func waitForPlaid(ctx context.Context, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	for {
+		conn, err := net.DialTimeout("unix", "/run/plaid/plaidd.sock", time.Second)
+		if err == nil {
+			_ = conn.Close()
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("waiting for Plaid gateway: %w", ctx.Err())
+		case <-time.After(500 * time.Millisecond):
+		}
 	}
 }
 

@@ -8,6 +8,8 @@ exec > >(tee -a /var/log/entrypoint.log) 2>&1
 # Default values if not provided
 HOST_IP=${HOST_IP:-$(ip route get 1 | awk '{print $7; exit}')}
 SKIFF_ROLE=${SKIFF_ROLE:-controller}
+PLAID_UPLINK=${PLAID_UPLINK:-tap0}
+: "${PLAID_UPLINK_ADDRESS:?outer slirp guest address is required}"
 
 echo "Starting Skiff Bubble..."
 echo "  Public IP:     ${HOST_IP}"
@@ -35,6 +37,10 @@ ip link set tap0 up
 
 # Add Host IP as secondary address to tap0
 ip addr add "${HOST_IP}/32" dev tap0 2>/dev/null || true
+if ! ip -4 addr show dev "$PLAID_UPLINK" | grep -Fq "$PLAID_UPLINK_ADDRESS/"; then
+    echo "ERROR: uplink $PLAID_UPLINK does not have $PLAID_UPLINK_ADDRESS" >&2
+    exit 1
+fi
 
 K3S_PID=""
 CSR_SIGN_PID=""
@@ -50,6 +56,8 @@ if [ "$SKIFF_ROLE" = "controller" ]; then
       --tls-san 127.0.0.1 \
       --tls-san localhost \
       --cluster-cidr 10.244.0.0/16 \
+      --service-cidr 10.43.0.0/16 \
+      --cluster-domain cluster.local \
       --kube-controller-manager-arg=allocate-node-cidrs=true \
       --disable-agent \
       --disable servicelb \
@@ -280,19 +288,57 @@ mkdir -p /run/plaid
 plaidd \
   --kubeconfig=/var/lib/skiff/kubeconfig \
   --node-name="$(hostname)" \
+  --cluster-cidr=10.244.0.0/16 \
+  --service-cidr=10.43.0.0/16 \
+  --gateway-mode=tap \
+  --uplink="$PLAID_UPLINK" \
+  --uplink-address="$PLAID_UPLINK_ADDRESS" \
+  --resolver=10.43.0.10 \
   >> /var/log/plaidd.log 2>&1 &
 PLAIDD_PID=$!
+
+# skifflet registers the Node first; Plaid then receives its /24 and creates plaid0.
+PLAID_WAIT=0
+while ! plaidctl status >/dev/null 2>&1; do
+    if ! kill -0 "$PLAIDD_PID" 2>/dev/null || [ "$PLAID_WAIT" -ge 180 ]; then
+        echo "ERROR: Plaid did not become ready; see /var/log/plaidd.log" >&2
+        exit 1
+    fi
+    sleep 1
+    PLAID_WAIT=$((PLAID_WAIT + 1))
+done
 
 echo "Starting kube-proxy..."
 kube-proxy \
   --kubeconfig /var/lib/skiff/kubeconfig \
   --proxy-mode iptables \
+  --cluster-cidr 10.244.0.0/16 \
+  --masquerade-all=true \
   --hostname-override "$(hostname)" \
   --conntrack-max-per-core=0 \
   --conntrack-tcp-timeout-established=0 \
   --conntrack-tcp-timeout-close-wait=0 \
   >> /var/log/kube-proxy.log 2>&1 &
 KUBE_PROXY_PID=$!
+
+# Both the API Service and cluster DNS must work before the bubble reports
+# startup success. Neither check is needed for the direct API bootstrap above.
+echo "Waiting for Kubernetes API Service and cluster DNS..."
+NETWORK_WAIT=0
+while true; do
+    API_CODE="$(curl -ksS --connect-timeout 2 --max-time 5 -o /dev/null -w '%{http_code}' https://10.43.0.1/version 2>/dev/null || true)"
+    DNS_ANSWER="$(dig +short +time=2 +tries=1 @10.43.0.10 kubernetes.default.svc.cluster.local A 2>/dev/null || true)"
+    if [ "$API_CODE" != "000" ] && [ -n "$API_CODE" ] && printf '%s\n' "$DNS_ANSWER" | grep -qx '10.43.0.1'; then
+        echo "Kubernetes API Service and cluster DNS are ready"
+        break
+    fi
+    if ! kill -0 "$PLAIDD_PID" 2>/dev/null || ! kill -0 "$KUBE_PROXY_PID" 2>/dev/null || [ "$NETWORK_WAIT" -ge 180 ]; then
+        echo "ERROR: API Service or cluster DNS did not become ready (API=$API_CODE, DNS=$DNS_ANSWER)" >&2
+        exit 1
+    fi
+    sleep 2
+    NETWORK_WAIT=$((NETWORK_WAIT + 2))
+done
 
 shutdown_daemons() {
     trap - EXIT INT TERM

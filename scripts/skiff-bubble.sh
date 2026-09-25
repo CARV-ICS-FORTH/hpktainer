@@ -105,6 +105,8 @@ apptainer instance run \
     --env SINGULARITY_TMPDIR=/tmp/.skiff/.apptainer/tmp \
     --env TMPDIR=/tmp/.skiff/.apptainer/tmp \
 	--env HOST_IP="$HOST_IP_DETECTED" \
+	--env PLAID_UPLINK=tap0 \
+	--env PLAID_UPLINK_ADDRESS="$NS_ADDR" \
 	--env SKIFF_ROLE="$SKIFF_ROLE" \
 	--env SKIFF_DEV="${SKIFF_DEV:-0}" \
 	"$BUBBLE_IMAGE" \

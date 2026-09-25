@@ -38,6 +38,10 @@ func main() {
 		fmt.Printf("Node CIDR:    %s\n", status.NodeCIDR)
 		fmt.Printf("Cluster CIDR: %s\n", status.ClusterCIDR)
 		fmt.Printf("Gateway IP:   %s\n", status.GatewayIP)
+		fmt.Printf("Gateway:      %s (ready=%t, bubble MAC=%s)\n", status.GatewayMode, status.GatewayReady, status.BubbleMAC)
+		if status.Uplink != "" {
+			fmt.Printf("Uplink:       %s (%s)\n", status.Uplink, status.UplinkAddress)
+		}
 		fmt.Printf("Endpoints:    %d\n", status.EndpointsCount)
 		for _, ep := range status.Endpoints {
 			fmt.Printf("  - %s\n", ep)

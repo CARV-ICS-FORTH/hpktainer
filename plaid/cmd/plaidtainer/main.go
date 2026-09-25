@@ -168,6 +168,7 @@ func handleInstanceStartOrRun(apptainerBin string, globalOpts PlaidOptions, acti
 	}
 
 	_, gwStr, dnsStr := resolveNetworkParams(status, ipStr, opts.Gateway, opts.DNS)
+	requireResolver(dnsStr)
 	hostPlaidBin := findHostPlaidBinary()
 
 	apptainerArgs := []string{
@@ -357,6 +358,7 @@ func handleExec(apptainerBin string, globalOpts PlaidOptions, args []string) {
 	}
 
 	_, gwStr, dnsStr := resolveNetworkParams(status, ipStr, opts.Gateway, opts.DNS)
+	requireResolver(dnsStr)
 	hostPlaidBin := findHostPlaidBinary()
 
 	cleanupDone := false
@@ -475,6 +477,7 @@ func handleRun(apptainerBin string, globalOpts PlaidOptions, args []string) {
 	}
 
 	_, gwStr, dnsStr := resolveNetworkParams(status, ipStr, opts.Gateway, opts.DNS)
+	requireResolver(dnsStr)
 	hostPlaidBin := findHostPlaidBinary()
 
 	cleanupDone := false
@@ -595,6 +598,7 @@ func handleShell(apptainerBin string, globalOpts PlaidOptions, args []string) {
 	}
 
 	_, gwStr, dnsStr := resolveNetworkParams(status, ipStr, opts.Gateway, opts.DNS)
+	requireResolver(dnsStr)
 	hostPlaidBin := findHostPlaidBinary()
 
 	cleanupDone := false
@@ -664,17 +668,26 @@ func resolveNetworkParams(status *api.Response, ipStr, gwStr, dnsStr string) (st
 	}
 
 	if dnsStr == "" {
-		if gwIP := net.ParseIP(gwStr); gwIP != nil && gwIP.To4() != nil {
-			dns := make(net.IP, len(gwIP.To4()))
-			copy(dns, gwIP.To4())
-			dns[3] = 3
-			dnsStr = dns.String()
-		} else {
-			dnsStr = "1.1.1.1"
+		if status != nil && status.Resolver != "" {
+			dnsStr = status.Resolver
+		} else if status == nil || status.GatewayMode == "slirp" || status.GatewayMode == "" {
+			if gwIP := net.ParseIP(gwStr); gwIP != nil && gwIP.To4() != nil {
+				dns := make(net.IP, len(gwIP.To4()))
+				copy(dns, gwIP.To4())
+				dns[3] = 3
+				dnsStr = dns.String()
+			}
 		}
 	}
 
 	return ipStr, gwStr, dnsStr
+}
+
+func requireResolver(dns string) {
+	if net.ParseIP(dns) == nil {
+		fmt.Fprintln(os.Stderr, "Error: no valid resolver configured; pass --dns or set plaidd --resolver")
+		os.Exit(1)
+	}
 }
 
 // splitFlagsAndPositional splits arguments into leading flags and remaining positional arguments.

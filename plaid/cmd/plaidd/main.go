@@ -17,6 +17,7 @@ import (
 	"plaid/pkg/api"
 	"plaid/pkg/bridge"
 	"plaid/pkg/filter"
+	"plaid/pkg/gateway"
 	"plaid/pkg/ipam"
 	"plaid/pkg/k8s"
 	"plaid/pkg/packet"
@@ -31,6 +32,9 @@ type PlaidDaemon struct {
 	routes       *vxlan.RouteTable
 	overlay      *vxlan.OverlayEngine
 	slirpMgr     *slirp.SlirpManager
+	attachment   *gateway.Attachment
+	bubbleEP     *tap.TapEndpoint
+	healthErr    chan error
 	filterEngine *filter.Engine
 	apiServer    *api.Server
 	cancelFunc   context.CancelFunc
@@ -43,6 +47,12 @@ type Config struct {
 	ClusterCIDR       string
 	GatewayIP         string
 	GatewayMAC        string
+	BubbleMAC         string
+	GatewayMode       string
+	Uplink            string
+	UplinkAddress     string
+	ServiceCIDR       string
+	Resolver          string
 	VXLANPort         int
 	VXLANVNI          int
 	VXLANBind         string
@@ -64,6 +74,12 @@ func main() {
 	flag.StringVar(&cfg.ClusterCIDR, "cluster-cidr", "10.244.0.0/16", "Overall cluster pod CIDR")
 	flag.StringVar(&cfg.GatewayIP, "gateway-ip", "", "Gateway IP (defaults to first IP of node-cidr, e.g. 10.244.1.1)")
 	flag.StringVar(&cfg.GatewayMAC, "gateway-mac", "02:00:00:00:00:01", "Gateway MAC address")
+	flag.StringVar(&cfg.BubbleMAC, "bubble-mac", "02:00:00:00:00:02", "Bubble TAP MAC address (distinct from gateway-mac)")
+	flag.StringVar(&cfg.GatewayMode, "gateway-mode", "slirp", "Gateway backend: tap, slirp, or none")
+	flag.StringVar(&cfg.Uplink, "uplink", "", "Bubble uplink interface for TAP mode")
+	flag.StringVar(&cfg.UplinkAddress, "uplink-address", "", "Outer slirp guest IPv4 address for TAP egress SNAT")
+	flag.StringVar(&cfg.ServiceCIDR, "service-cidr", "10.43.0.0/16", "Cluster Service CIDR")
+	flag.StringVar(&cfg.Resolver, "resolver", "", "Resolver IP advertised to standalone plaidtainer")
 	flag.IntVar(&cfg.VXLANPort, "vxlan-port", packet.DefaultVXLANPort, "VXLAN UDP port")
 	flag.IntVar(&cfg.VXLANVNI, "vxlan-vni", packet.DefaultVNI, "VXLAN VNI")
 	flag.StringVar(&cfg.VXLANBind, "vxlan-bind", "0.0.0.0", "VXLAN bind address")
@@ -103,8 +119,14 @@ func main() {
 	fmt.Printf("plaidd is running [Mode=%s, NodeCIDR=%s, ClusterCIDR=%s, VXLANPort=%d, APISocket=%s]\n",
 		mode, daemon.cfg.NodeCIDR, daemon.cfg.ClusterCIDR, daemon.cfg.VXLANPort, daemon.cfg.SocketPath)
 
-	sig := <-sigChan
-	fmt.Printf("Received signal %s, shutting down plaidd...\n", sig)
+	select {
+	case sig := <-sigChan:
+		fmt.Printf("Received signal %s, shutting down plaidd...\n", sig)
+	case err := <-daemon.healthErr:
+		fmt.Fprintf(os.Stderr, "Fatal gateway failure: %v\n", err)
+		daemon.Stop()
+		os.Exit(1)
+	}
 	daemon.Stop()
 }
 
@@ -148,6 +170,40 @@ func NewPlaidDaemon(cfg Config) (*PlaidDaemon, error) {
 	if clusterNet.IP.To4() == nil {
 		return nil, fmt.Errorf("IPv6 is not supported; cluster CIDR %q must be IPv4", cfg.ClusterCIDR)
 	}
+	if cfg.ServiceCIDR == "" {
+		cfg.ServiceCIDR = "10.43.0.0/16"
+	}
+	_, serviceNet, err := net.ParseCIDR(cfg.ServiceCIDR)
+	if err != nil || serviceNet.IP.To4() == nil {
+		return nil, fmt.Errorf("invalid IPv4 service-cidr %q", cfg.ServiceCIDR)
+	}
+	if overlaps(nodeNet, serviceNet) || overlaps(clusterNet, serviceNet) || !clusterNet.Contains(nodeNet.IP) {
+		return nil, fmt.Errorf("node, cluster, and Service CIDRs are inconsistent or overlap")
+	}
+	if cfg.GatewayMode == "" {
+		if cfg.EnableSlirp {
+			cfg.GatewayMode = "slirp"
+		} else {
+			cfg.GatewayMode = "none"
+		}
+	}
+	if cfg.GatewayMode != "tap" && cfg.GatewayMode != "slirp" && cfg.GatewayMode != "none" {
+		return nil, fmt.Errorf("invalid gateway-mode %q", cfg.GatewayMode)
+	}
+	if cfg.GatewayMode == "tap" {
+		if net.ParseIP(cfg.UplinkAddress).To4() == nil || cfg.Uplink == "" {
+			return nil, fmt.Errorf("tap mode requires uplink and uplink-address")
+		}
+		if serviceNet.Contains(net.ParseIP(cfg.UplinkAddress)) || clusterNet.Contains(net.ParseIP(cfg.UplinkAddress)) {
+			return nil, fmt.Errorf("uplink address overlaps pod or Service CIDR")
+		}
+		if _, err := net.ParseMAC(cfg.BubbleMAC); err != nil {
+			return nil, fmt.Errorf("invalid bubble-mac: %w", err)
+		}
+		if cfg.BubbleMAC == cfg.GatewayMAC {
+			return nil, fmt.Errorf("bubble-mac must differ from gateway-mac")
+		}
+	}
 
 	if cfg.MTU <= 0 {
 		if envMTU := os.Getenv("PLAID_MTU"); envMTU != "" {
@@ -171,6 +227,12 @@ func NewPlaidDaemon(cfg Config) (*PlaidDaemon, error) {
 		gwIP[3]++
 	}
 	cfg.GatewayIP = gwIP.String()
+	if cfg.GatewayMode == "tap" {
+		expected := net.IPv4(nodeNet.IP[0], nodeNet.IP[1], nodeNet.IP[2], 1)
+		if !gwIP.Equal(expected) {
+			return nil, fmt.Errorf("tap gateway must be first usable node address %s", expected)
+		}
+	}
 
 	gwMAC, err := net.ParseMAC(cfg.GatewayMAC)
 	if err != nil {
@@ -180,12 +242,14 @@ func NewPlaidDaemon(cfg Config) (*PlaidDaemon, error) {
 	b := bridge.NewBridge(bridge.BridgeConfig{
 		GatewayIP:   gwIP,
 		GatewayMAC:  gwMAC,
+		GatewayMode: cfg.GatewayMode,
 		NodeCIDR:    nodeNet,
 		ClusterCIDR: clusterNet,
 		FDBTTL:      5 * time.Minute,
 	})
 
 	routes := vxlan.NewRouteTable()
+	b.SetRouteChecker(func(ip net.IP) bool { _, err := routes.Lookup(ip); return err == nil })
 	if cfg.Routes != "" {
 		for _, rStr := range strings.Split(cfg.Routes, ",") {
 			rStr = strings.TrimSpace(rStr)
@@ -222,7 +286,7 @@ func NewPlaidDaemon(cfg Config) (*PlaidDaemon, error) {
 	}, routes, b)
 
 	var slirpMgr *slirp.SlirpManager
-	if cfg.EnableSlirp {
+	if cfg.GatewayMode == "slirp" {
 		slirpMgr = slirp.NewSlirpManager(slirp.SlirpConfig{
 			BinaryPath:          cfg.SlirpBin,
 			SocketPath:          cfg.SlirpSocket,
@@ -244,6 +308,7 @@ func NewPlaidDaemon(cfg Config) (*PlaidDaemon, error) {
 		slirpMgr:     slirpMgr,
 		filterEngine: filterEngine,
 		k8sCtrl:      k8sCtrl,
+		healthErr:    make(chan error, 1),
 	}
 
 	// Connect bridge handlers
@@ -258,13 +323,37 @@ func NewPlaidDaemon(cfg Config) (*PlaidDaemon, error) {
 }
 
 func (d *PlaidDaemon) Start(ctx context.Context) error {
+	var startErr error
+	defer func() {
+		if startErr != nil {
+			d.Stop()
+		}
+	}()
 	// Initialize runtime dir, permissions, IPAM config, and binary
 	if err := initRuntimeDir(d.cfg.SocketPath, d.cfg.NodeCIDR, d.cfg.GatewayIP); err != nil {
+		startErr = err
 		return fmt.Errorf("failed to initialize runtime dir: %w", err)
+	}
+	if d.cfg.GatewayMode == "tap" {
+		_, nodeNet, _ := net.ParseCIDR(d.cfg.NodeCIDR)
+		_, clusterNet, _ := net.ParseCIDR(d.cfg.ClusterCIDR)
+		_, serviceNet, _ := net.ParseCIDR(d.cfg.ServiceCIDR)
+		mac, _ := net.ParseMAC(d.cfg.BubbleMAC)
+		var err error
+		d.attachment, err = gateway.Start(gateway.Config{Name: "plaid0", Uplink: d.cfg.Uplink, GuestAddress: net.ParseIP(d.cfg.UplinkAddress), GatewayIP: net.ParseIP(d.cfg.GatewayIP), GatewayMAC: mac, NodeCIDR: nodeNet, ClusterCIDR: clusterNet, ServiceCIDR: serviceNet, MTU: d.cfg.MTU})
+		if err != nil {
+			startErr = err
+			return fmt.Errorf("gateway setup: %w", err)
+		}
+		d.bubbleEP = tap.NewTapEndpoint("bubble", "plaid0", net.ParseIP(d.cfg.GatewayIP), mac, d.attachment.File)
+		d.bridge.SetBubbleEndpoint(d.bubbleEP)
+		go d.readBubble(ctx)
+		fmt.Printf("[plaidd] TAP gateway ready: %s/%s, MAC=%s, uplink=%s, guest=%s, cluster route=%s\n", d.cfg.GatewayIP, d.cfg.NodeCIDR, mac, d.cfg.Uplink, d.cfg.UplinkAddress, d.cfg.ClusterCIDR)
 	}
 
 	if d.overlay != nil {
 		if err := d.overlay.Start(ctx); err != nil {
+			startErr = err
 			return fmt.Errorf("failed to start overlay: %w", err)
 		}
 	}
@@ -278,6 +367,7 @@ func (d *PlaidDaemon) Start(ctx context.Context) error {
 	}
 
 	if err := d.apiServer.Start(ctx); err != nil {
+		startErr = err
 		return fmt.Errorf("failed to start API server: %w", err)
 	}
 
@@ -324,7 +414,33 @@ func (d *PlaidDaemon) Stop() {
 	if d.slirpMgr != nil {
 		_ = d.slirpMgr.Close()
 	}
+	if d.attachment != nil {
+		_ = d.attachment.Close()
+		d.attachment = nil
+	}
 }
+
+func (d *PlaidDaemon) readBubble(ctx context.Context) {
+	buf := make([]byte, 65535)
+	file := d.bubbleEP.File()
+	for {
+		n, err := file.Read(buf)
+		if err != nil {
+			if ctx.Err() == nil {
+				select {
+				case d.healthErr <- err:
+				default:
+				}
+			}
+			return
+		}
+		if n > 0 {
+			_ = d.bridge.ProcessFrame(d.bubbleEP, buf[:n])
+		}
+	}
+}
+
+func overlaps(a, b *net.IPNet) bool { return a.Contains(b.IP) || b.Contains(a.IP) }
 
 // API Server Callbacks
 
@@ -335,6 +451,11 @@ func (d *PlaidDaemon) HandleAddEndpoint(req *api.Request, tapFD int) error {
 
 	epFile := os.NewFile(uintptr(tapFD), req.PodName)
 	epIP := net.ParseIP(req.IP)
+	_, nodeNet, _ := net.ParseCIDR(d.cfg.NodeCIDR)
+	if epIP == nil || epIP.To4() == nil || !nodeNet.Contains(epIP) || epIP.Equal(net.ParseIP(d.cfg.GatewayIP)) || epIP.To4()[3] < 4 || epIP.To4()[3] > 254 {
+		_ = epFile.Close()
+		return fmt.Errorf("endpoint IP %q is outside the allocatable node range", req.IP)
+	}
 	epMAC, err := net.ParseMAC(req.MAC)
 	if err != nil {
 		_ = epFile.Close()
@@ -450,6 +571,13 @@ func (d *PlaidDaemon) HandleGetStatus() (*api.Response, error) {
 		NodeCIDR:       d.cfg.NodeCIDR,
 		ClusterCIDR:    d.cfg.ClusterCIDR,
 		GatewayIP:      d.cfg.GatewayIP,
+		GatewayMode:    d.cfg.GatewayMode,
+		GatewayReady:   d.cfg.GatewayMode != "tap" || d.attachment != nil,
+		GatewayMAC:     d.cfg.GatewayMAC,
+		BubbleMAC:      d.cfg.BubbleMAC,
+		Uplink:         d.cfg.Uplink,
+		UplinkAddress:  d.cfg.UplinkAddress,
+		Resolver:       d.cfg.Resolver,
 		MTU:            d.cfg.MTU,
 		Endpoints:      epList,
 	}, nil

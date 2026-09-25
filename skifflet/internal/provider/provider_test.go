@@ -178,6 +178,7 @@ func TestGetContainerLogs_OptionsAndErrors(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: podKey.Namespace,
 			Name:      podKey.Name,
+			UID:       "log-generation",
 		},
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{
@@ -186,7 +187,7 @@ func TestGetContainerLogs_OptionsAndErrors(t *testing.T) {
 		},
 	}
 
-	podDir := compute.Skiff.Pod(podKey)
+	podDir := compute.Skiff.PodWithUID(podKey, pod.GetUID())
 	_ = os.MkdirAll(podDir.LogDir(), 0755)
 	logFile := podDir.Container("app").LogsPath()
 	_ = os.WriteFile(logFile, []byte("line1\nline2\nline3\nline4\n"), 0644)

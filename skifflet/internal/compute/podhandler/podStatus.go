@@ -142,23 +142,36 @@ func UpdateStatusFromRuntime(pod *corev1.Pod) {
 				status.Phase = corev1.PodRunning
 				status.Reason = "Running"
 				status.Message = "at least one container is still running"
+				allReady := true
+				for _, containerStatus := range status.ContainerStatuses {
+					if !containerStatus.Ready {
+						allReady = false
+						break
+					}
+				}
+				conditionStatus := corev1.ConditionFalse
+				reason := "ContainersUnready"
+				message := "at least one container is not ready"
+				if allReady {
+					conditionStatus = corev1.ConditionTrue
+					reason = "ContainersReady"
+					message = "all containers are ready"
+				}
 
-				/*-- ContainersReady: all containers in the pod are ready. --*/
 				crdtools.SetPodStatusCondition(&pod.Status.Conditions, corev1.PodCondition{
 					Type:               corev1.ContainersReady,
-					Status:             corev1.ConditionTrue,
+					Status:             conditionStatus,
 					LastTransitionTime: metav1.Now(),
-					Reason:             "ContainersReady",
-					Message:            "all containers in the pod are ready.",
+					Reason:             reason,
+					Message:            message,
 				})
 
-				/*-- PodReady: the pod is able to service requests --*/
 				crdtools.SetPodStatusCondition(&pod.Status.Conditions, corev1.PodCondition{
 					Type:               corev1.PodReady,
-					Status:             corev1.ConditionTrue,
+					Status:             conditionStatus,
 					LastTransitionTime: metav1.Now(),
-					Reason:             "PodReady",
-					Message:            "the pod is able to service requests",
+					Reason:             reason,
+					Message:            message,
 				})
 			},
 		},

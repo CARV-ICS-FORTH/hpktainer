@@ -59,6 +59,13 @@ type Response struct {
 	NodeCIDR       string   `json:"node_cidr,omitempty"`
 	ClusterCIDR    string   `json:"cluster_cidr,omitempty"`
 	GatewayIP      string   `json:"gateway_ip,omitempty"`
+	GatewayMode    string   `json:"gateway_mode,omitempty"`
+	GatewayReady   bool     `json:"gateway_ready"`
+	GatewayMAC     string   `json:"gateway_mac,omitempty"`
+	BubbleMAC      string   `json:"bubble_mac,omitempty"`
+	Uplink         string   `json:"uplink,omitempty"`
+	UplinkAddress  string   `json:"uplink_address,omitempty"`
+	Resolver       string   `json:"resolver,omitempty"`
 	MTU            int      `json:"mtu,omitempty"`
 	Endpoints      []string `json:"endpoints,omitempty"`
 	FilterRules    []string `json:"filter_rules,omitempty"`
